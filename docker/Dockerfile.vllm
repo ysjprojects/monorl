@@ -1,0 +1,44 @@
+# syntax=docker/dockerfile:1.7
+# monorl on top of the official vLLM OpenAI image (CUDA, torch and vllm already installed).
+# Tag verified on Docker Hub: vllm/vllm-openai:v0.33.0 (linux/amd64 + linux/arm64).
+# Build from the repo root:
+#   docker build -f docker/Dockerfile.vllm -t monorl:vllm .
+# Run (single GPU):
+#   docker run --rm --gpus all --shm-size 10g -v ~/.monorl:/root/.monorl -v ~/.cache/huggingface:/root/.cache/huggingface \
+#       monorl:vllm train --config configs/recipes/grpo_gsm8k_qwen_vllm_1gpu.yaml
+ARG VLLM_VERSION=v0.33.0
+FROM vllm/vllm-openai:${VLLM_VERSION}
+
+ARG MONORL_EXTRAS=vllm,distributed,rewards
+ENV PYTHONUNBUFFERED=1 \
+    UV_LINK_MODE=copy \
+    MONORL_HOME=/root/.monorl \
+    MONORL_RECIPES_DIR=/app/configs/recipes \
+    MONORL_ENVS_SDK=/app/envs/sdk \
+    HF_HOME=/root/.cache/huggingface \
+    TOKENIZERS_PARALLELISM=false
+
+WORKDIR /app
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+COPY pyproject.toml README.md ./
+COPY src ./src
+COPY configs ./configs
+COPY envs/sdk ./envs/sdk
+
+# The image ships torch/vllm/transformers/ray built for its CUDA; freeze them as constraints so
+# installing monorl's extras never reinstalls or upgrades them. `uv` is preinstalled (system python).
+RUN --mount=type=cache,target=/root/.cache/uv \
+    python3 -m uv pip freeze --system \
+        | grep -E '^(torch|torchvision|torchaudio|vllm|transformers|tokenizers|ray|numpy|triton|xformers|flashinfer-python|xgrammar)==' \
+        > /tmp/constraints.txt \
+    && cat /tmp/constraints.txt \
+    && python3 -m uv pip install --system --constraint /tmp/constraints.txt -e ".[${MONORL_EXTRAS}]" \
+    && python3 -c "import vllm, torch, monorl; print('vllm', vllm.__version__, 'torch', torch.__version__)"
+
+VOLUME ["/root/.monorl", "/root/.cache/huggingface"]
+# 8000: `monorl serve`; 6379 / 8265 / 10001: Ray GCS, dashboard, client (ray-head role).
+EXPOSE 8000 6379 8265 10001
+
+# The base image's ENTRYPOINT is `vllm serve`; this image is driven by the monorl CLI instead.
+ENTRYPOINT ["monorl"]
+CMD ["doctor"]

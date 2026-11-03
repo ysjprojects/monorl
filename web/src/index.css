@@ -1,0 +1,36 @@
+@import "tailwindcss";
+
+@theme {
+  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+@layer base {
+  input[type="number"]::-webkit-inner-spin-button {
+    opacity: 0.4;
+  }
+  ::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: #334155;
+    border-radius: 4px;
+  }
+}
+
+@utility input {
+  @apply w-full rounded-md border border-slate-700 bg-slate-900 px-2.5 py-1.5 text-sm text-slate-100 outline-none placeholder:text-slate-500 focus:border-sky-500 disabled:opacity-50;
+}
+@utility btn {
+  @apply inline-flex items-center gap-1.5 rounded-md border border-slate-700 bg-slate-800 px-3 py-1.5 text-sm font-medium text-slate-100 hover:bg-slate-700 disabled:cursor-not-allowed disabled:opacity-50;
+}
+@utility btn-primary {
+  @apply border-sky-600 bg-sky-600 text-white hover:bg-sky-500;
+}
+@utility btn-danger {
+  @apply border-rose-700 bg-rose-700 text-white hover:bg-rose-600;
+}
+@utility card {
+  @apply rounded-lg border border-slate-800 bg-slate-900/60 p-4;
+}

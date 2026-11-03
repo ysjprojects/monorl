@@ -1,0 +1,56 @@
+# syntax=docker/dockerfile:1.7
+# MEP/1 example environment servers (Go + C++), built from envs/sdk and served over HTTP on 8080.
+# Build from the repo root (ENV_NAME picks the default server; override at run time with -e ENV_NAME=...):
+#   docker build -f docker/Dockerfile.envs --build-arg ENV_NAME=go-wordle -t monorl-env:wordle .
+#   docker run --rm -p 8080:8080 monorl-env:wordle
+#   curl -s localhost:8080/spec
+# Available ENV_NAME values: go-arith go-wordle go-gridworld cpp-arith cpp-number_guess
+ARG GO_VERSION=1.27
+
+# ---------------------------------------------------------------------------
+# go-build: static binaries for every envs/sdk/go/examples/* package.
+# ---------------------------------------------------------------------------
+FROM golang:${GO_VERSION}-bookworm AS go-build
+WORKDIR /src/envs/sdk/go
+COPY envs/sdk/go/ ./
+ENV CGO_ENABLED=0
+RUN set -eu; mkdir -p /out; \
+    for ex in examples/*; do \
+        go build -trimpath -ldflags='-s -w' -o "/out/go-$(basename "$ex")" "./$ex"; \
+    done; \
+    ls -l /out
+
+# ---------------------------------------------------------------------------
+# cpp-build: envs/sdk/cpp/examples/*.cpp with the SDK Makefile; libstdc++ linked statically so the
+# runtime image needs only glibc.
+# ---------------------------------------------------------------------------
+FROM debian:bookworm-slim AS cpp-build
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends clang make libc6-dev libstdc++-12-dev \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /src/envs/sdk/cpp
+COPY envs/sdk/cpp/ ./
+RUN make BIN=/out CXX=clang++ \
+        CXXFLAGS='-std=c++17 -O2 -pthread -Wall -Wextra -static-libstdc++ -static-libgcc' all \
+    && ls -l /out
+
+# ---------------------------------------------------------------------------
+# runtime: glibc + curl (healthcheck) only.
+# ---------------------------------------------------------------------------
+FROM debian:bookworm-slim AS runtime
+ARG ENV_NAME=go-wordle
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates curl \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd --uid 10001 --create-home --shell /usr/sbin/nologin mep
+COPY --from=go-build /out/ /opt/envs/bin/
+COPY --from=cpp-build /out/ /opt/envs/bin/
+COPY --chmod=755 docker/env-entrypoint.sh /usr/local/bin/env-entrypoint.sh
+
+ENV ENV_NAME=${ENV_NAME} \
+    ENV_ADDR=0.0.0.0:8080
+USER 10001
+EXPOSE 8080
+HEALTHCHECK --interval=10s --timeout=3s --start-period=3s --retries=3 \
+    CMD ["curl", "-fsS", "-o", "/dev/null", "http://127.0.0.1:8080/health"]
+ENTRYPOINT ["/usr/local/bin/env-entrypoint.sh"]

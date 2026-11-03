@@ -1,0 +1,43 @@
+# syntax=docker/dockerfile:1.7
+# monorl on top of the official SGLang image (CUDA, torch and sglang already installed in /opt/sglang).
+# Tag verified on Docker Hub: lmsysorg/sglang:v0.5.23 (linux/amd64 + linux/arm64).
+# Build from the repo root:
+#   docker build -f docker/Dockerfile.sglang -t monorl:sglang .
+# Run:
+#   docker run --rm --gpus all --shm-size 10g -v ~/.monorl:/root/.monorl -v ~/.cache/huggingface:/root/.cache/huggingface \
+#       monorl:sglang train --config configs/recipes/grpo_tool_calling_sglang.yaml
+ARG SGLANG_VERSION=v0.5.23
+FROM lmsysorg/sglang:${SGLANG_VERSION}
+
+ARG MONORL_EXTRAS=sglang,distributed,rewards
+# /opt/sglang is the image's venv (already first on PATH); uv lives in /usr/local/bin.
+ENV PYTHONUNBUFFERED=1 \
+    UV_LINK_MODE=copy \
+    VIRTUAL_ENV=/opt/sglang \
+    MONORL_HOME=/root/.monorl \
+    MONORL_RECIPES_DIR=/app/configs/recipes \
+    MONORL_ENVS_SDK=/app/envs/sdk \
+    HF_HOME=/root/.cache/huggingface \
+    TOKENIZERS_PARALLELISM=false
+
+WORKDIR /app
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+COPY pyproject.toml README.md ./
+COPY src ./src
+COPY configs ./configs
+COPY envs/sdk ./envs/sdk
+
+# Freeze the CUDA-built stack as constraints so monorl's extras never reinstall torch/sglang.
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip freeze --python /opt/sglang/bin/python \
+        | grep -E '^(torch|torchvision|torchaudio|sglang|sglang-kernel|sgl-kernel|transformers|tokenizers|ray|numpy|triton|flashinfer-python|xgrammar)==' \
+        > /tmp/constraints.txt \
+    && cat /tmp/constraints.txt \
+    && uv pip install --python /opt/sglang/bin/python --constraint /tmp/constraints.txt -e ".[${MONORL_EXTRAS}]" \
+    && python -c "import sglang, torch, monorl; print('sglang', sglang.__version__, 'torch', torch.__version__)"
+
+VOLUME ["/root/.monorl", "/root/.cache/huggingface"]
+EXPOSE 8000 6379 8265 10001
+
+ENTRYPOINT ["monorl"]
+CMD ["doctor"]

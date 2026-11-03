@@ -1,0 +1,13 @@
+# hadolint configuration for docker/Dockerfile.*
+ignored:
+  # Base images are pinned by explicit version tags passed through ARG (hadolint cannot resolve ARGs).
+  - DL3006
+  - DL3007
+  # apt/pip/uv package versions are governed by pyproject.toml and the upstream images, not pinned here.
+  - DL3008
+  - DL3013
+  - DL3042
+  # `uv`/`pnpm` are the package managers in use; pip's --no-cache-dir advice does not apply.
+  - DL3059
+  # DL3064 flags any ENV name containing "TOKEN"; ours is TOKENIZERS_PARALLELISM, not a secret.
+  - DL3064

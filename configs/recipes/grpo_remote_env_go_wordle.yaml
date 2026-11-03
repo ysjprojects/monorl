@@ -1,0 +1,42 @@
+# GRPO against a Go environment speaking MEP/1 over stdio: `envs/bin/go-wordle` (build it
+# with `make envs`; stdio is the default transport). The orchestrator spawns the binary,
+# drives up to 6 guesses per episode and uses the per-turn reward the env returns (no Python
+# reward needed). Runs on CPU with the tiny SmolLM2 policy; swap model/rollout for a real run.
+run_name: grpo-go-wordle
+model:
+  name_or_path: HuggingFaceTB/SmolLM2-135M-Instruct
+  dtype: float32
+data:
+  uri: hf://openai/gsm8k
+  hf_config_name: main
+  split: train
+  format: prompt_answer
+  prompt_field: question
+  answer_field: answer
+  limit: 64
+algorithm:
+  name: grpo
+  gamma: 0.99
+rollout:
+  backend: hf
+  group_size: 4
+  max_new_tokens: 16
+  device: cpu
+trainer:
+  backend: reference
+  prompts_per_step: 2
+  micro_batch_size: 2
+  max_steps: 30
+  precision: fp32
+  device: cpu
+  max_seq_len: 1024
+rewards: []
+env:
+  type: remote
+  max_turns: 6
+  params:
+    transport: stdio
+    command: ["envs/bin/go-wordle"]
+    cwd: .
+    parallel: 8
+    timeout_s: 60

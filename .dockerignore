@@ -1,0 +1,16 @@
+.git
+.venv
+.ruff_cache
+.pytest_cache
+.monorl
+runs
+third_party/*/
+web/node_modules
+web/dist
+envs/bin
+**/__pycache__
+**/*.pyc
+**/*.egg-info
+**/.DS_Store
+tests
+docs

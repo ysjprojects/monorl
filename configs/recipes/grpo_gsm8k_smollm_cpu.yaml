@@ -1,0 +1,51 @@
+# GRPO on GSM8K with SmolLM2-135M-Instruct, entirely on CPU (runs on a laptop in minutes).
+# Reference torch trainer + transformers rollout engine; exact-match reward on the final number.
+# GSM8K answers end with "#### <number>", so `last_number` extracts the same value from both
+# the reference and the completion.
+run_name: grpo-gsm8k-smollm-cpu
+seed: 42
+model:
+  name_or_path: HuggingFaceTB/SmolLM2-135M-Instruct
+  dtype: float32
+data:
+  uri: hf://openai/gsm8k
+  hf_config_name: main
+  split: train
+  format: prompt_answer
+  prompt_field: question
+  answer_field: answer
+  system_prompt: "Solve the problem step by step and finish with the final numeric answer."
+  max_prompt_tokens: 512
+  limit: 256
+algorithm:
+  name: grpo
+  kl_coef: 0.0
+  advantage_norm: group
+rollout:
+  backend: hf
+  group_size: 4
+  max_new_tokens: 128
+  temperature: 1.0
+  device: cpu
+trainer:
+  backend: reference
+  learning_rate: 2.0e-6
+  prompts_per_step: 2
+  micro_batch_size: 2
+  max_steps: 20
+  precision: fp32
+  save_every: 10
+  max_seq_len: 768
+  device: cpu
+rewards:
+  - type: exact_match
+    weight: 1.0
+    params:
+      extract: last_number
+env:
+  type: single_turn
+cluster:
+  mode: local
+logging:
+  run_root: ~/.monorl/runs
+  trajectories_per_step: 4

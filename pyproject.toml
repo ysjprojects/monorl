@@ -1,0 +1,86 @@
+[project]
+name = "monorl"
+version = "0.1.0"
+description = "Unified RL harness: one orchestrator, pluggable rollout/trainer/env/reward backends bridged to vLLM, SGLang, verl, TRL, NeMo-RL, Unsloth, OpenEnv and Hermes via versioned monkeypatches."
+readme = "README.md"
+requires-python = ">=3.11,<3.13"
+license = { text = "Apache-2.0" }
+dependencies = [
+    "torch>=2.4",
+    "transformers>=4.46",
+    "datasets>=3.0",
+    "huggingface_hub>=0.26",
+    "peft>=0.13",
+    "accelerate>=1.0",
+    "pydantic>=2.8",
+    "pyyaml>=6",
+    "typer>=0.12",
+    "rich>=13",
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "sse-starlette>=2.1",
+    "httpx>=0.27",
+    "fsspec>=2024.6",
+    "s3fs>=2024.6",
+    "pyarrow>=17",
+    "packaging>=24",
+    "numpy>=1.26",
+    "psutil>=6",
+]
+
+[project.optional-dependencies]
+trl = ["trl>=0.20"]
+distributed = ["ray[default]>=2.40"]
+vllm = ["vllm>=0.33"]
+sglang = ["sglang>=0.5.23"]
+verl = ["verl>=0.9.1"]
+unsloth = ["unsloth>=2026.10"]
+openenv = ["openenv-core>=0.3.0"]
+hermes = ["hermes-agent>=0.19"]
+rewards = ["math-verify>=0.7"]
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=0.24",
+    "pytest-timeout>=2.3",
+    "pytest-xdist>=3.6",
+    "moto[s3,server]>=5",
+    "ruff>=0.6",
+]
+
+[project.scripts]
+monorl = "monorl.cli.main:app"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/monorl"]
+
+[tool.uv]
+# GPU-only backends cannot coexist in one env; install one of them per environment.
+conflicts = [
+    [{ extra = "vllm" }, { extra = "sglang" }],
+    [{ extra = "vllm" }, { extra = "verl" }],
+    [{ extra = "vllm" }, { extra = "unsloth" }],
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+timeout = 600
+asyncio_mode = "auto"
+filterwarnings = ["ignore::DeprecationWarning"]
+markers = [
+    "slow: downloads or trains a real (tiny) model",
+    "network: requires internet",
+    "gpu: requires CUDA",
+]
+
+[tool.ruff]
+line-length = 110
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+ignore = ["E501"]

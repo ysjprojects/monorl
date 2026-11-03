@@ -1,0 +1,49 @@
+# Drive an OpenEnv server (Gym-style reset/step over HTTP, typically running in a container)
+# as a multi-turn monorl environment. Start the env first, e.g.
+#   docker run -p 8001:8000 <openenv-image>      or      openenv serve <env_module>
+# then point `env.params.url` at it (or use `env_class` for in-process / `image` for docker).
+# Observations are rendered to chat messages with `observation_template`; the env's per-step
+# reward is used directly and a length reward keeps answers short. One OpenEnv session per
+# episode; the orchestrator runs episodes concurrently.
+run_name: openenv-example
+model:
+  name_or_path: HuggingFaceTB/SmolLM2-135M-Instruct
+  dtype: float32
+data:
+  uri: hf://openai/gsm8k
+  hf_config_name: main
+  split: train
+  format: prompt_answer
+  prompt_field: question
+  answer_field: answer
+  limit: 64
+algorithm:
+  name: grpo
+  gamma: 0.99
+rollout:
+  backend: hf
+  group_size: 4
+  max_new_tokens: 64
+  device: cpu
+trainer:
+  backend: reference
+  prompts_per_step: 2
+  micro_batch_size: 2
+  max_steps: 30
+  precision: fp32
+  device: cpu
+rewards:
+  - type: length
+    weight: 0.1
+    params:
+      max_tokens: 64
+      penalty_per_token: 0.01
+env:
+  type: openenv
+  max_turns: 8
+  params:
+    url: http://127.0.0.1:8001
+    timeout_s: 60
+    action_mode: text
+    observation_template: "{output}"
+    invalid_action_penalty: 0.1

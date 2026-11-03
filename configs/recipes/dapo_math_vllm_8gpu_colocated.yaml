@@ -1,0 +1,59 @@
+# DAPO (clip-higher, dynamic sampling, token-level loss, overlong penalty) on a competition
+# math dataset with Qwen2.5-7B. 8 GPUs colocated: vLLM TP=2 x DP=4 replicas share the GPUs
+# with the trainer; vLLM sleeps during the optimizer step and receives weights via CUDA IPC.
+run_name: dapo-math-vllm-8gpu
+model:
+  name_or_path: Qwen/Qwen2.5-7B
+  dtype: bfloat16
+  attn_implementation: flash_attention_2
+data:
+  uri: hf://BytedTsinghua-SIA/DAPO-Math-17k
+  split: train
+  format: prompt_answer
+  prompt_field: prompt
+  answer_field: solution
+  max_prompt_tokens: 2048
+algorithm:
+  name: dapo
+  clip_eps: 0.2
+  clip_eps_high: 0.28
+  advantage_norm: group
+  loss_agg: token
+  dynamic_sampling: true
+  overlong_penalty: 1.0
+  kl_coef: 0.0
+rollout:
+  backend: vllm
+  group_size: 16
+  max_new_tokens: 8192
+  temperature: 1.0
+  tensor_parallel_size: 2
+  data_parallel_size: 4
+  gpu_memory_utilization: 0.55
+  max_model_len: 12288
+  enable_sleep_mode: true
+  async_steps_ahead: 1
+trainer:
+  backend: reference
+  learning_rate: 1.0e-6
+  prompts_per_step: 128
+  micro_batch_size: 4
+  max_steps: 500
+  precision: bf16
+  gradient_checkpointing: true
+  save_every: 25
+  max_seq_len: 12288
+rewards:
+  - type: math_verify
+    weight: 1.0
+env:
+  type: single_turn
+cluster:
+  mode: ray
+  ray_address: auto
+  num_nodes: 1
+  gpus_per_node: 8
+  placement: colocated
+  weight_sync: cuda_ipc
+logging:
+  wandb_project: monorl-dapo

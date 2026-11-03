@@ -1,0 +1,48 @@
+# syntax=docker/dockerfile:1.7
+# monorl on top of verl's published uv image (the one verl 0.9.1's own CI runs on).
+# Tag verified on Docker Hub: verlai/verl:uv.cu130 (multi-arch; CUDA 13.0 / torch 2.11, baked uv
+# cache for every backend, verl checked out at /workspace/verl, no venv materialised yet).
+# Pick the engine/trainer extras at build time (one inference engine + one trainer, see verl docs):
+#   docker build -f docker/Dockerfile.verl --build-arg INFER_BACKEND=vllm --build-arg TRAIN_BACKEND=fsdp -t monorl:verl .
+# Run:
+#   docker run --rm --gpus all --shm-size 10g -v ~/.monorl:/root/.monorl monorl:verl train --config configs/recipes/verl_grpo_gsm8k_8gpu.yaml
+ARG VERL_IMAGE=verlai/verl:uv.cu130
+FROM ${VERL_IMAGE}
+
+ARG INFER_BACKEND=vllm
+ARG TRAIN_BACKEND=fsdp
+ARG MONORL_EXTRAS=distributed,rewards
+ENV PYTHONUNBUFFERED=1 \
+    VERL_USE_UV=0 \
+    MONORL_HOME=/root/.monorl \
+    MONORL_RECIPES_DIR=/app/configs/recipes \
+    MONORL_ENVS_SDK=/app/envs/sdk \
+    HF_HOME=/root/.cache/huggingface \
+    TOKENIZERS_PARALLELISM=false
+
+# 1. Materialise verl's venv for the chosen backends from the baked uv cache (this is what
+#    `uv run --extra ...` would do lazily on first launch). /workspace/verl/.venv is already on PATH.
+WORKDIR /workspace/verl
+RUN uv sync --frozen --all-packages --extra "${INFER_BACKEND}" --extra "${TRAIN_BACKEND}" \
+    && python -c "import verl, torch; print('verl', verl.__version__, 'torch', torch.__version__)"
+
+# 2. Install monorl into that venv. verl itself comes from the workspace (so monorl's `[verl]`
+#    extra is not requested) and the locked torch / engine stack is frozen as constraints.
+WORKDIR /app
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+COPY pyproject.toml README.md ./
+COPY src ./src
+COPY configs ./configs
+COPY envs/sdk ./envs/sdk
+RUN uv pip freeze --python /workspace/verl/.venv/bin/python \
+        | grep -E '^(torch|torchvision|torchaudio|vllm|sglang|transformers|tokenizers|ray|numpy|triton|megatron-core|flash-attn|flashinfer-python)==' \
+        > /tmp/constraints.txt \
+    && cat /tmp/constraints.txt \
+    && uv pip install --python /workspace/verl/.venv/bin/python --constraint /tmp/constraints.txt -e ".[${MONORL_EXTRAS}]" \
+    && python -c "import verl, monorl; print('monorl + verl', verl.__version__)"
+
+VOLUME ["/root/.monorl", "/root/.cache/huggingface"]
+EXPOSE 8000 6379 8265 10001
+
+ENTRYPOINT ["monorl"]
+CMD ["doctor"]

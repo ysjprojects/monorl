@@ -1,0 +1,177 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  PYTHON_VERSION: "3.12"
+  GO_VERSION: "1.27"
+  NODE_VERSION: "24"
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+  TOKENIZERS_PARALLELISM: "false"
+  # Keep torch on CPU wheels in CI (no CUDA runners).
+  UV_INDEX: https://download.pytorch.org/whl/cpu
+  UV_INDEX_STRATEGY: unsafe-best-match
+
+jobs:
+  python:
+    name: python (lint + tests)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: astral-sh/setup-uv@v10
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          enable-cache: true
+          cache-dependency-glob: pyproject.toml
+
+      - name: Create venv and install monorl with extras
+        run: |
+          uv venv .venv --python "${PYTHON_VERSION}"
+          uv pip install --python .venv/bin/python -e ".[trl,distributed,dev,openenv,hermes,rewards]"
+          .venv/bin/python -c "import torch, transformers, trl, ray, monorl; print(torch.__version__, transformers.__version__, trl.__version__, ray.__version__)"
+
+      - name: Cache Hugging Face hub (tokenizers used by fixtures)
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/huggingface/hub
+          key: hf-hub-${{ runner.os }}-${{ hashFiles('tests/conftest.py') }}
+
+      - name: Pre-fetch fixture tokenizer
+        # tests/conftest.py::tiny_model_dir needs this tokenizer; HF_HUB_OFFLINE stays unset so the
+        # download happens here (and is cached) rather than in the middle of a test.
+        run: |
+          .venv/bin/python - <<'EOF'
+          from transformers import AutoTokenizer
+          AutoTokenizer.from_pretrained("HuggingFaceTB/SmolLM-135M-Instruct")
+          EOF
+
+      - name: ruff check
+        run: .venv/bin/python -m ruff check src tests scripts
+
+      - name: pytest
+        run: >
+          .venv/bin/python -m pytest tests -q -p no:cacheprovider --timeout 600
+          -m 'not slow and not network and not gpu'
+
+  go:
+    name: go (envs/sdk/go)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: envs/sdk/go
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+          # The module has no third-party deps, hence no go.sum; key the cache on go.mod.
+          cache-dependency-path: envs/sdk/go/go.mod
+      - name: go vet
+        run: go vet ./...
+      - name: go test
+        run: go test -race -count=1 ./...
+      - name: go build examples
+        run: make -C ../.. go
+
+  cpp:
+    name: cpp (envs/sdk/cpp)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install clang
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends clang make
+      - name: Build C++ examples
+        run: make -C envs cpp CXX=clang++
+      - name: Binaries
+        run: ls -l envs/bin
+
+  web:
+    name: web (vite + eslint)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+        with:
+          package_json_file: web/package.json
+          run_install: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+      - name: pnpm install
+        run: pnpm install --frozen-lockfile
+      - name: pnpm build
+        run: pnpm build
+      - name: pnpm lint
+        run: pnpm lint
+      - name: Upload web/dist
+        uses: actions/upload-artifact@v7
+        with:
+          name: web-dist
+          path: web/dist
+          retention-days: 7
+
+  envs-conformance:
+    name: envs conformance (Go + C++ via MEP/1)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    needs: [go, cpp]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+          cache-dependency-path: envs/sdk/go/go.mod
+      - name: Install clang
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends clang make
+      - uses: astral-sh/setup-uv@v10
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          enable-cache: true
+          cache-dependency-glob: pyproject.toml
+      - name: Install monorl (dev extra only)
+        run: |
+          uv venv .venv --python "${PYTHON_VERSION}"
+          uv pip install --python .venv/bin/python -e ".[dev]"
+      - name: Build Go + C++ example environments
+        run: make -C envs all CXX=clang++
+      - name: Conformance tests
+        run: .venv/bin/python -m pytest tests/envs_sdk -q -p no:cacheprovider --timeout 600
+
+  docker-lint:
+    name: hadolint (docker/)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: hadolint/hadolint-action@v3.5.0
+        with:
+          recursive: true
+          dockerfile: "docker/Dockerfile.*"
+          config: docker/.hadolint.yaml

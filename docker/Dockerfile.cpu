@@ -1,0 +1,80 @@
+# syntax=docker/dockerfile:1.7
+# monorl CPU image: web UI + API server, reference trainer, transformers rollout, TRL backend.
+# No CUDA. Build from the repo root:
+#   docker build -f docker/Dockerfile.cpu -t monorl:cpu .
+# Run:
+#   docker run --rm -p 8000:8000 -v ~/.monorl:/root/.monorl monorl:cpu
+ARG PYTHON_VERSION=3.12
+ARG NODE_VERSION=24
+ARG UV_VERSION=0.11.16
+
+# ---------------------------------------------------------------------------
+# web: Vite + React build of the UI (served as static files by `monorl serve`).
+# ---------------------------------------------------------------------------
+FROM node:${NODE_VERSION}-bookworm-slim AS web
+WORKDIR /src/web
+ENV COREPACK_ENABLE_DOWNLOAD_PROMPT=0
+RUN corepack enable && corepack prepare pnpm@10 --activate
+COPY web/package.json web/pnpm-lock.yaml ./
+RUN pnpm install --frozen-lockfile
+COPY web/ ./
+RUN pnpm build
+
+# ---------------------------------------------------------------------------
+# runtime: python 3.12 + monorl (editable install so REPO_ROOT-relative paths resolve to /app).
+# ---------------------------------------------------------------------------
+FROM python:${PYTHON_VERSION}-slim-bookworm AS runtime
+ARG UV_VERSION
+ARG MONORL_EXTRAS=trl,distributed,rewards,openenv,hermes
+COPY --from=ghcr.io/astral-sh/uv:${UV_VERSION} /uv /uvx /usr/local/bin/
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    UV_LINK_MODE=copy \
+    UV_COMPILE_BYTECODE=1 \
+    UV_PYTHON_DOWNLOADS=never \
+    UV_INDEX=https://download.pytorch.org/whl/cpu \
+    UV_INDEX_STRATEGY=unsafe-best-match \
+    VIRTUAL_ENV=/opt/venv \
+    PATH="/opt/venv/bin:${PATH}" \
+    MONORL_HOME=/root/.monorl \
+    MONORL_WEB_DIST=/app/web/dist \
+    MONORL_RECIPES_DIR=/app/configs/recipes \
+    MONORL_ENVS_BIN=/app/envs/bin \
+    MONORL_ENVS_SDK=/app/envs/sdk \
+    HF_HOME=/root/.cache/huggingface \
+    TOKENIZERS_PARALLELISM=false
+
+# git: hermes-agent / hf hub resolve some sources via git; curl: healthcheck + smoke tests.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates curl git \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+RUN uv venv "${VIRTUAL_ENV}" --python "python${PYTHON_VERSION}"
+
+# Dependency layer: only pyproject/README change invalidates it.
+COPY pyproject.toml README.md ./
+RUN --mount=type=cache,target=/root/.cache/uv \
+    mkdir -p src/monorl && touch src/monorl/__init__.py \
+    && uv pip install -e ".[${MONORL_EXTRAS}]" \
+    && rm -rf src
+
+# Source + recipes + env SDK sources (the UI lists them; binaries come from the envs image).
+COPY src ./src
+COPY configs ./configs
+COPY envs/Makefile ./envs/Makefile
+COPY envs/sdk ./envs/sdk
+COPY --from=web /src/web/dist ./web/dist
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install --no-deps -e . \
+    && python -c "import monorl, torch; print('monorl ok, torch', torch.__version__)"
+
+VOLUME ["/root/.monorl", "/root/.cache/huggingface"]
+EXPOSE 8000
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+    CMD ["curl", "-fsS", "-o", "/dev/null", "http://127.0.0.1:8000/api/system"]
+
+ENTRYPOINT ["monorl", "serve", "--host", "0.0.0.0", "--no-open"]
+CMD ["--port", "8000"]

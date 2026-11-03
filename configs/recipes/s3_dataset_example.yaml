@@ -1,0 +1,38 @@
+# Train from a JSONL file on S3 (or any S3-compatible store). Credentials are read from the
+# environment, never from the config:
+#   AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY / AWS_SESSION_TOKEN   (or an instance profile)
+#   AWS_DEFAULT_REGION   e.g. us-east-1
+#   AWS_ENDPOINT_URL     for MinIO / Cloudflare R2 / Ceph (e.g. http://localhost:9000)
+#   AWS_PROFILE          to pick a profile from ~/.aws/credentials
+# Each line: {"prompt": "...", "answer": "..."} - the field names below map the columns.
+run_name: s3-dataset-example
+model:
+  name_or_path: HuggingFaceTB/SmolLM2-135M-Instruct
+  dtype: float32
+data:
+  uri: s3://my-bucket/data/train.jsonl
+  format: prompt_answer
+  prompt_field: prompt
+  answer_field: answer
+  max_prompt_tokens: 512
+  streaming: false
+algorithm:
+  name: grpo
+rollout:
+  backend: hf
+  group_size: 4
+  max_new_tokens: 128
+  device: cpu
+trainer:
+  backend: reference
+  prompts_per_step: 4
+  micro_batch_size: 4
+  max_steps: 50
+  precision: fp32
+  device: cpu
+rewards:
+  - type: exact_match
+    params:
+      extract: none
+env:
+  type: single_turn

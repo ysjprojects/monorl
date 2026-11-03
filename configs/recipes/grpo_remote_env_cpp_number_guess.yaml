@@ -1,0 +1,42 @@
+# GRPO against a C++ environment speaking MEP/1 over http: start
+#   envs/bin/cpp-number_guess --transport http --addr 127.0.0.1:8081
+# (built by `make envs`) and point the remote env at it. The env hides a
+# number, answers "higher"/"lower" each turn and rewards a correct guess; the orchestrator runs
+# `parallel` episodes concurrently against the same server.
+run_name: grpo-cpp-number-guess
+model:
+  name_or_path: HuggingFaceTB/SmolLM2-135M-Instruct
+  dtype: float32
+data:
+  uri: hf://openai/gsm8k
+  hf_config_name: main
+  split: train
+  format: prompt_answer
+  prompt_field: question
+  answer_field: answer
+  limit: 64
+algorithm:
+  name: grpo
+  gamma: 0.95
+rollout:
+  backend: hf
+  group_size: 4
+  max_new_tokens: 8
+  device: cpu
+trainer:
+  backend: reference
+  prompts_per_step: 2
+  micro_batch_size: 2
+  max_steps: 30
+  precision: fp32
+  device: cpu
+  max_seq_len: 1024
+rewards: []
+env:
+  type: remote
+  max_turns: 8
+  params:
+    transport: http
+    url: http://127.0.0.1:8081
+    parallel: 8
+    timeout_s: 60

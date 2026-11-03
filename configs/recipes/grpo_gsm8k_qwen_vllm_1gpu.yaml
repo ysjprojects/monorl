@@ -1,0 +1,56 @@
+# GRPO on GSM8K with Qwen2.5-1.5B-Instruct on a single GPU: vLLM generates (sleep mode frees
+# memory while training), the reference trainer updates LoRA adapters, weights are synced
+# in-process after every step.
+run_name: grpo-gsm8k-qwen-vllm-1gpu
+model:
+  name_or_path: Qwen/Qwen2.5-1.5B-Instruct
+  dtype: bfloat16
+  lora:
+    enabled: true
+    r: 32
+    alpha: 64
+data:
+  uri: hf://openai/gsm8k
+  hf_config_name: main
+  split: train
+  format: prompt_answer
+  prompt_field: question
+  answer_field: answer
+  system_prompt: "Solve the problem step by step and finish with the final numeric answer."
+  max_prompt_tokens: 512
+algorithm:
+  name: grpo
+  kl_coef: 0.01
+  kl_estimator: k3
+rollout:
+  backend: vllm
+  group_size: 8
+  max_new_tokens: 512
+  temperature: 1.0
+  gpu_memory_utilization: 0.5
+  enable_sleep_mode: true
+trainer:
+  backend: reference
+  learning_rate: 1.0e-5
+  prompts_per_step: 16
+  micro_batch_size: 8
+  max_steps: 300
+  precision: bf16
+  gradient_checkpointing: true
+  save_every: 50
+  max_seq_len: 1024
+rewards:
+  - type: exact_match
+    params:
+      extract: last_number
+  - type: format
+    weight: 0.1
+    params:
+      patterns: ["\\d"]
+env:
+  type: single_turn
+cluster:
+  mode: local
+  gpus_per_node: 1
+  placement: colocated
+  weight_sync: inprocess

@@ -1,0 +1,61 @@
+# Multi-turn tool-calling GRPO with SGLang as the rollout engine: the policy may call the
+# built-in `calculator` and `python_exec` tools across up to 6 turns; RadixAttention prefix
+# caching makes the repeated shared conversation prefix cheap. Correctness is scored on the
+# final assistant turn; a format reward encourages the <tool_call> syntax.
+run_name: grpo-tool-calling-sglang
+model:
+  name_or_path: Qwen/Qwen2.5-7B-Instruct
+  dtype: bfloat16
+data:
+  uri: hf://openai/gsm8k
+  hf_config_name: main
+  split: train
+  format: prompt_answer
+  prompt_field: question
+  answer_field: answer
+  max_prompt_tokens: 1024
+algorithm:
+  name: grpo
+  kl_coef: 0.001
+  gamma: 1.0
+rollout:
+  backend: sglang
+  group_size: 8
+  max_new_tokens: 1024
+  temperature: 0.9
+  tensor_parallel_size: 2
+  gpu_memory_utilization: 0.5
+  stop: ["</tool_call>"]
+trainer:
+  backend: reference
+  learning_rate: 1.0e-6
+  prompts_per_step: 32
+  micro_batch_size: 4
+  max_steps: 400
+  precision: bf16
+  gradient_checkpointing: true
+  max_seq_len: 6144
+rewards:
+  - type: exact_match
+    weight: 1.0
+    params:
+      extract: last_number
+      scope: last
+  - type: format
+    weight: 0.2
+    params:
+      patterns: ["<tool_call>.*</tool_call>"]
+      require_all: false
+env:
+  type: tool_calling
+  max_turns: 6
+  params:
+    tools: [calculator, python_exec]
+    invalid_call_penalty: 0.1
+cluster:
+  mode: local
+  gpus_per_node: 4
+  placement: disaggregated
+  rollout_gpus: 2
+  trainer_gpus: 2
+  weight_sync: broadcast

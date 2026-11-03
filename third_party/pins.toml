@@ -1,0 +1,78 @@
+# Upstream framework pins. Every adapter under src/monorl/adapters/<name> is written and
+# version-gated against exactly these releases; `scripts/vendor.py --fetch <name>` clones the
+# pinned commit into third_party/<name> (gitignored) for reading/debugging upstream code.
+#
+# Fields: pypi (distribution name), version (PyPI release), git, tag, commit (resolved from the
+# tag at pin time), adapter (monorl module), notes.
+
+[vllm]
+pypi = "vllm"
+version = "0.33.0"
+git = "https://github.com/vllm-project/vllm"
+tag = "v0.33.0"
+commit = "4ba787ec9959e566d3b587a796dff07673324da5"
+adapter = "monorl.adapters.vllm"
+notes = "LLM / AsyncLLMEngine, sleep(level)/wake_up, collective_rpc worker extension for weight updates."
+
+[sglang]
+pypi = "sglang"
+version = "0.5.23"
+git = "https://github.com/sgl-project/sglang"
+tag = "v0.5.23"
+commit = "297e54fd105e974cdf401e5b4d20253a22c16f90"
+adapter = "monorl.adapters.sglang"
+notes = "Engine.update_weights_from_tensor, release/resume_memory_occupation, RadixAttention prefix cache."
+
+[verl]
+pypi = "verl"
+version = "0.9.1"
+git = "https://github.com/verl-project/verl"
+tag = "v0.9.1"
+commit = "1876b06d0a3e4e71e06230be10af14492ca8a75b"
+adapter = "monorl.adapters.verl"
+notes = "HybridFlow single-controller; RunConfig compiled to the Hydra tree consumed by verl.trainer.main_ppo."
+
+[trl]
+pypi = "trl"
+version = "1.17.1"
+git = "https://github.com/huggingface/trl"
+tag = "v1.17.1"
+commit = "44809ba3f3a136f3d62859ee981fee2506bce5c9"
+adapter = "monorl.adapters.trl"
+notes = "GRPOTrainer / GRPOConfig; runnable on CPU in this repo's dev environment."
+
+[nemo_rl]
+pypi = "nemo-rl"
+version = "0.7.0"
+git = "https://github.com/NVIDIA-NeMo/RL"
+tag = "v0.7.0"
+commit = "81aa43dda4765b0429cf31dab44441e4e4383911"
+adapter = "monorl.adapters.nemo_rl"
+notes = "Not published on PyPI (the 'nemo-rl' name there is a 0.0.0 placeholder); install from git at the tag."
+
+[unsloth]
+pypi = "unsloth"
+version = "2026.10.11"
+git = "https://github.com/unslothai/unsloth"
+tag = "v0.1.913-beta"
+commit = "fe982adaf29a5260d45bfff2ef1ff7323c2e77d6"
+adapter = "monorl.adapters.unsloth"
+notes = "GitHub tags use a beta counter; v0.1.913-beta is the release that published 2026.10.11 to PyPI. CUDA only. Pin conflict: 2026.10.11 declares trl<=1.15.0 and transformers<=5.17.0 while monorl's environment uses trl 1.17.1 / transformers 5.22, so Unsloth needs its own venv; `python -m monorl.adapters.unsloth.preload monorl.cli train ...` imports unsloth before trl/transformers and `reconcile_trl_patches()` re-applies monorl's trl patches after Unsloth's."
+
+[openenv]
+pypi = "openenv-core"
+version = "0.3.0"
+git = "https://github.com/openenv/OpenEnv"
+tag = "v0.3.0"
+commit = "83711aac1b35a77aef0d3c22ac824691fa539132"
+adapter = "monorl.adapters.openenv"
+notes = "Gym-style reset/step/state HTTP envs; repository moved from meta-pytorch/OpenEnv."
+
+[hermes-agent]
+pypi = "hermes-agent"
+version = "0.19.0"
+git = "https://github.com/NousResearch/hermes-agent"
+tag = "v2026.7.20"
+commit = "3ef6bbd201263d354fd83ec55b3c306ded2eb72a"
+adapter = "monorl.adapters.hermes"
+notes = "Calendar-versioned tags; v2026.7.20 is 'Hermes Agent v0.19.0'."

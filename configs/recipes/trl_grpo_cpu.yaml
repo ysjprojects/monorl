@@ -1,0 +1,43 @@
+# TRL pipeline backend (GRPOTrainer) on CPU with SmolLM2-135M: monorl data and rewards are
+# converted to a HF dataset + TRL reward functions, and GRPOTrainer is patched to report into
+# the monorl run directory. The simplest way to compare against upstream TRL behaviour.
+run_name: trl-grpo-cpu
+model:
+  name_or_path: HuggingFaceTB/SmolLM2-135M-Instruct
+  dtype: float32
+data:
+  uri: hf://openai/gsm8k
+  hf_config_name: main
+  split: train
+  format: prompt_answer
+  prompt_field: question
+  answer_field: answer
+  max_prompt_tokens: 512
+  limit: 128
+algorithm:
+  name: grpo
+  kl_coef: 0.04
+rollout:
+  backend: hf
+  group_size: 4
+  max_new_tokens: 96
+  temperature: 1.0
+  device: cpu
+trainer:
+  backend: trl
+  learning_rate: 5.0e-6
+  prompts_per_step: 2
+  micro_batch_size: 4
+  max_steps: 10
+  precision: fp32
+  save_every: 5
+  device: cpu
+  extra:
+    logging_steps: 1
+    report_to: none
+rewards:
+  - type: exact_match
+    params:
+      extract: last_number
+env:
+  type: single_turn

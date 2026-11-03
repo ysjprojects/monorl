@@ -1,0 +1,52 @@
+# Run a Hermes Agent tool-using loop as a multi-turn environment: each policy turn is produced
+# by monorl's rollout engine, Hermes executes the tool calls (terminal, file tools, skills) and
+# feeds results back; the episode ends when the agent answers. Rewards score the final answer.
+run_name: hermes-agent-example
+model:
+  name_or_path: Qwen/Qwen2.5-7B-Instruct
+  dtype: bfloat16
+data:
+  uri: hf://openai/gsm8k
+  hf_config_name: main
+  split: train
+  format: prompt_answer
+  prompt_field: question
+  answer_field: answer
+  max_prompt_tokens: 1024
+algorithm:
+  name: grpo
+  kl_coef: 0.001
+rollout:
+  backend: vllm
+  group_size: 8
+  max_new_tokens: 1024
+  temperature: 0.8
+  gpu_memory_utilization: 0.5
+trainer:
+  backend: reference
+  learning_rate: 1.0e-6
+  prompts_per_step: 16
+  micro_batch_size: 4
+  max_steps: 200
+  precision: bf16
+  gradient_checkpointing: true
+  max_seq_len: 8192
+rewards:
+  - type: exact_match
+    params:
+      extract: last_number
+      scope: last
+env:
+  type: hermes
+  max_turns: 10
+  params:
+    tools: [terminal, read_file, write_file]
+    skills: []
+    sandbox: {backend: local}
+    max_calls_per_turn: 8
+    invalid_call_penalty: 0.1
+    hermes_system_prompt: true
+cluster:
+  mode: local
+  gpus_per_node: 2
+  placement: colocated

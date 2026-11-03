@@ -1,0 +1,90 @@
+# monorl local stack.
+#   docker compose up --build                 # UI on http://localhost:8000 + a fleet of 4 wordle env servers
+#   docker compose up --scale env-wordle=8    # grow the fleet
+#   docker compose --profile gpu up ray-head  # Ray head node on the vLLM image (needs the NVIDIA runtime)
+#
+# The UI container reaches the fleet at http://env-wordle:8080 (Docker DNS round-robins the replicas):
+#   env: {type: remote, params: {transport: http, url: "http://env-wordle:8080", parallel: 16}}
+# From the host the replicas are on localhost:8081-8084.
+name: monorl
+
+x-aws-env: &aws-env
+  AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+  AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+  AWS_SESSION_TOKEN: ${AWS_SESSION_TOKEN:-}
+  AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION:-}
+  AWS_REGION: ${AWS_REGION:-}
+  AWS_PROFILE: ${AWS_PROFILE:-}
+  AWS_ENDPOINT_URL: ${AWS_ENDPOINT_URL:-}
+
+services:
+  ui:
+    image: monorl:cpu
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.cpu
+    ports:
+      - "8000:8000"
+    environment:
+      <<: *aws-env
+      HF_TOKEN: ${HF_TOKEN:-}
+    volumes:
+      - ${MONORL_HOME:-~/.monorl}:/root/.monorl
+      - ${HF_HOME:-~/.cache/huggingface}:/root/.cache/huggingface
+    depends_on:
+      env-wordle:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # Parallel environment fleet: N identical MEP/1 servers behind one DNS name.
+  env-wordle:
+    image: monorl-env:wordle
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.envs
+      args:
+        ENV_NAME: go-wordle
+    environment:
+      ENV_NAME: go-wordle
+    deploy:
+      replicas: 4
+    ports:
+      - "8081-8084:8080"
+    restart: unless-stopped
+
+  # Ray head for GPU clusters. Workers join with:
+  #   ray start --address=<head-ip>:6379
+  # and `monorl train` runs with cluster.mode=ray, cluster.ray_address=ray://ray-head:10001.
+  ray-head:
+    profiles: [gpu]
+    image: monorl:vllm
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.vllm
+    entrypoint: ["ray"]
+    command:
+      - start
+      - --head
+      - --port=6379
+      - --dashboard-host=0.0.0.0
+      - --dashboard-port=8265
+      - --ray-client-server-port=10001
+      - --block
+    ports:
+      - "6379:6379"
+      - "8265:8265"
+      - "10001:10001"
+    shm_size: 10g
+    environment:
+      <<: *aws-env
+      HF_TOKEN: ${HF_TOKEN:-}
+    volumes:
+      - ${MONORL_HOME:-~/.monorl}:/root/.monorl
+      - ${HF_HOME:-~/.cache/huggingface}:/root/.cache/huggingface
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

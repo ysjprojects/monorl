@@ -1,0 +1,56 @@
+# verl pipeline backend: the RunConfig is compiled into verl's Hydra tree (FSDP actor, vLLM
+# rollout, GRPO advantage) and `verl.trainer.main_ppo` is launched on a Ray cluster with 8 GPUs.
+# monorl's data source and reward functions are injected through the verl adapter patches.
+run_name: verl-grpo-gsm8k-8gpu
+model:
+  name_or_path: Qwen/Qwen2.5-3B-Instruct
+  dtype: bfloat16
+data:
+  uri: hf://openai/gsm8k
+  hf_config_name: main
+  split: train
+  format: prompt_answer
+  prompt_field: question
+  answer_field: answer
+  eval_uri: hf://openai/gsm8k
+  eval_split: test
+  max_prompt_tokens: 1024
+algorithm:
+  name: grpo
+  kl_coef: 0.001
+  kl_estimator: k3
+  advantage_norm: group
+rollout:
+  backend: vllm
+  group_size: 8
+  max_new_tokens: 1024
+  temperature: 1.0
+  tensor_parallel_size: 2
+  gpu_memory_utilization: 0.6
+trainer:
+  backend: verl
+  learning_rate: 1.0e-6
+  prompts_per_step: 256
+  micro_batch_size: 8
+  max_steps: 200
+  precision: bf16
+  gradient_checkpointing: true
+  save_every: 20
+  eval_every: 20
+  max_seq_len: 2048
+  extra:
+    actor_rollout_ref.actor.strategy: fsdp
+    actor_rollout_ref.actor.ulysses_sequence_parallel_size: 1
+    trainer.val_before_train: false
+rewards:
+  - type: exact_match
+    params:
+      extract: last_number
+env:
+  type: single_turn
+cluster:
+  mode: ray
+  ray_address: auto
+  num_nodes: 1
+  gpus_per_node: 8
+  placement: colocated
