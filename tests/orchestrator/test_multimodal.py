@@ -49,10 +49,14 @@ def _trajectory(processor: Any, chat: list[dict], answers: list[str], *, group_i
         if k < len(answers) - 1:
             messages.append({"role": "user", "content": f"again{k}"})
     messages.append({"role": "user", "content": "env epilogue after the final step"})
-    return Trajectory(sample=Sample(id="s", messages=chat), group_id=group_id, messages=messages, turns=turns, reward=1.0)
+    return Trajectory(
+        sample=Sample(id="s", messages=chat), group_id=group_id, messages=messages, turns=turns, reward=1.0
+    )
 
 
-def test_final_prompt_messages_excludes_trailing_env_messages(processor: Any, images: dict[str, Path]) -> None:
+def test_final_prompt_messages_excludes_trailing_env_messages(
+    processor: Any, images: dict[str, Path]
+) -> None:
     traj = _trajectory(processor, image_chat(images["red"]), ["Red.", "Yes."])
     prompt = final_prompt_messages(traj)
     assert [m["role"] for m in prompt] == ["user", "assistant", "user"]
@@ -64,10 +68,16 @@ def test_build_train_batch_masks_exactly_the_completion_span(processor: Any, ima
     tok = processor.tokenizer
     single = _trajectory(processor, image_chat(images["blue"]), ["Blue."], group_id="a")
     multi = _trajectory(processor, image_chat(images["red"]), ["Red.", "Yes."], group_id="b")
-    batch, stats = build_train_batch([single, multi], [1.0, -1.0], pad_token_id=tok.pad_token_id, max_seq_len=256, processor=processor)
+    batch, stats = build_train_batch(
+        [single, multi], [1.0, -1.0], pad_token_id=tok.pad_token_id, max_seq_len=256, processor=processor
+    )
 
     assert stats["tokens/prefix_mismatch"] == 0
-    image_id = int(processor.image_token_id) if hasattr(processor, "image_token_id") else tok.convert_tokens_to_ids("<|image_pad|>")
+    image_id = (
+        int(processor.image_token_id)
+        if hasattr(processor, "image_token_id")
+        else tok.convert_tokens_to_ids("<|image_pad|>")
+    )
     for b, traj in enumerate((single, multi)):
         last = traj.turns[-1]
         seq = list(last.prompt_token_ids) + list(last.completion.token_ids)
@@ -77,7 +87,9 @@ def test_build_train_batch_masks_exactly_the_completion_span(processor: Any, ima
         expected_mask = [0] * n
         for turn in traj.turns:
             start = len(turn.prompt_token_ids)
-            expected_mask[start : start + len(turn.completion.token_ids)] = [1] * len(turn.completion.token_ids)
+            expected_mask[start : start + len(turn.completion.token_ids)] = [1] * len(
+                turn.completion.token_ids
+            )
         assert batch.response_mask[b].tolist() == expected_mask + [0] * (batch.input_ids.shape[1] - n)
         # placeholder tokens are prompt positions, never loss positions
         assert torch.all(batch.response_mask[b][batch.input_ids[b] == image_id] == 0)
@@ -90,7 +102,9 @@ def test_build_train_batch_masks_exactly_the_completion_span(processor: Any, ima
     assert batch.position_ids is None
     per_seq = batch.extra["per_sequence"]
     assert per_seq[0]["pixel_values"].shape[0] == 32 and per_seq[1]["pixel_values"].shape[0] == 16
-    assert per_seq[0]["image_grid_thw"].tolist() == [[1, 4, 8]] and per_seq[1]["image_grid_thw"].tolist() == [[1, 4, 4]]
+    assert per_seq[0]["image_grid_thw"].tolist() == [[1, 4, 8]] and per_seq[1]["image_grid_thw"].tolist() == [
+        [1, 4, 4]
+    ]
     mm = batch.extra["mm_token_type_ids"]
     assert mm.shape == batch.input_ids.shape
     assert torch.equal(mm == 1, batch.input_ids == image_id)
@@ -99,26 +113,44 @@ def test_build_train_batch_masks_exactly_the_completion_span(processor: Any, ima
 
 def test_build_train_batch_without_processor_is_text_only(processor: Any, images: dict[str, Path]) -> None:
     traj = _trajectory(processor, image_chat(images["red"]), ["Red."])
-    batch, _ = build_train_batch([traj], [1.0], pad_token_id=processor.tokenizer.pad_token_id, max_seq_len=256)
+    batch, _ = build_train_batch(
+        [traj], [1.0], pad_token_id=processor.tokenizer.pad_token_id, max_seq_len=256
+    )
     assert batch.extra == {}
     assert batch.position_ids is not None
     text_traj = _trajectory(processor, [{"role": "user", "content": "no image"}], ["ok"])
-    batch, _ = build_train_batch([text_traj], [1.0], pad_token_id=processor.tokenizer.pad_token_id, max_seq_len=256, processor=processor)
+    batch, _ = build_train_batch(
+        [text_traj],
+        [1.0],
+        pad_token_id=processor.tokenizer.pad_token_id,
+        max_seq_len=256,
+        processor=processor,
+    )
     assert batch.extra == {} and batch.position_ids is not None
     assert encode_trajectory_media(text_traj, processor) is None
 
 
 def test_build_train_batch_rejects_misaligned_prompt_ids(processor: Any, images: dict[str, Path]) -> None:
     traj = _trajectory(processor, image_chat(images["red"]), ["Red."])
-    traj.turns[-1].prompt_token_ids = traj.turns[-1].prompt_token_ids[1:]  # engine conditioned on something else
+    traj.turns[-1].prompt_token_ids = traj.turns[-1].prompt_token_ids[
+        1:
+    ]  # engine conditioned on something else
     with pytest.raises(ValueError, match="differs from the engine"):
-        build_train_batch([traj], [1.0], pad_token_id=processor.tokenizer.pad_token_id, max_seq_len=256, processor=processor)
+        build_train_batch(
+            [traj], [1.0], pad_token_id=processor.tokenizer.pad_token_id, max_seq_len=256, processor=processor
+        )
 
 
 def test_truncation_clips_token_aligned_extra(processor: Any, images: dict[str, Path]) -> None:
     traj = _trajectory(processor, image_chat(images["red"]), ["Red."])
     prompt_len = len(traj.turns[0].prompt_token_ids)
-    batch, stats = build_train_batch([traj], [1.0], pad_token_id=processor.tokenizer.pad_token_id, max_seq_len=prompt_len - 2, processor=processor)
+    batch, stats = build_train_batch(
+        [traj],
+        [1.0],
+        pad_token_id=processor.tokenizer.pad_token_id,
+        max_seq_len=prompt_len - 2,
+        processor=processor,
+    )
     assert stats["tokens/truncated"] == 1
     assert batch.input_ids.shape[1] == prompt_len - 2
     assert batch.extra["mm_token_type_ids"].shape == batch.input_ids.shape
@@ -143,13 +175,20 @@ class _RecordingEngine:
 def _image_sample() -> Sample:
     return Sample(
         id="img",
-        messages=[{"role": "user", "content": [{"type": "image", "image": "/tmp/x.png"}, {"type": "text", "text": "abc"}]}],
+        messages=[
+            {
+                "role": "user",
+                "content": [{"type": "image", "image": "/tmp/x.png"}, {"type": "text", "text": "abc"}],
+            }
+        ],
         reference="ABC",
     )
 
 
 def test_multimodal_episode_sends_chat_every_turn(make_config: Any) -> None:
-    cfg = make_config(env={"type": "fake_multi", "max_turns": 3}, rollout={"extra": {"fake_mode": "always_right"}})
+    cfg = make_config(
+        env={"type": "fake_multi", "max_turns": 3}, rollout={"extra": {"fake_mode": "always_right"}}
+    )
     engine = _RecordingEngine(fakes.FakeEngine(cfg))
     traj = run_episode(
         EpisodeSpec(sample=_image_sample(), group_id="g", engine=engine),
@@ -164,10 +203,16 @@ def test_multimodal_episode_sends_chat_every_turn(make_config: Any) -> None:
 
 
 def test_text_episode_still_sends_ids_after_turn_zero(make_config: Any) -> None:
-    cfg = make_config(env={"type": "fake_multi", "max_turns": 2}, rollout={"extra": {"fake_mode": "always_right"}})
+    cfg = make_config(
+        env={"type": "fake_multi", "max_turns": 2}, rollout={"extra": {"fake_mode": "always_right"}}
+    )
     engine = _RecordingEngine(fakes.FakeEngine(cfg))
     run_episode(
-        EpisodeSpec(sample=Sample(id="t", messages=[{"role": "user", "content": "abc"}], reference="ABC"), group_id="g", engine=engine),
+        EpisodeSpec(
+            sample=Sample(id="t", messages=[{"role": "user", "content": "abc"}], reference="ABC"),
+            group_id="g",
+            engine=engine,
+        ),
         env_factory=lambda: fakes.FakeMultiTurnEnv(cfg),
         tokenizer=engine.tokenizer,
         params=SamplingParams(n=1),

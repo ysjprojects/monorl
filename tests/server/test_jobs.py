@@ -49,7 +49,12 @@ def test_create_invalid_config_is_422(client: TestClient, config_dict: dict[str,
 
 
 def test_full_lifecycle(
-    client: TestClient, config_dict: dict[str, Any], tmp_path: Path, home: Path, fake_trainer_path: Path, terminal
+    client: TestClient,
+    config_dict: dict[str, Any],
+    tmp_path: Path,
+    home: Path,
+    fake_trainer_path: Path,
+    terminal,
 ) -> None:
     r = client.post("/api/jobs", json={"config": config_dict})
     assert r.status_code == 201, r.text
@@ -125,7 +130,9 @@ def test_full_lifecycle(
     assert run_dir.exists()
 
 
-def test_run_dir_collision_gets_suffix(client: TestClient, config_dict: dict[str, Any], tmp_path: Path, terminal) -> None:
+def test_run_dir_collision_gets_suffix(
+    client: TestClient, config_dict: dict[str, Any], tmp_path: Path, terminal
+) -> None:
     a = client.post("/api/jobs", json={"config": config_dict}).json()
     b = client.post("/api/jobs", json={"config": config_dict}).json()
     assert a["run_dir"] == str(tmp_path / "runs" / "srv-test")
@@ -136,7 +143,9 @@ def test_run_dir_collision_gets_suffix(client: TestClient, config_dict: dict[str
     assert [j["id"] for j in client.get("/api/jobs").json()] == [b["id"], a["id"]]  # newest first
 
 
-def test_generated_run_name(client: TestClient, config_dict: dict[str, Any], tmp_path: Path, terminal) -> None:
+def test_generated_run_name(
+    client: TestClient, config_dict: dict[str, Any], tmp_path: Path, terminal
+) -> None:
     cfg = dict(config_dict)
     cfg.pop("run_name")
     cfg["model"] = {"name_or_path": "HuggingFaceTB/SmolLM2-135M-Instruct"}
@@ -157,7 +166,9 @@ def test_crash_without_terminal_status_is_failed(
     assert final["status"]["state"] == "running"  # the trainer never updated it
 
 
-def test_spawn_failure(client: TestClient, config_dict: dict[str, Any], monkeypatch: pytest.MonkeyPatch) -> None:
+def test_spawn_failure(
+    client: TestClient, config_dict: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.setenv("MONORL_TRAIN_CMD", "/definitely/not/a/binary")
     r = client.post("/api/jobs", json={"config": config_dict})
     assert r.status_code == 201
@@ -252,7 +263,9 @@ def test_manager_crash_detection_after_reload(
     first.shutdown()
 
 
-def test_sse_metrics_stream(client: TestClient, config_dict: dict[str, Any], monkeypatch: pytest.MonkeyPatch) -> None:
+def test_sse_metrics_stream(
+    client: TestClient, config_dict: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.setenv("FAKE_TRAINER_STEP_SLEEP", "0.3")
     job = client.post("/api/jobs", json={"config": config_dict}).json()
     events = _collect_sse(client, f"/api/jobs/{job['id']}/metrics/stream")

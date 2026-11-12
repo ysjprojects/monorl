@@ -60,18 +60,30 @@ def test_sft_config_snapshot(sft_config: RunConfig, tmp_path: Path) -> None:
         "split_validation_size": 0,
         "seed": 42,
     }
-    assert data["validation"] == {"dataset_name": SFT_DATASET, "data_path": str(run_dir.resolve() / "nemo_rl" / "sft_eval.jsonl")}
+    assert data["validation"] == {
+        "dataset_name": SFT_DATASET,
+        "data_path": str(run_dir.resolve() / "nemo_rl" / "sft_eval.jsonl"),
+    }
     assert data["default"] == {"prompt_file": None, "system_prompt_file": None, "processor": SFT_PROCESSOR}
     assert data["add_bos"] is True and data["add_eos"] is True and data["add_generation_prompt"] is False
     assert data["max_input_seq_length"] == tr.max_seq_len
-    assert cfg["checkpointing"]["metric_name"] == "val:val_loss" and cfg["checkpointing"]["higher_is_better"] is False
+    assert (
+        cfg["checkpointing"]["metric_name"] == "val:val_loss"
+        and cfg["checkpointing"]["higher_is_better"] is False
+    )
     assert cfg["checkpointing"]["checkpoint_dir"] == str(run_dir.resolve() / "checkpoints")
     assert cfg["logger"]["monorl"]["run_dir"] == str(run_dir.resolve())
     yaml.safe_dump(cfg)
 
-    no_eval = RunConfig.from_dict({**sft_config.to_dict(), "data": {**sft_config.data.model_dump(mode="json"), "eval_uri": None}})
+    no_eval = RunConfig.from_dict(
+        {**sft_config.to_dict(), "data": {**sft_config.data.model_dump(mode="json"), "eval_uri": None}}
+    )
     cfg2 = compile_sft_config(no_eval, run_dir)
-    assert cfg2["sft"]["val_period"] == 0 and cfg2["data"]["validation"] is None and cfg2["checkpointing"]["metric_name"] is None
+    assert (
+        cfg2["sft"]["val_period"] == 0
+        and cfg2["data"]["validation"] is None
+        and cfg2["checkpointing"]["metric_name"] is None
+    )
 
 
 def test_sft_skips_rl_only_checks_and_honours_overrides(sft_config: RunConfig, tmp_path: Path) -> None:
@@ -89,13 +101,19 @@ def test_images_are_rejected(nemo_config: RunConfig, sft_config: RunConfig, tmp_
         data["data"] = {**data["data"], "image_field": "picture"}
         with pytest.raises(ConfigError, match="run_vlm_grpo.py"):
             compile_config(RunConfig.from_dict(data), tmp_path)
-    img = Sample(id="i", messages=[{"role": "user", "content": [{"type": "image", "image": "x.png"}]}], metadata={"response": "r"})
+    img = Sample(
+        id="i",
+        messages=[{"role": "user", "content": [{"type": "image", "image": "x.png"}]}],
+        metadata={"response": "r"},
+    )
     with pytest.raises(ConfigError, match="run_vlm_sft.py"):
         sft_sample_to_row(img, response_field=None)
 
 
 def test_sft_rows_and_export(sft_config: RunConfig, tmp_path: Path) -> None:
-    sample = Sample(id="s", messages=[{"role": "user", "content": "2+2?"}], reference="4", metadata={"response": "4"})
+    sample = Sample(
+        id="s", messages=[{"role": "user", "content": "2+2?"}], reference="4", metadata={"response": "4"}
+    )
     assert sft_sample_to_row(sample, response_field=None) == {
         "messages": [{"role": "user", "content": "2+2?"}, {"role": "assistant", "content": "4"}]
     }
@@ -114,7 +132,9 @@ def test_sft_metric_names() -> None:
     assert translate_metrics({"loss": 0.5}, "train", algorithm="grpo") == {"loss/policy": 0.5}
 
 
-def test_sft_launch_command_and_entry_args(sft_config: RunConfig, fake_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_sft_launch_command_and_entry_args(
+    sft_config: RunConfig, fake_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.setattr("monorl.adapters.nemo_rl.backend.shutil.which", lambda name: None)
     cmd = build_command(sft_config, fake_home, tmp_path / "x.yaml", tmp_path)
     assert cmd[-2:] == ["--script", "examples/run_sft.py"]
@@ -123,7 +143,9 @@ def test_sft_launch_command_and_entry_args(sft_config: RunConfig, fake_home: Pat
     assert parse_args(["--config", "c.yaml"])[0].script == "examples/run_grpo.py"
 
 
-def test_sft_run_end_to_end_with_fake_checkout(sft_config: RunConfig, fake_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_sft_run_end_to_end_with_fake_checkout(
+    sft_config: RunConfig, fake_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.setenv(HOME_ENV, str(fake_home))
     data = sft_config.to_dict()
     data["trainer"]["extra"] = {"nemo_rl_launcher": "python"}

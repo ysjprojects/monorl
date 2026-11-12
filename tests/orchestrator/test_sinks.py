@@ -20,7 +20,9 @@ def test_sinks_are_inactive_when_not_configured(make_config: Any, tmp_path: Path
     sinks.close()
 
 
-def test_wandb_sink_logs_numeric_metrics(make_config: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_wandb_sink_logs_numeric_metrics(
+    make_config: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     logged: list[tuple[dict[str, float], int]] = []
     inits: list[dict[str, Any]] = []
 

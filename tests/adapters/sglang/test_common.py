@@ -36,8 +36,15 @@ from monorl.rollout.hf_engine import load_tokenizer
 # -- sampling ------------------------------------------------------------------------------------
 def test_sampling_dict_maps_every_field_to_pinned_names():
     params = SamplingParams(
-        n=3, max_new_tokens=17, temperature=0.7, top_p=0.9, top_k=40, min_p=0.05,
-        repetition_penalty=1.1, stop=["</s>", "\n\n"], seed=None,
+        n=3,
+        max_new_tokens=17,
+        temperature=0.7,
+        top_p=0.9,
+        top_k=40,
+        min_p=0.05,
+        repetition_penalty=1.1,
+        stop=["</s>", "\n\n"],
+        seed=None,
     )
     d = sampling_dict(params)
     assert d == {
@@ -129,7 +136,10 @@ def test_completion_from_output_full():
 
 
 def test_completion_from_output_falls_back_to_logprob_token_ids():
-    out = {"text": "", "meta_info": {"finish_reason": {"type": "stop"}, "output_token_logprobs": [(-1.0, 9, None)]}}
+    out = {
+        "text": "",
+        "meta_info": {"finish_reason": {"type": "stop"}, "output_token_logprobs": [(-1.0, 9, None)]},
+    }
     c = completion_from_output(out, prompt_ids=[], want_logprobs=True)
     assert c.token_ids == [9] and c.logprobs == [-1.0]
     with pytest.raises(ValueError, match="neither"):
@@ -137,14 +147,18 @@ def test_completion_from_output_falls_back_to_logprob_token_ids():
 
 
 def test_completion_from_output_rejects_logprob_length_mismatch():
-    out = {"output_ids": [1, 2], "meta_info": {"finish_reason": {"type": "stop"}, "output_token_logprobs": [(-1.0, 1, None)]}}
+    out = {
+        "output_ids": [1, 2],
+        "meta_info": {"finish_reason": {"type": "stop"}, "output_token_logprobs": [(-1.0, 1, None)]},
+    }
     with pytest.raises(ValueError, match="1 output logprobs for 2"):
         completion_from_output(out, prompt_ids=[], want_logprobs=True)
 
 
 def test_group_outputs_prompt_major():
     outs = [
-        {"text": f"{i}", "output_ids": [i], "meta_info": {"finish_reason": {"type": "stop"}}} for i in range(6)
+        {"text": f"{i}", "output_ids": [i], "meta_info": {"finish_reason": {"type": "stop"}}}
+        for i in range(6)
     ]
     grouped = group_outputs(outs, [[1], [2], [3]], SamplingParams(n=2, logprobs=False))
     assert [[c.text for c in g] for g in grouped] == [["0", "1"], ["2", "3"], ["4", "5"]]
@@ -203,7 +217,13 @@ def test_engine_kwargs_core_mapping(run_config_dict):
         gpu_memory_utilization=0.45,
         max_model_len=4096,
         enable_sleep_mode=False,
-        extra={"schedule_policy": "fcfs", "enable_metrics": True, "mode": "colocate", "bucket_bytes": 10, "unknown_key": 1},
+        extra={
+            "schedule_policy": "fcfs",
+            "enable_metrics": True,
+            "mode": "colocate",
+            "bucket_bytes": 10,
+            "unknown_key": 1,
+        },
     )
     kw = engine_kwargs(cfg)
     assert kw["model_path"] == run_config_dict["model"]["name_or_path"]

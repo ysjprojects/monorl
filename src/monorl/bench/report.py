@@ -30,7 +30,19 @@ def _notes(console: Console, notes: list[str]) -> None:
 
 def render_rollout(bench: RolloutBenchmark, console: Console) -> None:
     table = Table(title=f"rollout throughput — {bench.backend} / {bench.model}")
-    for col in ("batch", "calls", "reqs", "tok/s", "tot tok/s", "req/s", "p50", "p95", "p50/req", "tok/req", "RSS"):
+    for col in (
+        "batch",
+        "calls",
+        "reqs",
+        "tok/s",
+        "tot tok/s",
+        "req/s",
+        "p50",
+        "p95",
+        "p50/req",
+        "tok/req",
+        "RSS",
+    ):
         table.add_column(col, justify="right", no_wrap=True)
     for r in bench.results:
         table.add_row(
@@ -50,14 +62,28 @@ def render_rollout(bench: RolloutBenchmark, console: Console) -> None:
     console.print(table)
     if any(r.truncated_by_budget for r in bench.results):
         console.print("  [dim]* stopped early by --seconds[/dim]")
-    console.print(f"host: {bench.host.platform}, {bench.host.cpu_count} cpus, {fmt_bytes(bench.host.memory_bytes)} RAM, device {bench.host.device}")
+    console.print(
+        f"host: {bench.host.platform}, {bench.host.cpu_count} cpus, {fmt_bytes(bench.host.memory_bytes)} RAM, device {bench.host.device}"
+    )
     _notes(console, bench.recommendations)
 
 
 def render_env(bench: EnvBenchmark, console: Console) -> None:
     spec = bench.spec
     table = Table(title=f"env throughput — {bench.target.transport} {bench.target.label}")
-    for col in ("par", "procs", "eps", "steps", "eps/s", "steps/s", "reset p50", "step p50", "step p95", "ep p95", "err"):
+    for col in (
+        "par",
+        "procs",
+        "eps",
+        "steps",
+        "eps/s",
+        "steps/s",
+        "reset p50",
+        "step p50",
+        "step p95",
+        "ep p95",
+        "err",
+    ):
         table.add_column(col, justify="right", no_wrap=True)
     for r in bench.results:
         table.add_row(
@@ -111,10 +137,21 @@ def render_plan(report: PlanReport, console: Console) -> None:
     table.add_column("setting")
     table.add_column("value")
     rows = [
-        ("cluster", f"{cluster.get('num_nodes')} node(s) × {plan.get('gpus_per_node')} GPU(s) = {plan.get('total_gpus')}"),
-        ("gpu memory", fmt_bytes(cluster["cuda_devices"][0]["total_memory_bytes"]) if cluster.get("cuda_devices") else "-"),
+        (
+            "cluster",
+            f"{cluster.get('num_nodes')} node(s) × {plan.get('gpus_per_node')} GPU(s) = {plan.get('total_gpus')}",
+        ),
+        (
+            "gpu memory",
+            fmt_bytes(cluster["cuda_devices"][0]["total_memory_bytes"])
+            if cluster.get("cuda_devices")
+            else "-",
+        ),
         ("mode / placement", f"{plan.get('mode')} / {plan.get('placement')}"),
-        ("rollout", f"{plan.get('engine_replicas')} replica(s) × tp{plan.get('engine_tensor_parallel')} on {plan.get('rollout_devices')}"),
+        (
+            "rollout",
+            f"{plan.get('engine_replicas')} replica(s) × tp{plan.get('engine_tensor_parallel')} on {plan.get('rollout_devices')}",
+        ),
         ("trainer", f"world size {plan.get('trainer_world_size')} on {plan.get('trainer_devices')}"),
         ("engine sleep", str(plan.get("engine_sleep"))),
         ("weight sync", str(plan.get("weight_sync"))),
@@ -131,11 +168,18 @@ def render_plan(report: PlanReport, console: Console) -> None:
     console.print(table)
     if report.estimate:
         e = report.estimate
-        t = Table(title=f"step-time estimate (assumed {e.hardware.name}: {e.hardware.tflops:.0f} TFLOP/s, {e.hardware.bandwidth_gbs:.0f} GB/s)")
+        t = Table(
+            title=f"step-time estimate (assumed {e.hardware.name}: {e.hardware.tflops:.0f} TFLOP/s, {e.hardware.bandwidth_gbs:.0f} GB/s)"
+        )
         t.add_column("phase")
         t.add_column("seconds", justify="right")
         t.add_column("share", justify="right")
-        for name, s in (("generation", e.generation_s), ("logprobs", e.logprob_s), ("training", e.train_s), ("weight sync", e.sync_s)):
+        for name, s in (
+            ("generation", e.generation_s),
+            ("logprobs", e.logprob_s),
+            ("training", e.train_s),
+            ("weight sync", e.sync_s),
+        ):
             t.add_row(name, fmt_seconds(s), f"{100 * s / e.total_s:.0f}%" if e.total_s else "-")
         t.add_row("[bold]total[/bold]", f"[bold]{fmt_seconds(e.total_s)}[/bold]", "")
         console.print(t)

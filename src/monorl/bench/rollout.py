@@ -154,7 +154,9 @@ def measure_batch_size(
     )
 
 
-def recommend(results: Sequence[RolloutBatchResult], *, group_size: int, baseline_rss: int) -> tuple[int | None, list[str]]:
+def recommend(
+    results: Sequence[RolloutBatchResult], *, group_size: int, baseline_rss: int
+) -> tuple[int | None, list[str]]:
     """Pick the batch size with the best completion-token throughput and phrase config advice."""
     valid = [r for r in results if r.calls > 0]
     if not valid:
@@ -181,7 +183,9 @@ def recommend(results: Sequence[RolloutBatchResult], *, group_size: int, baselin
     peak = max(r.peak_rss_bytes for r in valid)
     growth = peak - baseline_rss
     if growth > 1 << 30:
-        notes.append(f"peak RSS grew by {growth / (1 << 30):.1f} GiB over the baseline; check that the host has headroom")
+        notes.append(
+            f"peak RSS grew by {growth / (1 << 30):.1f} GiB over the baseline; check that the host has headroom"
+        )
     return best.batch_size, notes
 
 

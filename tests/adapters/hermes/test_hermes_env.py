@@ -39,13 +39,19 @@ def sample(task: str, sid: str = "s1") -> Sample:
 # -- provider / config ------------------------------------------------------------------------
 
 
-def test_registry_resolves_and_builds_from_run_config(run_config_dict: dict[str, Any], workspace: Path) -> None:
+def test_registry_resolves_and_builds_from_run_config(
+    run_config_dict: dict[str, Any], workspace: Path
+) -> None:
     assert is_available()
     assert callable(registry.get("env", "hermes"))
     cfg = RunConfig.model_validate(
         {
             **run_config_dict,
-            "env": {"type": "hermes", "max_turns": 3, "params": {"tools": ["read_file"], "workspace_dir": str(workspace)}},
+            "env": {
+                "type": "hermes",
+                "max_turns": 3,
+                "params": {"tools": ["read_file"], "workspace_dir": str(workspace)},
+            },
         }
     )
     env = registry.get("env", "hermes")(cfg)
@@ -76,7 +82,11 @@ def test_unknown_param_and_unknown_tool_are_rejected() -> None:
 
 
 def test_resolve_tool_names_mixes_tools_and_toolsets() -> None:
-    assert resolve_tool_names(["terminal", "read_file", "write_file"]) == ["read_file", "terminal", "write_file"]
+    assert resolve_tool_names(["terminal", "read_file", "write_file"]) == [
+        "read_file",
+        "terminal",
+        "write_file",
+    ]
     assert set(resolve_tool_names(["file"])) >= {"read_file", "write_file", "patch", "search_files"}
 
 
@@ -115,7 +125,10 @@ def test_episode_with_hermes_file_tools(workspace: Path, skills_dir: Path) -> No
         assert "Pipe expressions into `bc`" in system  # skill body injected
         assert "Answer with the file content when done." in system
         assert f"Working directory for this task: {workspace}" in system
-        assert messages[1] == {"role": "user", "content": "Write 'hi' to notes.txt, read it back and report it."}
+        assert messages[1] == {
+            "role": "user",
+            "content": "Write 'hi' to notes.txt, read it back and report it.",
+        }
 
         step1 = env.step(completion(call("write_file", path="notes.txt", content="hi")))
         assert not step1.done
@@ -140,7 +153,9 @@ def test_episode_with_hermes_file_tools(workspace: Path, skills_dir: Path) -> No
 
 
 def test_custom_tool_registered_through_hermes_registry(workspace: Path) -> None:
-    env = HermesEnv(tools=["monorl_calc"], tool_modules=["sample_tools"], workspace_dir=str(workspace), max_turns=3)
+    env = HermesEnv(
+        tools=["monorl_calc"], tool_modules=["sample_tools"], workspace_dir=str(workspace), max_turns=3
+    )
     try:
         assert env.tool_names == ["monorl_calc"]
         assert env.tools[0]["function"]["parameters"]["required"] == ["expression"]
@@ -180,7 +195,9 @@ def test_parallel_tool_calls_in_one_turn(workspace: Path) -> None:
 
 
 def test_unknown_and_malformed_calls_follow_hermes_loop(workspace: Path) -> None:
-    env = HermesEnv(tools=["read_file", "write_file"], workspace_dir=str(workspace), max_turns=4, invalid_call_penalty=0.5)
+    env = HermesEnv(
+        tools=["read_file", "write_file"], workspace_dir=str(workspace), max_turns=4, invalid_call_penalty=0.5
+    )
     try:
         env.reset(sample("x"))
         # Hermes repairs near-miss names (agent_runtime_helpers.repair_tool_call) ...
@@ -190,7 +207,10 @@ def test_unknown_and_malformed_calls_follow_hermes_loop(workspace: Path) -> None
         # ... and errors out hallucinated ones with its own message.
         step = env.step(completion(call("launch_rockets", target="moon")))
         assert step.reward == -0.5 and step.info["invalid_calls"] == 1
-        assert "Tool 'launch_rockets' does not exist. Available tools: read_file, write_file" in step.messages[0]["content"]
+        assert (
+            "Tool 'launch_rockets' does not exist. Available tools: read_file, write_file"
+            in step.messages[0]["content"]
+        )
         assert step.messages[0]["role"] == "tool"
         # malformed JSON inside <tool_call> is reported, not executed
         step = env.step(completion("<tool_call>{not json}</tool_call>"))
@@ -218,7 +238,9 @@ def test_max_turns_cutoff(workspace: Path) -> None:
 
 
 def test_compact_system_prompt_lists_tool_schemas(workspace: Path) -> None:
-    env = HermesEnv(tools=["read_file"], workspace_dir=str(workspace), max_turns=1, hermes_system_prompt=False)
+    env = HermesEnv(
+        tools=["read_file"], workspace_dir=str(workspace), max_turns=1, hermes_system_prompt=False
+    )
     try:
         system = env.reset(sample("x"))[0]["content"]
         assert system.startswith("You are Hermes Agent, a tool-using assistant.")

@@ -47,7 +47,12 @@ def trl_config(tiny_model_dir: Path, data_file: Path, tmp_path: Path) -> RunConf
         {
             "run_name": "trl-test",
             "model": {"name_or_path": str(tiny_model_dir), "dtype": "float32"},
-            "data": {"uri": str(data_file), "prompt_field": "prompt", "answer_field": "answer", "max_prompt_tokens": 128},
+            "data": {
+                "uri": str(data_file),
+                "prompt_field": "prompt",
+                "answer_field": "answer",
+                "max_prompt_tokens": 128,
+            },
             "algorithm": {"name": "grpo"},
             "rollout": {"backend": "hf", "group_size": 2, "max_new_tokens": 8, "device": "cpu"},
             "trainer": {

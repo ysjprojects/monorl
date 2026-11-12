@@ -96,7 +96,9 @@ class PolicySampler:
         if self.reward_fn is not None:
             results = list(self.reward_fn(trajectories))
             if len(results) != len(trajectories):
-                raise DataError(f"reward returned {len(results)} results for {len(trajectories)} trajectories")
+                raise DataError(
+                    f"reward returned {len(results)} results for {len(trajectories)} trajectories"
+                )
         else:
             results = [RewardResult(score=0.0) for _ in trajectories]
         for traj, res in zip(trajectories, results, strict=True):
@@ -125,7 +127,13 @@ def sampling_params(config: RunConfig, *, greedy: bool) -> SamplingParams:
     extra = r.extra
     if greedy:
         return SamplingParams(
-            n=1, max_new_tokens=r.max_new_tokens, temperature=0.0, top_p=1.0, top_k=-1, stop=list(r.stop), logprobs=False
+            n=1,
+            max_new_tokens=r.max_new_tokens,
+            temperature=0.0,
+            top_p=1.0,
+            top_k=-1,
+            stop=list(r.stop),
+            logprobs=False,
         )
     return SamplingParams(
         n=1,
@@ -203,7 +211,9 @@ def prompt_messages(trajectory: Trajectory) -> list[Message]:
     return list(trajectory.sample.messages)
 
 
-def chat_row(messages: Sequence[Message], response: str, *, reference: Any, reward: float | None, source: str) -> dict[str, Any]:
+def chat_row(
+    messages: Sequence[Message], response: str, *, reference: Any, reward: float | None, source: str
+) -> dict[str, Any]:
     return {
         "messages": [*messages, {"role": "assistant", "content": response}],
         "reference": reference,
@@ -255,7 +265,9 @@ def sample_response(sample: Sample, data: DataConfig) -> str | None:
         if isinstance(content, str) and content:
             return content
         if isinstance(content, list):
-            text = "".join(str(p.get("text", "")) for p in content if isinstance(p, dict) and p.get("type") == "text")
+            text = "".join(
+                str(p.get("text", "")) for p in content if isinstance(p, dict) and p.get("type") == "text"
+            )
             if text:
                 return text
     row = meta.get("row")
@@ -312,9 +324,13 @@ def run_rejection_sampling(
         if not samples:
             raise DataError(f"no usable prompts in {data_cfg.uri}")
         outcome.prompts = len(samples)
-        reporter.log(f"rejection sampling: {len(samples)} prompts x {stage.num_samples} samples from {data_cfg.uri}")
+        reporter.log(
+            f"rejection sampling: {len(samples)} prompts x {stage.num_samples} samples from {data_cfg.uri}"
+        )
         params = sampling_params(config, greedy=False)
-        chunk_size = int(config.rollout.extra.get("rejection_prompts_per_step", config.trainer.prompts_per_step))
+        chunk_size = int(
+            config.rollout.extra.get("rejection_prompts_per_step", config.trainer.prompts_per_step)
+        )
         chunks = _chunks(samples, chunk_size)
         accepted = _Accepted()
         tmp = target.with_name(target.name + ".tmp")
@@ -356,7 +372,9 @@ def run_rejection_sampling(
                     "rs/accept_rate": len(kept) / len(trajectories) if trajectories else 0.0,
                     **stats,
                     "tokens/response_mean": (
-                        sum(t.num_response_tokens for t in trajectories) / len(trajectories) if trajectories else 0.0
+                        sum(t.num_response_tokens for t in trajectories) / len(trajectories)
+                        if trajectories
+                        else 0.0
                     ),
                     "time/rollout": time.perf_counter() - t0,
                 }
@@ -416,7 +434,9 @@ def _append_mix(out: Any, sampler: PolicySampler, data: DataConfig) -> int:
         response = sample_response(sample, data)
         if response is None:
             continue
-        row = chat_row(sample.messages, response, reference=sample.reference, reward=None, source=ROW_SOURCE_MIX)
+        row = chat_row(
+            sample.messages, response, reference=sample.reference, reward=None, source=ROW_SOURCE_MIX
+        )
         out.write(json.dumps(row, default=str) + "\n")
         added += 1
     return added
@@ -441,7 +461,9 @@ def eval_data_config(stage: EvalStage, config: RunConfig) -> DataConfig:
         return stage.data
     data = config.data
     if data.eval_uri:
-        return data.model_copy(update={"uri": data.eval_uri, "split": data.eval_split, "shuffle": False, "eval_uri": None})
+        return data.model_copy(
+            update={"uri": data.eval_uri, "split": data.eval_split, "shuffle": False, "eval_uri": None}
+        )
     return data.model_copy(update={"shuffle": False})
 
 
@@ -462,7 +484,9 @@ def run_eval(
             raise DataError(f"no usable prompts in {data_cfg.uri}")
         reporter.log(f"eval: {len(samples)} prompts from {data_cfg.uri}")
         params = sampling_params(config, greedy=True)
-        chunks = _chunks(samples, int(config.rollout.extra.get("eval_prompts_per_step", config.trainer.prompts_per_step)))
+        chunks = _chunks(
+            samples, int(config.rollout.extra.get("eval_prompts_per_step", config.trainer.prompts_per_step))
+        )
         scored: list[Trajectory] = []
         t_start = time.perf_counter()
         for step, chunk in enumerate(chunks, start=1):
@@ -471,7 +495,9 @@ def run_eval(
                 break
             reporter.set_status("running", f"evaluating chunk {step}/{len(chunks)}", step=step - 1)
             try:
-                trajectories = sampler.episodes(chunk, n=1, params=params, group_prefix=f"eval{step}", abort=cancel)
+                trajectories = sampler.episodes(
+                    chunk, n=1, params=params, group_prefix=f"eval{step}", abort=cancel
+                )
             except EpisodeAborted:
                 outcome.cancelled = True
                 break
@@ -497,7 +523,9 @@ def run_eval(
         outcome.metrics = metrics
         outcome.num_samples = len(scored)
         reporter.log_metrics(outcome.steps, metrics, phase="eval")
-        reporter.set_status("succeeded", f"eval reward_mean={metrics['eval/reward_mean']:.4f}", step=outcome.steps)
+        reporter.set_status(
+            "succeeded", f"eval reward_mean={metrics['eval/reward_mean']:.4f}", step=outcome.steps
+        )
         return outcome
     except BaseException as e:
         state = "cancelled" if isinstance(e, KeyboardInterrupt) else "failed"

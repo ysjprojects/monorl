@@ -78,7 +78,9 @@ def sample_to_row(sample: Sample, *, multimodal: bool = False) -> dict[str, Any]
     return row
 
 
-def sft_sample_to_row(sample: Sample, *, response_field: str | None, multimodal: bool = False) -> dict[str, Any]:
+def sft_sample_to_row(
+    sample: Sample, *, response_field: str | None, multimodal: bool = False
+) -> dict[str, Any]:
     """``prompt``/``completion`` conversational row; the response comes from
     :func:`monorl.orchestrator.sft.sft_response` (``data.response_field`` → ``answer_field`` →
     trailing assistant turn)."""
@@ -101,7 +103,11 @@ def sample_from_row(row: dict[str, Any]) -> Sample:
     """Inverse of :func:`sample_to_row` (works on TRL's per-example input dicts)."""
     raw = row.get(SAMPLE_COLUMN)
     if raw is None:
-        return Sample(id=str(row.get("sample_id", "")), messages=list(row[PROMPT_COLUMN]), reference=row.get("reference"))
+        return Sample(
+            id=str(row.get("sample_id", "")),
+            messages=list(row[PROMPT_COLUMN]),
+            reference=row.get("reference"),
+        )
     data = json.loads(raw)
     return Sample(
         id=str(data["id"]),
@@ -140,7 +146,10 @@ def build_dataset(
         raise DataError(f"dataset {data_config.uri!r} yielded no samples")
     multimodal = is_multimodal(data_config, samples)
     if sft:
-        rows = [sft_sample_to_row(s, response_field=data_config.response_field, multimodal=multimodal) for s in samples]
+        rows = [
+            sft_sample_to_row(s, response_field=data_config.response_field, multimodal=multimodal)
+            for s in samples
+        ]
     else:
         rows = [sample_to_row(s, multimodal=multimodal) for s in samples]
     return _to_dataset(rows, multimodal=multimodal)
@@ -151,6 +160,8 @@ def build_train_and_eval(config: RunConfig, *, tokenizer: Any = None) -> tuple[A
     train = build_dataset(config.data, tokenizer=tokenizer, seed=config.seed, sft=sft)
     eval_ds = None
     if config.data.eval_uri:
-        eval_cfg = config.data.model_copy(update={"uri": config.data.eval_uri, "split": config.data.eval_split})
+        eval_cfg = config.data.model_copy(
+            update={"uri": config.data.eval_uri, "split": config.data.eval_split}
+        )
         eval_ds = build_dataset(eval_cfg, tokenizer=tokenizer, seed=config.seed, sft=sft)
     return train, eval_ds

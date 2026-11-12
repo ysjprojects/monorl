@@ -61,10 +61,10 @@ PACKAGE_SOURCE = textwrap.dedent(
 )
 
 SUBMODULE_SOURCE = textwrap.dedent(
-    '''
+    """
     def helper(a, b=1):
         return a + b
-    '''
+    """
 )
 
 

@@ -121,7 +121,11 @@ def synthetic_cluster(gpus: int | None, gpu_mem_gb: float | None) -> ClusterInfo
     count = detected.num_gpus if gpus is None else int(gpus)
     mem = int(gpu_mem_gb * (1 << 30)) if gpu_mem_gb is not None else (detected.gpu_memory_bytes or 80 << 30)
     devices = tuple(GpuInfo(index=i, name="assumed", total_memory_bytes=mem) for i in range(count))
-    return ClusterInfo(cpu_count=detected.cpu_count, cuda_devices=devices, mps_available=detected.mps_available and not devices)
+    return ClusterInfo(
+        cpu_count=detected.cpu_count,
+        cuda_devices=devices,
+        mps_available=detected.mps_available and not devices,
+    )
 
 
 def estimate_step(
@@ -149,8 +153,11 @@ def estimate_step(
     generation_s = max(gen_bandwidth_s, gen_compute_s)
     notes.append(
         "generation is "
-        + ("weight-bandwidth bound (small batch); bigger batches or more replicas are nearly free" if gen_bandwidth_s >= gen_compute_s
-           else "compute bound; batch is saturating the engine")
+        + (
+            "weight-bandwidth bound (small batch); bigger batches or more replicas are nearly free"
+            if gen_bandwidth_s >= gen_compute_s
+            else "compute bound; batch is saturating the engine"
+        )
     )
 
     forward_passes = 1 + (1 if config.algorithm.kl_coef > 0 else 0)
@@ -168,7 +175,9 @@ def estimate_step(
     total = generation_s + logprob_s + train_s + sync_s
     if plan.placement == "disaggregated" and config.rollout.async_steps_ahead > 0:
         overlapped = max(generation_s, logprob_s + train_s) + sync_s
-        notes.append(f"async_steps_ahead={config.rollout.async_steps_ahead}: generation overlaps training, ~{overlapped:.1f}s/step")
+        notes.append(
+            f"async_steps_ahead={config.rollout.async_steps_ahead}: generation overlaps training, ~{overlapped:.1f}s/step"
+        )
         total = overlapped
     share = max(generation_s, logprob_s + train_s)
     notes.append(
@@ -193,7 +202,9 @@ def estimate_step(
     )
 
 
-def pick_hardware(cluster: ClusterInfo, preset: str | None, tflops: float | None, bandwidth_gbs: float | None) -> HardwareAssumptions:
+def pick_hardware(
+    cluster: ClusterInfo, preset: str | None, tflops: float | None, bandwidth_gbs: float | None
+) -> HardwareAssumptions:
     if preset is None:
         preset = DEFAULT_GPU_PRESET if cluster.num_gpus > 0 else ("mps" if cluster.mps_available else "cpu")
     try:
@@ -233,7 +244,9 @@ def run_plan(
     estimate = estimate_step(config, plan, hardware=hardware, prompt_tokens=prompt_tokens)
     notes = list(plan.notes)
     if estimate is None:
-        notes.append(f"model size unknown for {config.model.name_or_path}: no step-time estimate (config not readable)")
+        notes.append(
+            f"model size unknown for {config.model.name_or_path}: no step-time estimate (config not readable)"
+        )
     return PlanReport(
         config_summary={
             "model": config.model.name_or_path,

@@ -23,7 +23,14 @@ pytestmark = pytest.mark.gpu
 
 @pytest.mark.parametrize("algorithm", ["grpo", "dapo", "rloo", "ppo"])
 def test_overrides_compose_with_real_config(make_config, tmp_path: Path, algorithm: str):
-    cfg = make_config(algorithm={"name": algorithm, "clip_eps_high": 0.28, "dynamic_sampling": algorithm == "dapo", "overlong_penalty": 1.0})
+    cfg = make_config(
+        algorithm={
+            "name": algorithm,
+            "clip_eps_high": 0.28,
+            "dynamic_sampling": algorithm == "dapo",
+            "overlong_penalty": 1.0,
+        }
+    )
     overrides = to_overrides(compile_config(cfg, tmp_path))
     with initialize_config_module(config_module="verl.trainer.config", version_base=None):
         composed = compose(config_name="ppo_trainer", overrides=overrides)
@@ -31,7 +38,10 @@ def test_overrides_compose_with_real_config(make_config, tmp_path: Path, algorit
     assert composed.actor_rollout_ref.rollout.n == 5
     assert composed.trainer.default_local_dir == str(tmp_path / "checkpoints")
     assert composed.reward.custom_reward_function.path == str(tmp_path / "monorl_reward.py")
-    assert OmegaConf.select(composed, "algorithm.adv_estimator") == {"grpo": "grpo", "dapo": "grpo", "rloo": "rloo", "ppo": "gae"}[algorithm]
+    assert (
+        OmegaConf.select(composed, "algorithm.adv_estimator")
+        == {"grpo": "grpo", "dapo": "grpo", "rloo": "rloo", "ppo": "gae"}[algorithm]
+    )
 
 
 def test_tool_calling_overrides_compose(make_config, tmp_path: Path):
@@ -54,9 +64,13 @@ def test_real_base_tool_bridge(make_config):
     from verl.tools.schemas import OpenAIFunctionToolSchema
     from verl.tools.tool_registry import get_tool_class
 
-    spec = build_tool_config(make_config(env={"type": "tool_calling", "params": {"tools": ["calculator"]}}))["tools"][0]
+    spec = build_tool_config(make_config(env={"type": "tool_calling", "params": {"tools": ["calculator"]}}))[
+        "tools"
+    ][0]
     tool_cls = get_tool_class(spec["class_name"])
-    tool = tool_cls(config=spec["config"], tool_schema=OpenAIFunctionToolSchema.model_validate(spec["tool_schema"]))
+    tool = tool_cls(
+        config=spec["config"], tool_schema=OpenAIFunctionToolSchema.model_validate(spec["tool_schema"])
+    )
 
     async def drive():
         instance_id, _ = await tool.create()

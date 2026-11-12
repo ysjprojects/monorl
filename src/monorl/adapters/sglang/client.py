@@ -124,7 +124,9 @@ class SGLangServerClient:
                     "load_format": None,
                     "flush_cache": False,
                 }
-                self._check(self._post("/update_weights_from_tensor", json=body), "update_weights_from_tensor")
+                self._check(
+                    self._post("/update_weights_from_tensor", json=body), "update_weights_from_tensor"
+                )
                 updated += len(bucket)
             if updated:
                 self._flush_cache()
@@ -188,7 +190,9 @@ class SGLangServerClient:
     def _flush_cache(self) -> None:
         response = self._post("/flush_cache")
         if response.status_code >= 400:
-            log.warning("sglang /flush_cache did not run (%s); stale radix entries may be served", response.text)
+            log.warning(
+                "sglang /flush_cache did not run (%s); stale radix entries may be served", response.text
+            )
 
     def _post(self, path: str, **kwargs: Any) -> httpx.Response:
         return self._http.post(path, **kwargs)
@@ -201,4 +205,6 @@ class SGLangServerClient:
         except ValueError:
             payload = {"success": response.status_code < 400, "message": response.text}
         if response.status_code >= 400 or not payload.get("success", True):
-            raise WeightSyncError(f"sglang {op} failed (HTTP {response.status_code}): {payload.get('message', payload)}")
+            raise WeightSyncError(
+                f"sglang {op} failed (HTTP {response.status_code}): {payload.get('message', payload)}"
+            )

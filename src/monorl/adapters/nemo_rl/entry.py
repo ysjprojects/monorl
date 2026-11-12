@@ -50,7 +50,9 @@ def install_bridges() -> None:
     register_patchset(PATCHES)
     report = apply(FRAMEWORK)
     if report.installed_version is None:
-        raise BackendUnavailable("nemo_rl is not importable in this interpreter; run the entry inside the NeMo-RL environment")
+        raise BackendUnavailable(
+            "nemo_rl is not importable in this interpreter; run the entry inside the NeMo-RL environment"
+        )
     if report.failed:
         raise PatchError("; ".join(f"{pid}: {reason}" for pid, reason in report.failed))
     from nemo_rl.distributed.ray_actor_environment_registry import ACTOR_ENVIRONMENT_REGISTRY
@@ -63,12 +65,18 @@ def install_bridges() -> None:
 
 
 def parse_args(argv: list[str] | None = None) -> tuple[argparse.Namespace, list[str]]:
-    parser = argparse.ArgumentParser(prog="python -m monorl.adapters.nemo_rl.entry", description=__doc__.split("\n", 1)[0])
-    parser.add_argument("--config", required=True, help="Compiled NeMo-RL yaml (monorl.adapters.nemo_rl.compile)")
+    parser = argparse.ArgumentParser(
+        prog="python -m monorl.adapters.nemo_rl.entry", description=__doc__.split("\n", 1)[0]
+    )
+    parser.add_argument(
+        "--config", required=True, help="Compiled NeMo-RL yaml (monorl.adapters.nemo_rl.compile)"
+    )
     parser.add_argument("--run-dir", default=None, help=f"monorl run directory (default: ${RUN_DIR_ENV})")
     parser.add_argument("--nemo-rl-home", default=None, help=f"NeMo-RL checkout (default: ${HOME_ENV})")
     parser.add_argument(
-        "--script", default=str(RUN_SCRIPT), help=f"Example script relative to the checkout (default: {RUN_SCRIPT})"
+        "--script",
+        default=str(RUN_SCRIPT),
+        help=f"Example script relative to the checkout (default: {RUN_SCRIPT})",
     )
     return parser.parse_known_args(argv)
 

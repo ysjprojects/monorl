@@ -52,7 +52,9 @@ _END = object()
 
 
 class ComponentLoop:
-    def __init__(self, config: RunConfig, reporter: RunReporter, *, cancel: threading.Event, resume: bool) -> None:
+    def __init__(
+        self, config: RunConfig, reporter: RunReporter, *, cancel: threading.Event, resume: bool
+    ) -> None:
         self.config = config
         self.reporter = reporter
         self.cancel = cancel
@@ -138,7 +140,10 @@ class ComponentLoop:
         if not self.samples:
             raise DataError(f"no usable samples in {config.data.uri}")
         self.sampler = PromptSampler(
-            self.samples, prompts_per_step=config.trainer.prompts_per_step, seed=seed, shuffle=config.data.shuffle
+            self.samples,
+            prompts_per_step=config.trainer.prompts_per_step,
+            seed=seed,
+            shuffle=config.data.shuffle,
         )
         reporter.log(f"data: {len(self.samples)} samples from {config.data.uri}")
 
@@ -161,7 +166,13 @@ class ComponentLoop:
             logprobs=True,
         )
         self.eval_sampling = SamplingParams(
-            n=1, max_new_tokens=r.max_new_tokens, temperature=0.0, top_p=1.0, top_k=-1, stop=list(r.stop), logprobs=False
+            n=1,
+            max_new_tokens=r.max_new_tokens,
+            temperature=0.0,
+            top_p=1.0,
+            top_k=-1,
+            stop=list(r.stop),
+            logprobs=False,
         )
         self._sinks = MetricSinks(config, reporter.run_dir, reporter)
 
@@ -304,7 +315,9 @@ class ComponentLoop:
             while _num_groups(kept) < config.trainer.prompts_per_step and rounds < max_rounds:
                 rounds += 1
                 t0 = time.perf_counter()
-                extra = self._episodes(self.sampler.batch(step, round=rounds), step, round=rounds, abort=abort)
+                extra = self._episodes(
+                    self.sampler.batch(step, round=rounds), step, round=rounds, abort=abort
+                )
                 time_rollout += time.perf_counter() - t0
                 t1 = time.perf_counter()
                 self._score(extra)
@@ -316,7 +329,9 @@ class ComponentLoop:
             trajectories = kept
         metrics["time/rollout"] = time_rollout
         metrics["time/reward"] = time_reward
-        return RolloutBatch(step=step, trajectories=trajectories, policy_version=self.policy_version, metrics=metrics)
+        return RolloutBatch(
+            step=step, trajectories=trajectories, policy_version=self.policy_version, metrics=metrics
+        )
 
     def _episodes(
         self, prompts: Sequence[Sample], step: int, *, round: int, abort: threading.Event | None
@@ -344,7 +359,9 @@ class ComponentLoop:
         if self.reward_fn is not None:
             results = list(self.reward_fn(trajectories))
             if len(results) != len(trajectories):
-                raise DataError(f"reward returned {len(results)} results for {len(trajectories)} trajectories")
+                raise DataError(
+                    f"reward returned {len(results)} results for {len(trajectories)} trajectories"
+                )
         else:
             results = [RewardResult(score=0.0) for _ in trajectories]
         for traj, res in zip(trajectories, results, strict=True):
@@ -353,7 +370,11 @@ class ComponentLoop:
             reward = float(res.score) + env_return
             if any(turn.reward != 0.0 for turn in traj.turns):
                 breakdown["env"] = env_return
-            if algo.overlong_penalty > 0 and traj.turns and traj.turns[-1].completion.finish_reason == "length":
+            if (
+                algo.overlong_penalty > 0
+                and traj.turns
+                and traj.turns[-1].completion.finish_reason == "length"
+            ):
                 reward -= algo.overlong_penalty
                 breakdown["overlong_penalty"] = -algo.overlong_penalty
             traj.reward = reward
@@ -372,23 +393,33 @@ class ComponentLoop:
         if not trajectories:
             self.reporter.log(f"step {step}: no trajectories left after dynamic sampling; skipping update")
             metrics.update({"rollout/skipped": 1.0, "time/train": 0.0, "time/sync": 0.0})
-            metrics.setdefault("lr", float(getattr(self.trainer, "learning_rate", config.trainer.learning_rate)))
+            metrics.setdefault(
+                "lr", float(getattr(self.trainer, "learning_rate", config.trainer.learning_rate))
+            )
             return metrics
         metrics.update(_reward_metrics(trajectories))
 
         rewards = torch.tensor([t.reward for t in trajectories], dtype=torch.float32)
-        advantages = _resolve_compute_advantages()(rewards, [t.group_id for t in trajectories], algorithm=algo)
+        advantages = _resolve_compute_advantages()(
+            rewards, [t.group_id for t in trajectories], algorithm=algo
+        )
         batch, token_stats = build_train_batch(
             trajectories,
             advantages,
             pad_token_id=self.pad_token_id,
             max_seq_len=self.max_seq_len,
-            meta={"step": step, "policy_version": item.policy_version, "sample_ids": [t.sample.id for t in trajectories]},
+            meta={
+                "step": step,
+                "policy_version": item.policy_version,
+                "sample_ids": [t.sample.id for t in trajectories],
+            },
             processor=self.processor,
         )
         metrics.update(token_stats)
         metrics["advantage/mean"] = float(batch.advantages.sum().item() / max(1, batch.num_response_tokens))
-        metrics["advantage/abs_mean"] = float(batch.advantages.abs().sum().item() / max(1, batch.num_response_tokens))
+        metrics["advantage/abs_mean"] = float(
+            batch.advantages.abs().sum().item() / max(1, batch.num_response_tokens)
+        )
 
         t0 = time.perf_counter()
         if batch.old_logprobs is None or not self._engine_logprobs_match_trainer():
@@ -424,7 +455,12 @@ class ComponentLoop:
             return True  # scores raw logits / temperature regardless of the sampling processors
         if ro.extra.get("trust_engine_logprobs") is not None:
             return bool(ro.extra["trust_engine_logprobs"])
-        return ro.top_k <= 0 and ro.top_p >= 1.0 and not ro.extra.get("min_p") and not ro.extra.get("repetition_penalty")
+        return (
+            ro.top_k <= 0
+            and ro.top_p >= 1.0
+            and not ro.extra.get("min_p")
+            and not ro.extra.get("repetition_penalty")
+        )
 
     def _save_checkpoint(self, step: int) -> None:
         path = self.reporter.checkpoint_path(step)
@@ -464,16 +500,25 @@ class ComponentLoop:
         config = self.config
         if self._eval_samples is None:
             eval_cfg: DataConfig = config.data.model_copy(
-                update={"uri": config.data.eval_uri, "split": config.data.eval_split, "shuffle": False, "eval_uri": None}
+                update={
+                    "uri": config.data.eval_uri,
+                    "split": config.data.eval_split,
+                    "shuffle": False,
+                    "eval_uri": None,
+                }
             )
-            self._eval_samples = list(_resolve_open_source()(eval_cfg, tokenizer=self.tokenizer, seed=config.seed))
+            self._eval_samples = list(
+                _resolve_open_source()(eval_cfg, tokenizer=self.tokenizer, seed=config.seed)
+            )
             self.reporter.log(f"eval data: {len(self._eval_samples)} samples from {eval_cfg.uri}")
         if not self._eval_samples:
             return
         t0 = time.perf_counter()
         with self.engine_lock:
             specs = [
-                EpisodeSpec(sample=s, group_id=f"eval-s{step}-{s.id}", engine=self.engines[i % len(self.engines)])
+                EpisodeSpec(
+                    sample=s, group_id=f"eval-s{step}-{s.id}", engine=self.engines[i % len(self.engines)]
+                )
                 for i, s in enumerate(self._eval_samples)
             ]
             trajectories = run_episodes(

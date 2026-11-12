@@ -125,7 +125,9 @@ class MonorlEnvironmentBridge:
             return len(self._episodes)
 
     # -- EnvironmentInterface --------------------------------------------------------------
-    def step(self, message_log_batch: list[list[dict[str, Any]]], metadata: list[dict[str, Any]]) -> EnvironmentReturn:
+    def step(
+        self, message_log_batch: list[list[dict[str, Any]]], metadata: list[dict[str, Any]]
+    ) -> EnvironmentReturn:
         observations: list[dict[str, str]] = []
         out_metadata: list[dict[str, Any]] = []
         rewards: list[float] = []
@@ -138,7 +140,14 @@ class MonorlEnvironmentBridge:
             meta[EPISODE_KEY] = episode_id
             completion = Completion(text=_latest_assistant(log), token_ids=[], finish_reason="stop")
             result = episode.env.step(completion)
-            episode.turns.append(Turn(prompt_token_ids=[], completion=completion, reward=float(result.reward), info=dict(result.info)))
+            episode.turns.append(
+                Turn(
+                    prompt_token_ids=[],
+                    completion=completion,
+                    reward=float(result.reward),
+                    info=dict(result.info),
+                )
+            )
             done = bool(result.done) or len(episode.turns) >= int(episode.env.max_turns)
             if done:
                 trajectory = Trajectory(
@@ -155,7 +164,9 @@ class MonorlEnvironmentBridge:
                 observations.append({"role": TERMINAL_ROLE, "content": ""})
             else:
                 role = str(result.messages[0].get("role", "user")) if result.messages else "user"
-                observations.append({"role": role, "content": "\n".join(str(m.get("content", "")) for m in result.messages)})
+                observations.append(
+                    {"role": role, "content": "\n".join(str(m.get("content", "")) for m in result.messages)}
+                )
             out_metadata.append(meta)
             rewards.append(float(result.reward))
             terminateds.append(1.0 if done else 0.0)
@@ -209,4 +220,11 @@ class MonorlEnvironmentBridge:
             episode.env.close()
 
 
-__all__ = ["ACTOR_FQN", "BREAKDOWN_KEY", "EPISODE_KEY", "EnvironmentReturn", "MonorlEnvironmentBridge", "build_env_config"]
+__all__ = [
+    "ACTOR_FQN",
+    "BREAKDOWN_KEY",
+    "EPISODE_KEY",
+    "EnvironmentReturn",
+    "MonorlEnvironmentBridge",
+    "build_env_config",
+]

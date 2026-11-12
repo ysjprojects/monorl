@@ -28,7 +28,14 @@ SRC = Path(__file__).resolve().parents[2] / "src"
 def _patchset(name: str, *, target_attr: str = "greet", ident: str = "hook.greet") -> PatchSet:
     return PatchSet(
         framework=name,
-        patches=[Patch(id=ident, target=f"{name}.{target_attr}", mode="wrap", build=lambda o: (lambda *a, **k: "hooked:" + o(*a, **k)))],
+        patches=[
+            Patch(
+                id=ident,
+                target=f"{name}.{target_attr}",
+                mode="wrap",
+                build=lambda o: lambda *a, **k: "hooked:" + o(*a, **k),
+            )
+        ],
     )
 
 
@@ -47,7 +54,9 @@ def test_hook_applies_after_import(synthetic_package: SyntheticPackage) -> None:
     assert s.applied and s.verified
 
 
-def test_hook_is_idempotent_and_deactivates(synthetic_package: SyntheticPackage, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_hook_is_idempotent_and_deactivates(
+    synthetic_package: SyntheticPackage, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     pkg = synthetic_package
     register_patchset(_patchset(pkg.name))
     assert activate_import_hook() and activate_import_hook()
@@ -108,7 +117,11 @@ def test_hook_reentrant_patch_importing_submodules(synthetic_package: SyntheticP
         PatchSet(
             framework=pkg.name,
             patches=[
-                Patch(id="re.helper", target=f"{pkg.name}.sub.helper", build=lambda o: (lambda a, b=1: o(a, b) + 1)),
+                Patch(
+                    id="re.helper",
+                    target=f"{pkg.name}.sub.helper",
+                    build=lambda o: lambda a, b=1: o(a, b) + 1,
+                ),
                 Patch(id="re.greet", target=f"{pkg.name}.greet", build=build),
             ],
         )
@@ -120,10 +133,15 @@ def test_hook_reentrant_patch_importing_submodules(synthetic_package: SyntheticP
     assert [s.applied for s in status(pkg.name)] == [True, True]
 
 
-def test_failed_patch_does_not_break_import(synthetic_package: SyntheticPackage, caplog: pytest.LogCaptureFixture) -> None:
+def test_failed_patch_does_not_break_import(
+    synthetic_package: SyntheticPackage, caplog: pytest.LogCaptureFixture
+) -> None:
     pkg = synthetic_package
     register_patchset(
-        PatchSet(framework=pkg.name, patches=[Patch(id="bad.target", target=f"{pkg.name}.Engine.absent", build=lambda o: o)])
+        PatchSet(
+            framework=pkg.name,
+            patches=[Patch(id="bad.target", target=f"{pkg.name}.Engine.absent", build=lambda o: o)],
+        )
     )
     activate_import_hook()
     with caplog.at_level("WARNING", logger="monorl.patching"):
@@ -226,7 +244,9 @@ def _run_fresh(tmp_path: Path, name: str, env_extra: dict[str, str] | None = Non
     env = {k: v for k, v in os.environ.items() if k != "MONORL_DISABLE_PATCHES"}
     env.update(env_extra or {})
     script = _SUBPROCESS_SCRIPT.format(src=str(SRC), root=str(tmp_path), name=name)
-    proc = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, env=env, timeout=120)
+    proc = subprocess.run(
+        [sys.executable, "-c", script], capture_output=True, text=True, env=env, timeout=120
+    )
     assert proc.returncode == 0, proc.stderr
     return json.loads(proc.stdout.strip().splitlines()[-1])
 

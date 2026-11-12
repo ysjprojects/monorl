@@ -44,7 +44,9 @@ class SyntheticWeightSource:
     """The part of :class:`~monorl.core.interfaces.Trainer` weight sync touches: ``step``,
     ``export_weights`` and ``save_pretrained`` (HF layout: ``config.json`` + ``model.safetensors``)."""
 
-    def __init__(self, num_params: int, *, dtype: str = "float32", device: str = "cpu", chunk: int = SYNTHETIC_CHUNK) -> None:
+    def __init__(
+        self, num_params: int, *, dtype: str = "float32", device: str = "cpu", chunk: int = SYNTHETIC_CHUNK
+    ) -> None:
         import torch
 
         if num_params < 1:
@@ -58,7 +60,9 @@ class SyntheticWeightSource:
         gen = torch.Generator().manual_seed(0)
         while remaining > 0:
             n = min(chunk, remaining)
-            self.tensors[f"synthetic.layers.{i}.weight"] = torch.randn(n, generator=gen).to(self.dtype).to(self.device)
+            self.tensors[f"synthetic.layers.{i}.weight"] = (
+                torch.randn(n, generator=gen).to(self.dtype).to(self.device)
+            )
             remaining -= n
             i += 1
 
@@ -78,7 +82,9 @@ class SyntheticWeightSource:
 
         path = Path(path)
         path.mkdir(parents=True, exist_ok=True)
-        (path / "config.json").write_text(json.dumps({"model_type": "monorl-synthetic", "num_params": self.num_params}))
+        (path / "config.json").write_text(
+            json.dumps({"model_type": "monorl-synthetic", "num_params": self.num_params})
+        )
         save_file({k: v.contiguous().cpu() for k, v in self.tensors.items()}, str(path / "model.safetensors"))
 
 
@@ -166,7 +172,9 @@ class StrategyCandidate:
     reason: str | None = None
 
 
-def resolve_strategies(config: RunConfig, names: Sequence[str] | None = None, *, sync_dir: str | None = None) -> list[StrategyCandidate]:
+def resolve_strategies(
+    config: RunConfig, names: Sequence[str] | None = None, *, sync_dir: str | None = None
+) -> list[StrategyCandidate]:
     """Build each named (default: every registered) ``weight_sync`` strategy; the ones whose
     factory refuses this machine are returned with ``sync=None`` and the refusal as ``reason``."""
     wanted = list(names) if names else registry.names("weight_sync")
@@ -192,10 +200,24 @@ def resolve_strategies(config: RunConfig, names: Sequence[str] | None = None, *,
 
 
 def measure_strategy(
-    candidate: StrategyCandidate, trainer: Any, engines: Sequence[RolloutEngine], *, repeats: int = 3, rss: RssTracker | None = None
+    candidate: StrategyCandidate,
+    trainer: Any,
+    engines: Sequence[RolloutEngine],
+    *,
+    repeats: int = 3,
+    rss: RssTracker | None = None,
 ) -> SyncResult:
     if candidate.sync is None:
-        return SyncResult(candidate.name, 0, 0, LatencyStats.from_samples([]), 0.0, {}, skipped=True, reason=candidate.reason)
+        return SyncResult(
+            candidate.name,
+            0,
+            0,
+            LatencyStats.from_samples([]),
+            0.0,
+            {},
+            skipped=True,
+            reason=candidate.reason,
+        )
     rss = rss or RssTracker()
     times: list[float] = []
     metrics: dict[str, float] = {}
@@ -205,10 +227,26 @@ def measure_strategy(
         try:
             metrics = {k: float(v) for k, v in candidate.sync.sync(trainer, engines).items()}
         except MonorlError as e:
-            return SyncResult(candidate.name, len(times), 0, LatencyStats.from_samples(times), 0.0, {}, skipped=True, reason=str(e))
+            return SyncResult(
+                candidate.name,
+                len(times),
+                0,
+                LatencyStats.from_samples(times),
+                0.0,
+                {},
+                skipped=True,
+                reason=str(e),
+            )
         except (RuntimeError, OSError) as e:
             return SyncResult(
-                candidate.name, len(times), 0, LatencyStats.from_samples(times), 0.0, {}, skipped=True, reason=f"{type(e).__name__}: {e}"
+                candidate.name,
+                len(times),
+                0,
+                LatencyStats.from_samples(times),
+                0.0,
+                {},
+                skipped=True,
+                reason=f"{type(e).__name__}: {e}",
             )
         times.append(time.perf_counter() - t0)
         rss.sample()
@@ -227,7 +265,9 @@ def measure_strategy(
 def recommend(results: Sequence[SyncResult], *, engines: int) -> tuple[str | None, list[str]]:
     ran = [r for r in results if not r.skipped and r.repeats > 0]
     if not ran:
-        return None, ["no strategy ran on this machine: " + "; ".join(f"{r.strategy}: {r.reason}" for r in results)]
+        return None, [
+            "no strategy ran on this machine: " + "; ".join(f"{r.strategy}: {r.reason}" for r in results)
+        ]
     fastest = min(ran, key=lambda r: r.seconds.p50_s)
     notes = [
         f"fastest: cluster.weight_sync={fastest.strategy} at p50 {fmt_seconds(fastest.seconds.p50_s)} "
@@ -236,7 +276,9 @@ def recommend(results: Sequence[SyncResult], *, engines: int) -> tuple[str | Non
     for r in ran:
         if r is fastest or fastest.seconds.p50_s <= 0:
             continue
-        notes.append(f"{r.strategy}: {r.seconds.p50_s / fastest.seconds.p50_s:.1f}x slower (p50 {fmt_seconds(r.seconds.p50_s)})")
+        notes.append(
+            f"{r.strategy}: {r.seconds.p50_s / fastest.seconds.p50_s:.1f}x slower (p50 {fmt_seconds(r.seconds.p50_s)})"
+        )
     for r in results:
         if r.skipped:
             notes.append(f"{r.strategy}: skipped — {r.reason}")

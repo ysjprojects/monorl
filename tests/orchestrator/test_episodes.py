@@ -63,7 +63,14 @@ def test_multi_turn_prompts_are_token_exact_extensions(make_config: Any) -> None
     assert traj.turns[1].prompt_token_ids == expected
     assert traj.turns[2].prompt_token_ids[: len(expected)] == expected
     # conversation keeps assistant + env messages in order
-    assert [m["role"] for m in traj.messages] == ["user", "assistant", "user", "assistant", "user", "assistant"]
+    assert [m["role"] for m in traj.messages] == [
+        "user",
+        "assistant",
+        "user",
+        "assistant",
+        "user",
+        "assistant",
+    ]
     assert traj.done
 
 
@@ -122,8 +129,13 @@ def test_run_episodes_parallel_preserves_order_and_closes_envs(make_config: Any)
             envs.append(env)
         return env
 
-    specs = [EpisodeSpec(sample=_sample(f"p{i}", sid=str(i)), group_id=f"g{i // 2}", engine=engine) for i in range(8)]
-    trajs = run_episodes(specs, env_factory=factory, tokenizer=engine.tokenizer, params=SamplingParams(n=1), max_parallel=4)
+    specs = [
+        EpisodeSpec(sample=_sample(f"p{i}", sid=str(i)), group_id=f"g{i // 2}", engine=engine)
+        for i in range(8)
+    ]
+    trajs = run_episodes(
+        specs, env_factory=factory, tokenizer=engine.tokenizer, params=SamplingParams(n=1), max_parallel=4
+    )
     assert [t.sample.id for t in trajs] == [str(i) for i in range(8)]
     assert [t.group_id for t in trajs] == [s.group_id for s in specs]
     assert all(t.turns[0].completion.text == f"P{i}" for i, t in enumerate(trajs))
@@ -147,7 +159,9 @@ def test_episode_error_propagates_and_closes_env(make_config: Any) -> None:
 
     specs = [EpisodeSpec(sample=_sample(), group_id="g", engine=engine) for _ in range(3)]
     with pytest.raises(RuntimeError, match="env exploded"):
-        run_episodes(specs, env_factory=factory, tokenizer=engine.tokenizer, params=SamplingParams(n=1), max_parallel=3)
+        run_episodes(
+            specs, env_factory=factory, tokenizer=engine.tokenizer, params=SamplingParams(n=1), max_parallel=3
+        )
     assert envs and all(e.closed for e in envs)
 
 

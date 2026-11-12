@@ -46,7 +46,9 @@ def _require_openenv() -> Any:
     try:
         import openenv.core as core
     except ImportError as e:  # pragma: no cover - exercised only without the extra installed
-        raise BackendUnavailable("env 'openenv' needs the openenv-core package (pip install monorl[openenv])") from e
+        raise BackendUnavailable(
+            "env 'openenv' needs the openenv-core package (pip install monorl[openenv])"
+        ) from e
     return core
 
 
@@ -144,10 +146,21 @@ class ClientBackend:
     @classmethod
     def from_url(cls, url: str, *, timeout_s: float) -> ClientBackend:
         core = _require_openenv()
-        return cls(core.GenericEnvClient(base_url=url, connect_timeout_s=timeout_s, message_timeout_s=timeout_s).sync())
+        return cls(
+            core.GenericEnvClient(
+                base_url=url, connect_timeout_s=timeout_s, message_timeout_s=timeout_s
+            ).sync()
+        )
 
     @classmethod
-    def from_image(cls, image: str, *, timeout_s: float, env_vars: Mapping[str, str] | None = None, port: int | None = None) -> ClientBackend:
+    def from_image(
+        cls,
+        image: str,
+        *,
+        timeout_s: float,
+        env_vars: Mapping[str, str] | None = None,
+        port: int | None = None,
+    ) -> ClientBackend:
         core = _require_openenv()
         from openenv.core.containers.runtime import LocalDockerProvider
 
@@ -204,7 +217,10 @@ def backend_from_params(params: Mapping[str, Any]) -> Backend:
         return ClientBackend.from_url(str(params["url"]), timeout_s=timeout_s)
     if params.get("image"):
         return ClientBackend.from_image(
-            str(params["image"]), timeout_s=timeout_s, env_vars=params.get("env_vars"), port=params.get("port")
+            str(params["image"]),
+            timeout_s=timeout_s,
+            env_vars=params.get("env_vars"),
+            port=params.get("port"),
         )
     raise ValueError("env 'openenv' needs one of params.url, params.env_class or params.image")
 
@@ -304,7 +320,9 @@ class OpenEnvEnv:
         if payload is None:
             done = self._turn >= self.max_turns
             return StepResult(
-                messages=[] if done else [{"role": "user", "content": "Invalid action: reply with a JSON object."}],
+                messages=[]
+                if done
+                else [{"role": "user", "content": "Invalid action: reply with a JSON object."}],
                 reward=-self.invalid_action_penalty,
                 done=done,
                 info={"turn": self._turn, "invalid_action": True},
@@ -325,7 +343,9 @@ class OpenEnvEnv:
         self.backend.close()
 
 
-def make_openenv_env(params: Mapping[str, Any], *, max_turns: int, system_prompt: str | None = None, seed: int | None = None) -> OpenEnvEnv:
+def make_openenv_env(
+    params: Mapping[str, Any], *, max_turns: int, system_prompt: str | None = None, seed: int | None = None
+) -> OpenEnvEnv:
     return OpenEnvEnv(
         backend_from_params(params),
         max_turns=max_turns,

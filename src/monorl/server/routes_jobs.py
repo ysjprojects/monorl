@@ -38,7 +38,9 @@ def _rows(iterator: Any, since: int, limit: int) -> dict[str, Any]:
     return {"rows": rows, "next": nxt}
 
 
-def read_log_lines(run_dir: str | os.PathLike[str], *, since: int = 0, tail: int | None = None) -> dict[str, Any]:
+def read_log_lines(
+    run_dir: str | os.PathLike[str], *, since: int = 0, tail: int | None = None
+) -> dict[str, Any]:
     """``{lines, next}`` where ``next`` is the line offset to pass as ``since`` next time."""
     p = Path(run_dir) / LOG_FILE
     if not p.exists():
@@ -66,7 +68,10 @@ def create_job(body: dict[str, Any], request: Request) -> dict[str, Any]:
         key = "config"
     if not isinstance(payload, dict):
         return JSONResponse(  # type: ignore[return-value]
-            {"ok": False, "errors": [{"loc": [key], "msg": f"{key} must be an object", "type": "type_error"}]},
+            {
+                "ok": False,
+                "errors": [{"loc": [key], "msg": f"{key} must be an object", "type": "type_error"}],
+            },
             status_code=422,
         )
     return _jobs(request).create({"pipeline": payload} if key == "pipeline" else payload)
@@ -100,7 +105,10 @@ def delete_job(job_id: str, request: Request, remove_files: bool = Query(False))
 
 @router.get("/jobs/{job_id}/metrics")
 def job_metrics(
-    job_id: str, request: Request, since: int = Query(0, ge=0), limit: int = Query(MAX_ROWS, ge=1, le=MAX_ROWS)
+    job_id: str,
+    request: Request,
+    since: int = Query(0, ge=0),
+    limit: int = Query(MAX_ROWS, ge=1, le=MAX_ROWS),
 ) -> dict[str, Any]:
     job = _jobs(request).get(job_id)
     return _rows(iter_metrics(job["run_dir"], start_line=since), since, limit)
@@ -180,7 +188,11 @@ def job_stage(job_id: str, index: int, request: Request) -> dict[str, Any]:
 
 @router.get("/jobs/{job_id}/stages/{index}/metrics")
 def stage_metrics(
-    job_id: str, index: int, request: Request, since: int = Query(0, ge=0), limit: int = Query(MAX_ROWS, ge=1, le=MAX_ROWS)
+    job_id: str,
+    index: int,
+    request: Request,
+    since: int = Query(0, ge=0),
+    limit: int = Query(MAX_ROWS, ge=1, le=MAX_ROWS),
 ) -> dict[str, Any]:
     stage = _stage(_jobs(request).get(job_id), index)
     return _rows(iter_metrics(stage["run_dir"], start_line=since), since, limit)
@@ -188,7 +200,11 @@ def stage_metrics(
 
 @router.get("/jobs/{job_id}/stages/{index}/trajectories")
 def stage_trajectories(
-    job_id: str, index: int, request: Request, since: int = Query(0, ge=0), limit: int = Query(200, ge=1, le=MAX_ROWS)
+    job_id: str,
+    index: int,
+    request: Request,
+    since: int = Query(0, ge=0),
+    limit: int = Query(200, ge=1, le=MAX_ROWS),
 ) -> dict[str, Any]:
     stage = _stage(_jobs(request).get(job_id), index)
     return _rows(iter_trajectories(stage["run_dir"], start_line=since), since, limit)
@@ -232,7 +248,10 @@ async def _poll_stream(
         for item in items:
             yield {"event": event, "data": json.dumps(item)}
         if terminal:
-            yield {"event": "end", "data": json.dumps({"state": job["state"], "next": cursor, "error": job.get("error")})}
+            yield {
+                "event": "end",
+                "data": json.dumps({"state": job["state"], "next": cursor, "error": job.get("error")}),
+            }
             return
         await asyncio.sleep(POLL_INTERVAL)
 
@@ -250,7 +269,9 @@ def _new_logs(run_dir: str, cursor: int) -> tuple[list[str], int]:
 @router.get("/jobs/{job_id}/metrics/stream")
 async def stream_metrics(job_id: str, request: Request, since: int = Query(0, ge=0)) -> EventSourceResponse:
     _jobs(request).get(job_id)  # 404 before the stream opens
-    return EventSourceResponse(_poll_stream(request, job_id, since=since, read_new=_new_metrics, event="metrics"))
+    return EventSourceResponse(
+        _poll_stream(request, job_id, since=since, read_new=_new_metrics, event="metrics")
+    )
 
 
 @router.get("/jobs/{job_id}/logs/stream")

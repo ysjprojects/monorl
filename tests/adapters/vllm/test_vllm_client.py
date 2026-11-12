@@ -59,8 +59,13 @@ class FakeServer:
                 choices.reverse()
             return httpx.Response(
                 200,
-                json={"id": "cmpl-1", "object": "text_completion", "model": body["model"], "choices": choices,
-                      "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}},
+                json={
+                    "id": "cmpl-1",
+                    "object": "text_completion",
+                    "model": body["model"],
+                    "choices": choices,
+                    "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+                },
             )
         if path == "/update_named_param":
             q = request.url.params
@@ -101,7 +106,9 @@ def test_urls_per_replica(vllm_config: RunConfig, server: FakeServer, tiny_model
 
 def test_completions_request_body_and_parsing(client: VllmServerClient, server: FakeServer) -> None:
     chat = [{"role": "user", "content": "hi"}]
-    params = SamplingParams(n=2, max_new_tokens=9, temperature=0.5, top_k=-1, stop=["x"], seed=3, logprobs=True)
+    params = SamplingParams(
+        n=2, max_new_tokens=9, temperature=0.5, top_k=-1, stop=["x"], seed=3, logprobs=True
+    )
     out = client.generate([[4, 5], chat], params)
     req = server.requests[-1]
     assert req.url.path == "/v1/completions" and req.headers["content-type"].startswith("application/json")
@@ -118,7 +125,9 @@ def test_completions_request_body_and_parsing(client: VllmServerClient, server: 
     assert out[0][0].prompt_token_ids == [4, 5] and out[1][0].prompt_token_ids == chat_ids
 
 
-def test_completions_without_logprobs_and_finish_reasons(client: VllmServerClient, server: FakeServer) -> None:
+def test_completions_without_logprobs_and_finish_reasons(
+    client: VllmServerClient, server: FakeServer
+) -> None:
     server.finish_reasons = ["length", "abort"]
     out = client.generate([[1]], SamplingParams(n=2, logprobs=False))
     assert json.loads(server.requests[-1].content)["logprobs"] is None
@@ -137,8 +146,13 @@ def test_choice_count_mismatch_is_an_error(client: VllmServerClient, server: Fak
 
 def test_null_logprob_becomes_nan(client: VllmServerClient) -> None:
     def resp(request: httpx.Request) -> httpx.Response:
-        choice = {"index": 0, "text": "", "token_ids": [1, 2], "finish_reason": "stop",
-                  "logprobs": {"token_logprobs": [None, -0.5], "tokens": ["a", "b"]}}
+        choice = {
+            "index": 0,
+            "text": "",
+            "token_ids": [1, 2],
+            "finish_reason": "stop",
+            "logprobs": {"token_logprobs": [None, -0.5], "tokens": ["a", "b"]},
+        }
         return httpx.Response(200, json={"choices": [choice]})
 
     client._client = httpx.Client(base_url=client.url, transport=httpx.MockTransport(resp))

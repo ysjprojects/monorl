@@ -110,7 +110,9 @@ def main(argv: Sequence[str] | None = None) -> None:
     if "vllm.server.monorl_routes" not in report.applied and not any(
         pid == "vllm.server.monorl_routes" and reason == "already applied" for pid, reason in report.skipped
     ):
-        raise SystemExit(f"could not install monorl routes on the vLLM server: {report.failed or report.skipped}")
+        raise SystemExit(
+            f"could not install monorl routes on the vLLM server: {report.failed or report.skipped}"
+        )
 
     cli_env_setup()
     parser = FlexibleArgumentParser(description="monorl vLLM server (vllm serve + weight-update endpoints).")

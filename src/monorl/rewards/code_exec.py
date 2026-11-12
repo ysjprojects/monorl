@@ -98,7 +98,11 @@ def normalize_tests(reference: Any) -> list[CodeCase]:
                 raise ValueError("code_exec: inputs and outputs have different lengths")
             return [CodeCase(stdin=str(i), expected_stdout=str(o)) for i, o in zip(ins, outs, strict=True)]
         if "input" in reference or "output" in reference:
-            return [CodeCase(stdin=str(reference.get("input", "")), expected_stdout=str(reference.get("output", "")))]
+            return [
+                CodeCase(
+                    stdin=str(reference.get("input", "")), expected_stdout=str(reference.get("output", ""))
+                )
+            ]
         for key in ("test", "code", "assert"):
             if key in reference:
                 return [CodeCase(test_code=str(reference[key]))]
@@ -245,7 +249,11 @@ class CodeExecReward:
         if not cases:
             # No tests: reward compiles-and-runs.
             result = self.run_case(code, CodeCase())
-            return (1.0 if result.passed else 0.0), {"status": result.status, "passed": int(result.passed), "total": 1}
+            return (1.0 if result.passed else 0.0), {
+                "status": result.status,
+                "passed": int(result.passed),
+                "total": 1,
+            }
         results = [self.run_case(code, case) for case in cases]
         passed = sum(r.passed for r in results)
         score = passed / len(results) if self.mode == "fraction" else float(passed == len(results))

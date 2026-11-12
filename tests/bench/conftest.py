@@ -34,7 +34,13 @@ class FakeEngine:
     """Returns ``tokens_per_completion`` tokens per completion and sleeps ``seconds_per_call``
     (plus ``seconds_per_prompt`` per prompt) so throughput numbers are predictable."""
 
-    def __init__(self, *, tokens_per_completion: int = 5, seconds_per_call: float = 0.0, seconds_per_prompt: float = 0.0) -> None:
+    def __init__(
+        self,
+        *,
+        tokens_per_completion: int = 5,
+        seconds_per_call: float = 0.0,
+        seconds_per_prompt: float = 0.0,
+    ) -> None:
         self.tokens_per_completion = tokens_per_completion
         self.seconds_per_call = seconds_per_call
         self.seconds_per_prompt = seconds_per_prompt

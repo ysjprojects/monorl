@@ -66,14 +66,28 @@ def _emit(result: Any, json_path: Path | None, render: Any) -> None:
 
 @app.command()
 def rollout(
-    config: Path = typer.Option(..., "--config", "-c", help="RunConfig YAML; rollout.backend picks the engine."),
-    set_: list[str] | None = typer.Option(None, "--set", "-s", help="Override: key.path=value (YAML-coerced)."),
+    config: Path = typer.Option(
+        ..., "--config", "-c", help="RunConfig YAML; rollout.backend picks the engine."
+    ),
+    set_: list[str] | None = typer.Option(
+        None, "--set", "-s", help="Override: key.path=value (YAML-coerced)."
+    ),
     prompts: int = typer.Option(64, "--prompts", min=1, help="Prompts taken from the configured dataset."),
-    seconds: float | None = typer.Option(30.0, "--seconds", help="Wall-time budget per batch size (0 = unlimited)."),
-    batch_sizes: str = typer.Option("1,4,16,64", "--batch-sizes", help="Comma-separated prompts per generate() call."),
-    n: int | None = typer.Option(None, "--n", min=1, help="Completions per prompt (default rollout.group_size)."),
-    max_new_tokens: int | None = typer.Option(None, "--max-new-tokens", min=1, help="Default rollout.max_new_tokens."),
-    warmup: bool = typer.Option(True, "--warmup/--no-warmup", help="One untimed generate() call before measuring."),
+    seconds: float | None = typer.Option(
+        30.0, "--seconds", help="Wall-time budget per batch size (0 = unlimited)."
+    ),
+    batch_sizes: str = typer.Option(
+        "1,4,16,64", "--batch-sizes", help="Comma-separated prompts per generate() call."
+    ),
+    n: int | None = typer.Option(
+        None, "--n", min=1, help="Completions per prompt (default rollout.group_size)."
+    ),
+    max_new_tokens: int | None = typer.Option(
+        None, "--max-new-tokens", min=1, help="Default rollout.max_new_tokens."
+    ),
+    warmup: bool = typer.Option(
+        True, "--warmup/--no-warmup", help="One untimed generate() call before measuring."
+    ),
     json_path: Path | None = typer.Option(None, "--json", help="Write the full result as JSON to this path."),
 ) -> None:
     """Generate from the recipe's dataset at several batch sizes: tokens/s, requests/s, latency, RSS."""
@@ -136,7 +150,9 @@ def rollout(
 
 @app.command()
 def env(
-    command: list[str] | None = typer.Option(None, "--command", "-c", help="Server argv for stdio (repeatable)."),
+    command: list[str] | None = typer.Option(
+        None, "--command", "-c", help="Server argv for stdio (repeatable)."
+    ),
     url: str | None = typer.Option(None, "--url", help="Base URL of an http MEP/1 server."),
     parallel: str = typer.Option("1,4,16", "--parallel", help="Comma-separated concurrent-episode levels."),
     episodes: int = typer.Option(32, "--episodes", min=1, help="Episodes per level."),
@@ -144,7 +160,10 @@ def env(
     cwd: Path | None = typer.Option(None, "--cwd", help="Working directory for the stdio server."),
     timeout: float = typer.Option(60.0, "--timeout", help="Seconds to wait for each response."),
     parallel_episodes: int | None = typer.Option(
-        None, "--parallel-episodes", min=1, help="Episodes per stdio process (default spec.parallel_episodes)."
+        None,
+        "--parallel-episodes",
+        min=1,
+        help="Episodes per stdio process (default spec.parallel_episodes).",
     ),
     json_path: Path | None = typer.Option(None, "--json", help="Write the full result as JSON to this path."),
 ) -> None:
@@ -154,7 +173,9 @@ def env(
     if bool(command) == bool(url):
         _fail("pass exactly one of --command or --url", code=2)
     levels = _int_list(parallel, "--parallel")
-    target = EnvTarget(command=list(command) if command else None, url=url, cwd=str(cwd) if cwd else None, timeout_s=timeout)
+    target = EnvTarget(
+        command=list(command) if command else None, url=url, cwd=str(cwd) if cwd else None, timeout_s=timeout
+    )
     try:
         result = run_env_benchmark(
             target,
@@ -176,17 +197,30 @@ def env(
 
 @app.command()
 def sync(
-    config: Path | None = typer.Option(None, "--config", "-c", help="RunConfig YAML; builds the real runtime."),
-    set_: list[str] | None = typer.Option(None, "--set", "-s", help="Override: key.path=value (YAML-coerced)."),
-    fake_params: int | None = typer.Option(
-        None, "--fake-params", min=1, help="Use N synthetic fp32 parameters instead of the configured trainer/engine."
+    config: Path | None = typer.Option(
+        None, "--config", "-c", help="RunConfig YAML; builds the real runtime."
     ),
-    engines: int = typer.Option(1, "--engines", min=1, help="Synthetic engines to sync into (--fake-params only)."),
+    set_: list[str] | None = typer.Option(
+        None, "--set", "-s", help="Override: key.path=value (YAML-coerced)."
+    ),
+    fake_params: int | None = typer.Option(
+        None,
+        "--fake-params",
+        min=1,
+        help="Use N synthetic fp32 parameters instead of the configured trainer/engine.",
+    ),
+    engines: int = typer.Option(
+        1, "--engines", min=1, help="Synthetic engines to sync into (--fake-params only)."
+    ),
     repeats: int = typer.Option(3, "--repeats", min=1, help="Sync calls per strategy."),
     all_strategies: bool = typer.Option(
-        False, "--all", help="Try every registered strategy, not only the configured one (default with --fake-params)."
+        False,
+        "--all",
+        help="Try every registered strategy, not only the configured one (default with --fake-params).",
     ),
-    strategy: list[str] | None = typer.Option(None, "--strategy", help="Strategy name(s) to measure (repeatable)."),
+    strategy: list[str] | None = typer.Option(
+        None, "--strategy", help="Strategy name(s) to measure (repeatable)."
+    ),
     json_path: Path | None = typer.Option(None, "--json", help="Write the full result as JSON to this path."),
 ) -> None:
     """Time weight sync (trainer → engines) for the configured strategy or every strategy that works here."""
@@ -207,12 +241,24 @@ def sync(
         if fake_params is not None:
             source = SyntheticWeightSource(fake_params)
             engine_list: list[Any] = [SyntheticEngine(source) for _ in range(engines)]
-            if names is None and not all_strategies and config is not None and cfg.cluster.weight_sync != "auto":
+            if (
+                names is None
+                and not all_strategies
+                and config is not None
+                and cfg.cluster.weight_sync != "auto"
+            ):
                 names = [cfg.cluster.weight_sync]
             candidates = resolve_strategies(cfg, names)
-            console.print(f"synthetic source: {source.num_params:,} params ({source.num_bytes / 1e9:.3f} GB) → {engines} engine(s)")
+            console.print(
+                f"synthetic source: {source.num_params:,} params ({source.num_bytes / 1e9:.3f} GB) → {engines} engine(s)"
+            )
             result = run_sync_benchmark(
-                source, engine_list, candidates, repeats=repeats, source="synthetic", num_params=source.num_params
+                source,
+                engine_list,
+                candidates,
+                repeats=repeats,
+                source="synthetic",
+                num_params=source.num_params,
             )
         else:
             from monorl.distributed import build_runtime
@@ -255,13 +301,23 @@ def sync(
 @app.command()
 def plan(
     config: Path = typer.Option(..., "--config", "-c", help="RunConfig YAML."),
-    set_: list[str] | None = typer.Option(None, "--set", "-s", help="Override: key.path=value (YAML-coerced)."),
+    set_: list[str] | None = typer.Option(
+        None, "--set", "-s", help="Override: key.path=value (YAML-coerced)."
+    ),
     gpus: int | None = typer.Option(None, "--gpus", min=0, help="GPUs to plan for (default: detected)."),
-    gpu_mem_gb: float | None = typer.Option(None, "--gpu-mem-gb", min=0.0, help="Memory per GPU in GiB (default: detected or 80)."),
-    preset: str | None = typer.Option(None, "--preset", help="Throughput preset: h100 (default with GPUs), a100, l40s, mps, cpu."),
+    gpu_mem_gb: float | None = typer.Option(
+        None, "--gpu-mem-gb", min=0.0, help="Memory per GPU in GiB (default: detected or 80)."
+    ),
+    preset: str | None = typer.Option(
+        None, "--preset", help="Throughput preset: h100 (default with GPUs), a100, l40s, mps, cpu."
+    ),
     tflops: float | None = typer.Option(None, "--gpu-tflops", help="Override dense bf16 TFLOP/s per device."),
-    bandwidth: float | None = typer.Option(None, "--gpu-bandwidth-gbs", help="Override memory bandwidth per device (GB/s)."),
-    prompt_tokens: int = typer.Option(256, "--prompt-tokens", min=1, help="Assumed prompt length for the estimate."),
+    bandwidth: float | None = typer.Option(
+        None, "--gpu-bandwidth-gbs", help="Override memory bandwidth per device (GB/s)."
+    ),
+    prompt_tokens: int = typer.Option(
+        256, "--prompt-tokens", min=1, help="Assumed prompt length for the estimate."
+    ),
     json_path: Path | None = typer.Option(None, "--json", help="Write the full result as JSON to this path."),
 ) -> None:
     """Print the placement plan for the recipe on G×M GB GPUs and a back-of-envelope step-time estimate."""

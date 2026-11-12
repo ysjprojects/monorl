@@ -45,7 +45,11 @@ def conversation(trajectory: Trajectory) -> list[Message]:
     msgs = list(trajectory.messages) if trajectory.messages else list(trajectory.sample.messages)
     if not trajectory.turns:
         return msgs
-    if msgs and msgs[-1].get("role") == "assistant" and message_text(msgs[-1]) == trajectory.last_response_text:
+    if (
+        msgs
+        and msgs[-1].get("role") == "assistant"
+        and message_text(msgs[-1]) == trajectory.last_response_text
+    ):
         return msgs
     return [*msgs, {"role": "assistant", "content": trajectory.last_response_text}]
 

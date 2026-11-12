@@ -29,11 +29,26 @@ def test_help_lists_subcommands(runner) -> None:
         assert name in result.output
 
 
-def test_rollout_command_with_registered_fake_engine(runner, registered_fake_engine, recipe: Path, tmp_path: Path) -> None:
+def test_rollout_command_with_registered_fake_engine(
+    runner, registered_fake_engine, recipe: Path, tmp_path: Path
+) -> None:
     out = tmp_path / "rollout.json"
     result = runner.invoke(
         app,
-        ["rollout", "--config", str(recipe), "--prompts", "4", "--batch-sizes", "1,2,8", "--seconds", "0", "--json", str(out), "--no-warmup"],
+        [
+            "rollout",
+            "--config",
+            str(recipe),
+            "--prompts",
+            "4",
+            "--batch-sizes",
+            "1,2,8",
+            "--seconds",
+            "0",
+            "--json",
+            str(out),
+            "--no-warmup",
+        ],
     )
     assert result.exit_code == 0, result.output
     assert "rollout throughput" in result.output
@@ -56,7 +71,9 @@ def test_rollout_rejects_bad_batch_sizes(runner, registered_fake_engine, recipe:
 
 
 def test_rollout_unknown_backend_fails_cleanly(runner, recipe: Path) -> None:
-    result = runner.invoke(app, ["rollout", "--config", str(recipe), "--set", "rollout.backend=does-not-exist"])
+    result = runner.invoke(
+        app, ["rollout", "--config", str(recipe), "--set", "rollout.backend=does-not-exist"]
+    )
     assert result.exit_code == 1
     assert "does-not-exist" in result.output
 
@@ -84,7 +101,22 @@ def test_sync_command_fake_params(runner, tmp_path: Path) -> None:
     pytest.importorskip("torch")
     out = tmp_path / "sync.json"
     result = runner.invoke(
-        app, ["sync", "--fake-params", "100000", "--engines", "2", "--repeats", "2", "--strategy", "inprocess", "--strategy", "checkpoint", "--json", str(out)]
+        app,
+        [
+            "sync",
+            "--fake-params",
+            "100000",
+            "--engines",
+            "2",
+            "--repeats",
+            "2",
+            "--strategy",
+            "inprocess",
+            "--strategy",
+            "checkpoint",
+            "--json",
+            str(out),
+        ],
     )
     assert result.exit_code == 0, result.output
     assert "weight sync" in result.output
@@ -126,7 +158,9 @@ def test_plan_command_with_fake_plan_placement(runner, recipe: Path, tmp_path: P
 
     monkeypatch.setattr(monorl.distributed, "plan_placement", fake_plan)
     out = tmp_path / "plan.json"
-    result = runner.invoke(app, ["plan", "--config", str(recipe), "--gpus", "4", "--gpu-mem-gb", "40", "--json", str(out)])
+    result = runner.invoke(
+        app, ["plan", "--config", str(recipe), "--gpus", "4", "--gpu-mem-gb", "40", "--json", str(out)]
+    )
     assert result.exit_code == 0, result.output
     assert "placement plan" in result.output
     assert "fake plan for 4 gpus" in result.output

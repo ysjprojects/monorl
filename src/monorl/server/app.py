@@ -36,11 +36,19 @@ CORS_ORIGINS = [
 class ServerSettings:
     home: Path = field(default_factory=default_home)
     recipes_dir: Path = field(
-        default_factory=lambda: Path(os.environ.get("MONORL_RECIPES_DIR") or REPO_ROOT / "configs" / "recipes")
+        default_factory=lambda: Path(
+            os.environ.get("MONORL_RECIPES_DIR") or REPO_ROOT / "configs" / "recipes"
+        )
     )
-    web_dist: Path = field(default_factory=lambda: Path(os.environ.get("MONORL_WEB_DIST") or REPO_ROOT / "web" / "dist"))
-    envs_bin: Path = field(default_factory=lambda: Path(os.environ.get("MONORL_ENVS_BIN") or REPO_ROOT / "envs" / "bin"))
-    envs_sdk: Path = field(default_factory=lambda: Path(os.environ.get("MONORL_ENVS_SDK") or REPO_ROOT / "envs" / "sdk"))
+    web_dist: Path = field(
+        default_factory=lambda: Path(os.environ.get("MONORL_WEB_DIST") or REPO_ROOT / "web" / "dist")
+    )
+    envs_bin: Path = field(
+        default_factory=lambda: Path(os.environ.get("MONORL_ENVS_BIN") or REPO_ROOT / "envs" / "bin")
+    )
+    envs_sdk: Path = field(
+        default_factory=lambda: Path(os.environ.get("MONORL_ENVS_SDK") or REPO_ROOT / "envs" / "sdk")
+    )
     cors_origins: list[str] = field(default_factory=lambda: list(CORS_ORIGINS))
 
 
@@ -51,7 +59,11 @@ def validation_errors(exc: BaseException) -> list[dict[str, Any]]:
         exc = exc.__cause__
     if isinstance(exc, (ValidationError, RequestValidationError)):
         return [
-            {"loc": [str(p) for p in e.get("loc", ())], "msg": str(e.get("msg", "")), "type": str(e.get("type", ""))}
+            {
+                "loc": [str(p) for p in e.get("loc", ())],
+                "msg": str(e.get("msg", "")),
+                "type": str(e.get("type", "")),
+            }
             for e in exc.errors()
         ]
     return [{"loc": [], "msg": str(exc), "type": "value_error"}]

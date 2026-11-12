@@ -63,7 +63,9 @@ def resolve_pipeline_run_dir(config: PipelineConfig, run_dir: Path | None = None
     return name, Path(config.base.logging.run_root).expanduser() / name
 
 
-def run_pipeline(config: PipelineConfig, run_dir: Path | None = None, *, resume: bool = False) -> PipelineResult:
+def run_pipeline(
+    config: PipelineConfig, run_dir: Path | None = None, *, resume: bool = False
+) -> PipelineResult:
     name, target = resolve_pipeline_run_dir(config, run_dir)
     if config.name != name:
         config = config.model_copy(update={"name": name})
@@ -83,7 +85,9 @@ def run_pipeline(config: PipelineConfig, run_dir: Path | None = None, *, resume:
     cancel = threading.Event()
     runner = _StageRunner(config, manifest, reporter, stages_root, cancel=cancel, resume=resume)
     with _signal_guard(cancel, reporter):
-        reporter.set_status("running", f"pipeline {name}: {len(config.stages)} stages (resume={resume})", step=0)
+        reporter.set_status(
+            "running", f"pipeline {name}: {len(config.stages)} stages (resume={resume})", step=0
+        )
         try:
             validate_stage_configs(config, stages_root)
         except (ConfigError, ValueError, TypeError) as e:
@@ -158,7 +162,9 @@ class _StageRunner:
         return sum(1 for s in self.manifest.stages if s.state == "succeeded")
 
     def _status(self, record: StageRecord, message: str) -> None:
-        self.reporter.set_status("running", f"stage {record.index + 1}/{len(self.manifest.stages)} {message}", step=self.finished)
+        self.reporter.set_status(
+            "running", f"stage {record.index + 1}/{len(self.manifest.stages)} {message}", step=self.finished
+        )
 
     def mark_active(self, state: str, error: str | None) -> None:
         record = self.active
@@ -197,7 +203,9 @@ class _StageRunner:
             if self.cancel.is_set():
                 raise _Cancelled
             if self.resume and record.state == "succeeded" and self._reuse(record):
-                self.reporter.log(f"stage {index + 1} {record.name!r} already succeeded; reusing {record.run_dir}")
+                self.reporter.log(
+                    f"stage {index + 1} {record.name!r} already succeeded; reusing {record.run_dir}"
+                )
                 continue
             self.active = record
             record.state = "running"
@@ -208,7 +216,9 @@ class _StageRunner:
             record.summary = {}
             self.manifest.write()
             self._status(record, f"{record.name} ({record.type})")
-            self.reporter.log(f"stage {index + 1}/{len(self.config.stages)} {record.name!r} ({record.type}) -> {record.run_dir}")
+            self.reporter.log(
+                f"stage {index + 1}/{len(self.config.stages)} {record.name!r} ({record.type}) -> {record.run_dir}"
+            )
             try:
                 if isinstance(stage, TrainStage):
                     self._train(index, stage, record)
@@ -224,7 +234,11 @@ class _StageRunner:
             if record.state == "failed":
                 raise RuntimeError(f"stage {record.name!r} failed: {record.error}")
             self.active = None
-            self.reporter.set_status("running", f"stage {index + 1}/{len(self.config.stages)} {record.name} done", step=self.finished)
+            self.reporter.set_status(
+                "running",
+                f"stage {index + 1}/{len(self.config.stages)} {record.name} done",
+                step=self.finished,
+            )
 
     def _reuse(self, record: StageRecord) -> bool:
         """Resume: adopt a finished stage's outputs if they still exist."""

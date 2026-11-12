@@ -94,7 +94,14 @@ def test_grpo_snapshot(make_config, tmp_path: Path):
 
 def test_dapo_snapshot(make_config, tmp_path: Path):
     cfg = make_config(
-        algorithm={"name": "dapo", "kl_coef": 0.0, "clip_eps": 0.2, "clip_eps_high": 0.28, "dynamic_sampling": True, "overlong_penalty": 1.0},
+        algorithm={
+            "name": "dapo",
+            "kl_coef": 0.0,
+            "clip_eps": 0.2,
+            "clip_eps_high": 0.28,
+            "dynamic_sampling": True,
+            "overlong_penalty": 1.0,
+        },
         rollout={"backend": "vllm", "group_size": 8, "max_new_tokens": 2000},
     )
     ov = _overrides(cfg, tmp_path)
@@ -115,7 +122,9 @@ def test_dapo_snapshot(make_config, tmp_path: Path):
 
 
 def test_rloo_snapshot(make_config, tmp_path: Path):
-    cfg = make_config(algorithm={"name": "rloo", "kl_coef": 0.01, "kl_estimator": "k1", "loss_agg": "sequence"})
+    cfg = make_config(
+        algorithm={"name": "rloo", "kl_coef": 0.01, "kl_estimator": "k1", "loss_agg": "sequence"}
+    )
     ov = _overrides(cfg, tmp_path)
     assert ov["algorithm.adv_estimator"] == "rloo"
     assert ov["actor_rollout_ref.actor.use_kl_loss"] == "true"
@@ -126,11 +135,16 @@ def test_rloo_snapshot(make_config, tmp_path: Path):
 
 
 def test_reinforce_and_ppo(make_config, tmp_path: Path):
-    ov = _overrides(make_config(algorithm={"name": "reinforce", "advantage_norm": "batch"}, rollout={"group_size": 1}), tmp_path)
+    ov = _overrides(
+        make_config(algorithm={"name": "reinforce", "advantage_norm": "batch"}, rollout={"group_size": 1}),
+        tmp_path,
+    )
     assert ov["algorithm.adv_estimator"] == "reinforce_plus_plus"
     ov = _overrides(make_config(algorithm={"name": "reinforce", "advantage_norm": "group"}), tmp_path)
     assert ov["algorithm.adv_estimator"] == "reinforce_plus_plus_baseline"
-    ov = _overrides(make_config(algorithm={"name": "ppo", "kl_coef": 0.05, "gamma": 0.99, "lam": 0.95}), tmp_path)
+    ov = _overrides(
+        make_config(algorithm={"name": "ppo", "kl_coef": 0.05, "gamma": 0.99, "lam": 0.95}), tmp_path
+    )
     assert ov["algorithm.adv_estimator"] == "gae"
     assert ov["algorithm.gamma"] == "0.99"
     assert ov["algorithm.lam"] == "0.95"
@@ -166,7 +180,13 @@ def test_model_options(make_config, tmp_path: Path):
             "lora": {"enabled": True, "r": 8, "alpha": 16, "target_modules": ["q_proj", "v_proj"]},
         },
         trainer={"backend": "verl", "gradient_checkpointing": True, "warmup_steps": 5, "weight_decay": 0.1},
-        rollout={"backend": "hf", "group_size": 2, "tensor_parallel_size": 2, "max_model_len": 4096, "enable_sleep_mode": False},
+        rollout={
+            "backend": "hf",
+            "group_size": 2,
+            "tensor_parallel_size": 2,
+            "max_model_len": 4096,
+            "enable_sleep_mode": False,
+        },
     )
     ov = _overrides(cfg, tmp_path)
     assert ov["actor_rollout_ref.model.lora_rank"] == "8"
@@ -186,7 +206,12 @@ def test_model_options(make_config, tmp_path: Path):
 
 def test_eval_and_logging(make_config, tmp_path: Path, data_file: Path):
     cfg = make_config(
-        data={"uri": str(data_file), "prompt_field": "prompt", "answer_field": "answer", "eval_uri": str(data_file)},
+        data={
+            "uri": str(data_file),
+            "prompt_field": "prompt",
+            "answer_field": "answer",
+            "eval_uri": str(data_file),
+        },
         trainer={"backend": "verl", "eval_every": 5},
         logging={"wandb_project": "proj", "tensorboard": True, "save_trajectories": False},
     )
@@ -198,7 +223,15 @@ def test_eval_and_logging(make_config, tmp_path: Path, data_file: Path):
 
 
 def test_disaggregated_placement(make_config, tmp_path: Path):
-    cfg = make_config(cluster={"num_nodes": 1, "gpus_per_node": 8, "placement": "disaggregated", "rollout_gpus": 2, "trainer_gpus": 6})
+    cfg = make_config(
+        cluster={
+            "num_nodes": 1,
+            "gpus_per_node": 8,
+            "placement": "disaggregated",
+            "rollout_gpus": 2,
+            "trainer_gpus": 6,
+        }
+    )
     ov = _overrides(cfg, tmp_path)
     assert ov["actor_rollout_ref.hybrid_engine"] == "false"
     assert ov["actor_rollout_ref.rollout.nnodes"] == "1"

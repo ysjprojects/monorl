@@ -49,7 +49,11 @@ def stdio_params() -> dict:
 @pytest.fixture(scope="module")
 def http_server():
     handle = start_http_server(
-        MEPServer(lambda: make_tool_calling_env({"tools": ["calculator"]}, max_turns=3), name="http_tools", parallel_episodes=8),
+        MEPServer(
+            lambda: make_tool_calling_env({"tools": ["calculator"]}, max_turns=3),
+            name="http_tools",
+            parallel_episodes=8,
+        ),
         port=0,
     )
     yield handle

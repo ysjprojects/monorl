@@ -39,7 +39,9 @@ def build_sleep_guard(original: Any) -> Any:
     @functools.wraps(original)
     def sleep(self: Any, level: int = 1, mode: str = "abort") -> Any:
         if not _sleep_mode_enabled(self):
-            log.warning("vllm.LLM.sleep(level=%s) ignored: engine was created without enable_sleep_mode", level)
+            log.warning(
+                "vllm.LLM.sleep(level=%s) ignored: engine was created without enable_sleep_mode", level
+            )
             return None
         return original(self, level=level, mode=mode)
 

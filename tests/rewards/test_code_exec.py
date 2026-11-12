@@ -13,7 +13,9 @@ STDIO = "```python\nimport sys\na, b = map(int, sys.stdin.read().split())\nprint
 
 def test_normalize_tests_formats():
     assert normalize_tests("assert add(1, 2) == 3") == [CodeCase(test_code="assert add(1, 2) == 3")]
-    assert normalize_tests({"inputs": ["1 2"], "outputs": ["3"]}) == [CodeCase(stdin="1 2", expected_stdout="3")]
+    assert normalize_tests({"inputs": ["1 2"], "outputs": ["3"]}) == [
+        CodeCase(stdin="1 2", expected_stdout="3")
+    ]
     assert normalize_tests([{"input": "1 2\n", "output": "3\n"}, "assert True", {"test": "assert 1"}]) == [
         CodeCase(stdin="1 2\n", expected_stdout="3\n"),
         CodeCase(test_code="assert True"),
@@ -64,7 +66,9 @@ def test_timeout_kills_infinite_loop(traj):
 
 def test_memory_limit_enforced():
     sandbox = Sandbox(timeout_s=10.0, memory_mb=64)
-    status, _, _ = sandbox.run("x = bytearray(400 * 1024 * 1024)\nfor i in range(0, len(x), 4096):\n    x[i] = 1\nprint('done')")
+    status, _, _ = sandbox.run(
+        "x = bytearray(400 * 1024 * 1024)\nfor i in range(0, len(x), 4096):\n    x[i] = 1\nprint('done')"
+    )
     assert status in ("memory", "error")  # rlimit (Linux) → MemoryError exit; RSS watchdog (macOS) → killed
     ok_status, _, out = sandbox.run("print('fine')")
     assert (ok_status, out.strip()) == ("ok", "fine")
@@ -72,6 +76,8 @@ def test_memory_limit_enforced():
 
 def test_sandbox_isolation():
     sandbox = Sandbox(timeout_s=10.0, memory_mb=256)
-    status, _, out = sandbox.run("import os, sys\nprint(os.getcwd() != os.path.expanduser('~'), 'MONORL_SECRET' in os.environ)")
+    status, _, out = sandbox.run(
+        "import os, sys\nprint(os.getcwd() != os.path.expanduser('~'), 'MONORL_SECRET' in os.environ)"
+    )
     assert status == "ok"
     assert out.strip() == "True False"

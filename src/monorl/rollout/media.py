@@ -71,7 +71,9 @@ KNOWN_VLM_MODEL_TYPES: frozenset[str] = frozenset(
 """``config.model_type`` values of transformers VLMs; the structural checks in
 :func:`is_vlm_config` catch families not listed here."""
 
-TOKEN_ALIGNED_KEYS: frozenset[str] = frozenset({"input_ids", "attention_mask", "mm_token_type_ids", "token_type_ids"})
+TOKEN_ALIGNED_KEYS: frozenset[str] = frozenset(
+    {"input_ids", "attention_mask", "mm_token_type_ids", "token_type_ids"}
+)
 """Processor outputs shaped ``[1, T]`` and aligned with ``input_ids``; everything else returned by
 the processor is a per-sequence media tensor concatenated along dim 0 when batching."""
 
@@ -191,8 +193,9 @@ def is_vlm_config(hf_config: Any) -> bool:
 
 
 def is_vlm_processor(obj: Any) -> bool:
-    return getattr(obj, "image_processor", None) is not None and callable(getattr(obj, "apply_chat_template", None))
-
+    return getattr(obj, "image_processor", None) is not None and callable(
+        getattr(obj, "apply_chat_template", None)
+    )
 
 
 def _read_hf_config(config: RunConfig) -> Any | None:
@@ -200,7 +203,9 @@ def _read_hf_config(config: RunConfig) -> Any | None:
 
     model = config.model
     try:
-        return AutoConfig.from_pretrained(model.name_or_path, revision=model.revision, trust_remote_code=model.trust_remote_code)
+        return AutoConfig.from_pretrained(
+            model.name_or_path, revision=model.revision, trust_remote_code=model.trust_remote_code
+        )
     except Exception as e:  # noqa: BLE001 - unreadable config: behave as text-only, model loading reports the real error
         log.debug("cannot read config for %s: %s", model.name_or_path, e)
         return None
@@ -236,7 +241,11 @@ def load_processor(config: RunConfig) -> Any | None:
             trust_remote_code=model.trust_remote_code,
         )
     except Exception as e:  # noqa: BLE001 - e.g. missing preprocessor_config.json or image backend
-        log.warning("load_processor: %s looks like a VLM but AutoProcessor failed (%s); using text-only path", model.name_or_path, e)
+        log.warning(
+            "load_processor: %s looks like a VLM but AutoProcessor failed (%s); using text-only path",
+            model.name_or_path,
+            e,
+        )
         return None
     if not is_vlm_processor(processor):
         return None
@@ -250,7 +259,9 @@ def load_processor(config: RunConfig) -> Any | None:
     return processor
 
 
-def vlm_encode(processor: Any, messages: Sequence[Message], *, add_generation_prompt: bool = True) -> dict[str, torch.Tensor]:
+def vlm_encode(
+    processor: Any, messages: Sequence[Message], *, add_generation_prompt: bool = True
+) -> dict[str, torch.Tensor]:
     """Processor outputs for one chat (batch dim 1): ``input_ids`` with media placeholders plus
     every media tensor the model forward needs. See the module docstring for the recipe."""
     enc = processor.apply_chat_template(
@@ -273,7 +284,9 @@ def needs_processor(messages: Sequence[Message]) -> bool:
     return messages_have_media(list(messages))
 
 
-def split_processor_outputs(enc: dict[str, torch.Tensor]) -> tuple[dict[str, torch.Tensor], dict[str, torch.Tensor]]:
+def split_processor_outputs(
+    enc: dict[str, torch.Tensor],
+) -> tuple[dict[str, torch.Tensor], dict[str, torch.Tensor]]:
     """``(token_aligned, per_sequence)``: ``[1, T]`` tensors aligned with ``input_ids`` (minus
     ``input_ids``/``attention_mask`` themselves) and the remaining media tensors."""
     width = int(enc["input_ids"].shape[1])

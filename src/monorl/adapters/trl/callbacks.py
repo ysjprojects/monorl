@@ -94,10 +94,21 @@ class ReporterCallback(TrainerCallback):
         self.label = label
         self.last_metrics: dict[str, float] = {}
 
-    def on_train_begin(self, args: TrainingArguments, state: TrainerState, control: TrainerControl, **kw: Any) -> None:
-        self.reporter.set_status("running", f"{self.label}: {state.max_steps} steps", step=int(state.global_step))
+    def on_train_begin(
+        self, args: TrainingArguments, state: TrainerState, control: TrainerControl, **kw: Any
+    ) -> None:
+        self.reporter.set_status(
+            "running", f"{self.label}: {state.max_steps} steps", step=int(state.global_step)
+        )
 
-    def on_log(self, args: TrainingArguments, state: TrainerState, control: TrainerControl, logs: dict | None = None, **kw: Any) -> None:
+    def on_log(
+        self,
+        args: TrainingArguments,
+        state: TrainerState,
+        control: TrainerControl,
+        logs: dict | None = None,
+        **kw: Any,
+    ) -> None:
         if not logs:
             return
         phase = "eval" if any(k.startswith("eval_") for k in logs) else "train"
@@ -106,7 +117,9 @@ class ReporterCallback(TrainerCallback):
             self.last_metrics.update(metrics)
         self.reporter.log_metrics(int(state.global_step), metrics, phase=phase)
 
-    def on_save(self, args: TrainingArguments, state: TrainerState, control: TrainerControl, **kw: Any) -> None:
+    def on_save(
+        self, args: TrainingArguments, state: TrainerState, control: TrainerControl, **kw: Any
+    ) -> None:
         step = int(state.global_step)
         link = link_checkpoint(Path(args.output_dir), step)
         if link is not None:

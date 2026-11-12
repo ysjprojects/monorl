@@ -34,7 +34,13 @@ def _image_sample(tmp_path: Path, sid: str = "s1") -> Sample:
         id=sid,
         messages=[
             {"role": "system", "content": "be precise"},
-            {"role": "user", "content": [{"type": "image", "image": str(path)}, {"type": "text", "text": "How many sides?"}]},
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image", "image": str(path)},
+                    {"type": "text", "text": "How many sides?"},
+                ],
+            },
         ],
         reference="4",
         metadata={"response": "four"},
@@ -72,7 +78,11 @@ def test_write_parquet_images_column(tmp_path: Path) -> None:
     rows = table.to_pylist()
     assert rows[0]["prompt"][1]["content"].startswith("<image>") and len(rows[0]["images"]) == 1
     assert rows[1]["images"] == []  # text-only rows in a multimodal export carry no images
-    assert Image.open(io.BytesIO(rows[0]["images"][0]["bytes"])).convert("RGB").getpixel((0, 0)) == (0, 128, 0)
+    assert Image.open(io.BytesIO(rows[0]["images"][0]["bytes"])).convert("RGB").getpixel((0, 0)) == (
+        0,
+        128,
+        0,
+    )
 
 
 def test_export_datasets_with_image_field(make_config, tmp_path: Path) -> None:
@@ -80,7 +90,9 @@ def test_export_datasets_with_image_field(make_config, tmp_path: Path) -> None:
     Image.new("RGB", (3, 3), (255, 255, 0)).save(img)
     data_file = tmp_path / "vqa.jsonl"
     data_file.write_text(json.dumps({"q": "colour?", "a": "yellow", "pic": str(img)}) + "\n")
-    cfg = make_config(data={"uri": str(data_file), "prompt_field": "q", "answer_field": "a", "image_field": "pic"})
+    cfg = make_config(
+        data={"uri": str(data_file), "prompt_field": "q", "answer_field": "a", "image_field": "pic"}
+    )
     paths = export_datasets(cfg, tmp_path)
     assert parquet_has_images(paths["train"])
     row = pq.read_table(paths["train"]).to_pylist()[0]
@@ -92,10 +104,14 @@ def test_compile_config_multimodal_keys(make_config, tmp_path: Path) -> None:
     tree = compile_config(cfg, tmp_path)
     assert tree["data"]["image_key"] == "images"
     assert tree["actor_rollout_ref"]["model"]["use_remove_padding"] is True
-    assert tree["actor_rollout_ref"]["rollout"]["engine_kwargs"] == {"vllm": {"+limit_mm_per_prompt": {"image": 2}}}
+    assert tree["actor_rollout_ref"]["rollout"]["engine_kwargs"] == {
+        "vllm": {"+limit_mm_per_prompt": {"image": 2}}
+    }
     assert "+actor_rollout_ref.rollout.engine_kwargs.vllm.limit_mm_per_prompt.image=2" in to_overrides(tree)
     plain = compile_config(make_config(), tmp_path)
-    assert "image_key" not in plain["data"] and "use_remove_padding" not in plain["actor_rollout_ref"]["model"]
+    assert (
+        "image_key" not in plain["data"] and "use_remove_padding" not in plain["actor_rollout_ref"]["model"]
+    )
     assert "image_key" in compile_config(make_config(), tmp_path, multimodal=True)["data"]
 
 
@@ -107,7 +123,9 @@ def _sft_config(make_config, **overrides):
 
 
 def test_sft_rows_and_parquet(tmp_path: Path) -> None:
-    sample = Sample(id="s", messages=[{"role": "user", "content": "2+2?"}], reference="4", metadata={"response": "4"})
+    sample = Sample(
+        id="s", messages=[{"role": "user", "content": "2+2?"}], reference="4", metadata={"response": "4"}
+    )
     assert sft_sample_to_row(sample, response_field=None) == {
         "messages": [{"role": "user", "content": "2+2?"}, {"role": "assistant", "content": "4"}]
     }
@@ -117,7 +135,10 @@ def test_sft_rows_and_parquet(tmp_path: Path) -> None:
     assert table.column_names == ["messages", "images"]
     rows = table.to_pylist()
     assert rows[0]["messages"][-1] == {"role": "assistant", "content": "4"} and rows[0]["images"] == []
-    assert rows[1]["messages"][1]["content"] == "<image>How many sides?" and rows[1]["messages"][-1]["content"] == "four"
+    assert (
+        rows[1]["messages"][1]["content"] == "<image>How many sides?"
+        and rows[1]["messages"][-1]["content"] == "four"
+    )
     assert len(rows[1]["images"]) == 1
 
 
@@ -135,7 +156,13 @@ def test_compile_sft_config_snapshot(make_config, tmp_path: Path, data_file: Pat
     cfg = _sft_config(
         make_config,
         data={"eval_uri": str(data_file)},
-        trainer={"eval_every": 5, "max_seq_len": 2048, "precision": "bf16", "scheduler": "linear", "warmup_steps": 3},
+        trainer={
+            "eval_every": 5,
+            "max_seq_len": 2048,
+            "precision": "bf16",
+            "scheduler": "linear",
+            "warmup_steps": 3,
+        },
         model={"name_or_path": "Qwen/Qwen2.5-0.5B-Instruct", "lora": {"enabled": True, "r": 8, "alpha": 16}},
     )
     run_dir = tmp_path / "run"
@@ -146,9 +173,17 @@ def test_compile_sft_config_snapshot(make_config, tmp_path: Path, data_file: Pat
     assert data["train_files"] == str((run_dir / "data" / "sft_train.parquet").resolve())
     assert data["val_files"] == str((run_dir / "data" / "sft_val.parquet").resolve())
     assert data["messages_key"] == "messages" and data["max_length"] == 2048 and data["truncation"] == "right"
-    assert data["train_batch_size"] == 16 and data["micro_batch_size_per_gpu"] == 2 and data["use_dynamic_bsz"] is False
+    assert (
+        data["train_batch_size"] == 16
+        and data["micro_batch_size_per_gpu"] == 2
+        and data["use_dynamic_bsz"] is False
+    )
     assert "image_key" not in data
-    assert model["path"] == "Qwen/Qwen2.5-0.5B-Instruct" and model["lora_rank"] == 8 and model["lora_alpha"] == 16
+    assert (
+        model["path"] == "Qwen/Qwen2.5-0.5B-Instruct"
+        and model["lora_rank"] == 8
+        and model["lora_alpha"] == 16
+    )
     assert model["use_remove_padding"] is True
     assert optim == {
         "lr": 2e-6,
@@ -191,7 +226,12 @@ def test_sft_checkpoint_hf_export_and_metrics(tmp_path: Path) -> None:
     ckpt.mkdir(parents=True)
     assert final_model_path(tmp_path) == str(ckpt)
     metrics = map_metrics({"train/loss": 1.5, "train/lr": 1e-5, "train/global_tokens": 100, "train/mfu": 0.2})
-    assert metrics["loss/sft"] == 1.5 and metrics["lr"] == 1e-5 and metrics["tokens/total"] == 100 and metrics["train/mfu"] == 0.2
+    assert (
+        metrics["loss/sft"] == 1.5
+        and metrics["lr"] == 1e-5
+        and metrics["tokens/total"] == 100
+        and metrics["train/mfu"] == 0.2
+    )
     val = map_metrics({"val/loss": 0.9})
     assert val["eval/loss"] == 0.9 and phase_for({"val/loss": 0.9}) == "eval"
 

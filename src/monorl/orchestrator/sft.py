@@ -102,7 +102,11 @@ def _ids(tokenizer: Any, text: str) -> list[int]:
 
 
 def encode_sft_example(
-    tokenizer: Any, messages: Sequence[Message], *, train_on_prompt: bool = False, max_seq_len: int | None = None
+    tokenizer: Any,
+    messages: Sequence[Message],
+    *,
+    train_on_prompt: bool = False,
+    max_seq_len: int | None = None,
 ) -> EncodedExample:
     """Token ids and loss mask for a chat whose last message is the assistant target.
 
@@ -134,7 +138,11 @@ def encode_sft_example(
     if max_seq_len is not None and len(full_ids) > max_seq_len:
         full_ids, mask, truncated = full_ids[:max_seq_len], mask[:max_seq_len], True
     return EncodedExample(
-        input_ids=full_ids, response_mask=mask, prompt_len=prompt_len, prefix_mismatch=mismatch, truncated=truncated
+        input_ids=full_ids,
+        response_mask=mask,
+        prompt_len=prompt_len,
+        prefix_mismatch=mismatch,
+        truncated=truncated,
     )
 
 
@@ -184,7 +192,9 @@ def build_sft_batch(
 
 
 class SFTLoop:
-    def __init__(self, config: RunConfig, reporter: RunReporter, *, cancel: threading.Event, resume: bool) -> None:
+    def __init__(
+        self, config: RunConfig, reporter: RunReporter, *, cancel: threading.Event, resume: bool
+    ) -> None:
         self.config = config
         self.reporter = reporter
         self.cancel = cancel
@@ -231,7 +241,9 @@ class SFTLoop:
         random.seed(seed)
         torch.manual_seed(seed)
 
-        self.trainer = registry.get("trainer", config.trainer.backend)(config, loss_fn=select_loss_fn(config.algorithm))
+        self.trainer = registry.get("trainer", config.trainer.backend)(
+            config, loss_fn=select_loss_fn(config.algorithm)
+        )
         tokenizer = getattr(self.trainer, "tokenizer", None)
         if tokenizer is None:
             from monorl.rollout.hf_engine import load_tokenizer
@@ -249,7 +261,10 @@ class SFTLoop:
         if not self.samples:
             raise DataError(f"no usable samples in {config.data.uri}")
         self.sampler = PromptSampler(
-            self.samples, prompts_per_step=config.trainer.prompts_per_step, seed=seed, shuffle=config.data.shuffle
+            self.samples,
+            prompts_per_step=config.trainer.prompts_per_step,
+            seed=seed,
+            shuffle=config.data.shuffle,
         )
         reporter.log(f"data: {len(self.samples)} samples from {config.data.uri}")
         self._sinks = MetricSinks(config, reporter.run_dir, reporter)
@@ -301,7 +316,9 @@ class SFTLoop:
             metrics.update({k: sum(v) / len(v) for k, v in train_metrics.items()})
             metrics["sft/tokens"] = float(batch.num_response_tokens)  # trainer averages it per micro-batch
             metrics["time/train"] = time.perf_counter() - t0
-            metrics.setdefault("lr", float(getattr(self.trainer, "learning_rate", config.trainer.learning_rate)))
+            metrics.setdefault(
+                "lr", float(getattr(self.trainer, "learning_rate", config.trainer.learning_rate))
+            )
             if step % config.trainer.save_every == 0:
                 self._save_checkpoint(step)
             metrics["time/step"] = time.perf_counter() - t_step
@@ -316,7 +333,9 @@ class SFTLoop:
             self.reporter.log(f"stopping after step {last_step} (cancel requested)")
         return last_step, last_metrics, cancelled
 
-    def _encode(self, samples: Sequence[Sample], step: int) -> tuple[TrainBatch, dict[str, float], list[Trajectory]]:
+    def _encode(
+        self, samples: Sequence[Sample], step: int
+    ) -> tuple[TrainBatch, dict[str, float], list[Trajectory]]:
         config = self.config
         examples: list[EncodedExample] = []
         trajectories: list[Trajectory] = []
@@ -330,13 +349,17 @@ class SFTLoop:
             )
             examples.append(example)
             response_ids = example.input_ids[example.prompt_len :]
-            completion = Completion(text=message_text(messages[-1]), token_ids=response_ids, finish_reason="stop")
+            completion = Completion(
+                text=message_text(messages[-1]), token_ids=response_ids, finish_reason="stop"
+            )
             trajectories.append(
                 Trajectory(
                     sample=sample,
                     group_id=f"s{step}-p{i}",
                     messages=messages,
-                    turns=[Turn(prompt_token_ids=example.input_ids[: example.prompt_len], completion=completion)],
+                    turns=[
+                        Turn(prompt_token_ids=example.input_ids[: example.prompt_len], completion=completion)
+                    ],
                 )
             )
         batch, stats = build_sft_batch(
@@ -388,7 +411,12 @@ class SFTLoop:
         config = self.config
         if self._eval_samples is None:
             eval_cfg: DataConfig = config.data.model_copy(
-                update={"uri": config.data.eval_uri, "split": config.data.eval_split, "shuffle": False, "eval_uri": None}
+                update={
+                    "uri": config.data.eval_uri,
+                    "split": config.data.eval_split,
+                    "shuffle": False,
+                    "eval_uri": None,
+                }
             )
             self._eval_samples = list(_open_source()(eval_cfg, tokenizer=self.tokenizer, seed=config.seed))
             self.reporter.log(f"eval data: {len(self._eval_samples)} samples from {eval_cfg.uri}")

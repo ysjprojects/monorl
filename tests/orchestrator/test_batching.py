@@ -16,9 +16,14 @@ def _traj(turns: list[Turn], reward: float = 1.0, group_id: str = "g") -> Trajec
     return Trajectory(sample=_sample(), group_id=group_id, messages=[], turns=turns, reward=reward)
 
 
-def _turn(prompt: list[int], completion: list[int], logprobs: list[float] | None = None, finish: str = "stop") -> Turn:
+def _turn(
+    prompt: list[int], completion: list[int], logprobs: list[float] | None = None, finish: str = "stop"
+) -> Turn:
     lp = [-0.5] * len(completion) if logprobs is None else logprobs
-    return Turn(prompt_token_ids=prompt, completion=Completion(text="", token_ids=completion, logprobs=lp, finish_reason=finish))
+    return Turn(
+        prompt_token_ids=prompt,
+        completion=Completion(text="", token_ids=completion, logprobs=lp, finish_reason=finish),
+    )
 
 
 def test_single_turn_mask_and_padding() -> None:
@@ -73,7 +78,9 @@ def test_prefix_mismatch_masks_only_final_completion() -> None:
     assert flat.input_ids == [1, 2, 3, 99, 5, 6, 7, 8, 9]
     assert flat.response_mask == [0, 0, 0, 0, 0, 0, 0, 1, 1]
     assert flat.prefix_mismatch
-    _, stats = build_train_batch([traj, _traj([_turn([1], [2])])], [1.0, 1.0], pad_token_id=PAD, max_seq_len=64)
+    _, stats = build_train_batch(
+        [traj, _traj([_turn([1], [2])])], [1.0, 1.0], pad_token_id=PAD, max_seq_len=64
+    )
     assert stats["tokens/prefix_mismatch"] == 1.0
 
 
@@ -93,7 +100,9 @@ def test_truncation_to_max_seq_len() -> None:
 
 def test_missing_logprobs_yield_none_old_logprobs() -> None:
     ok = _traj([_turn([1], [2, 3])])
-    missing = _traj([Turn(prompt_token_ids=[1], completion=Completion(text="", token_ids=[2], logprobs=None))])
+    missing = _traj(
+        [Turn(prompt_token_ids=[1], completion=Completion(text="", token_ids=[2], logprobs=None))]
+    )
     batch, _ = build_train_batch([ok, missing], [0.0, 0.0], pad_token_id=PAD, max_seq_len=8)
     assert batch.old_logprobs is None
     misaligned = _traj([_turn([1], [2, 3], [-1.0])])  # 1 logprob for 2 tokens

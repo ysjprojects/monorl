@@ -56,16 +56,28 @@ class TrainStage(_Model):
 class RejectionSampleStage(_Model):
     type: Literal["rejection_sample"] = "rejection_sample"
     name: str
-    data: DataConfig | None = Field(None, description="Prompts to sample from (defaults to the base data config).")
+    data: DataConfig | None = Field(
+        None, description="Prompts to sample from (defaults to the base data config)."
+    )
     num_samples: int = Field(4, ge=1, description="Completions sampled per prompt.")
     min_reward: float = Field(1.0, description="Keep completions whose total reward is >= this value.")
-    max_per_prompt: int = Field(1, ge=1, description="Keep at most this many accepted completions per prompt.")
-    max_response_tokens: int | None = Field(None, ge=1, description="Drop accepted completions longer than this.")
+    max_per_prompt: int = Field(
+        1, ge=1, description="Keep at most this many accepted completions per prompt."
+    )
+    max_response_tokens: int | None = Field(
+        None, ge=1, description="Drop accepted completions longer than this."
+    )
     require_finish: bool = Field(True, description="Drop completions truncated by max_new_tokens.")
     dedupe: bool = Field(True, description="Drop duplicate responses for the same prompt.")
-    mix: list[str] = Field(default_factory=list, description="Extra chat/prompt_answer dataset URIs appended to the output.")
-    rollout_overrides: dict[str, Any] = Field(default_factory=dict, description="RolloutConfig overrides for sampling.")
-    reward_overrides: list[dict[str, Any]] | None = Field(None, description="Replace the base rewards for scoring.")
+    mix: list[str] = Field(
+        default_factory=list, description="Extra chat/prompt_answer dataset URIs appended to the output."
+    )
+    rollout_overrides: dict[str, Any] = Field(
+        default_factory=dict, description="RolloutConfig overrides for sampling."
+    )
+    reward_overrides: list[dict[str, Any]] | None = Field(
+        None, description="Replace the base rewards for scoring."
+    )
     output: str | None = Field(None, description="Output jsonl path (default: <stage dir>/dataset.jsonl).")
     max_prompts: int | None = Field(None, ge=1, description="Sample from at most this many prompts.")
 
@@ -73,7 +85,9 @@ class RejectionSampleStage(_Model):
 class EvalStage(_Model):
     type: Literal["eval"] = "eval"
     name: str
-    data: DataConfig | None = Field(None, description="Evaluation dataset (defaults to base data.eval_uri or data).")
+    data: DataConfig | None = Field(
+        None, description="Evaluation dataset (defaults to base data.eval_uri or data)."
+    )
     rollout_overrides: dict[str, Any] = Field(default_factory=dict)
     max_prompts: int | None = Field(None, ge=1)
 
@@ -82,7 +96,9 @@ Stage = Annotated[TrainStage | RejectionSampleStage | EvalStage, Field(discrimin
 
 
 class PipelineConfig(_Model):
-    name: str | None = Field(None, description="Pipeline run name (defaults to '<model>-pipeline-<timestamp>').")
+    name: str | None = Field(
+        None, description="Pipeline run name (defaults to '<model>-pipeline-<timestamp>')."
+    )
     base: RunConfig = Field(..., description="Base run configuration every stage starts from.")
     stages: list[Stage] = Field(..., min_length=1)
 
@@ -94,7 +110,9 @@ class PipelineConfig(_Model):
         for i, stage in enumerate(self.stages):
             if isinstance(stage, TrainStage) and stage.data_from == "previous":
                 if i == 0 or not isinstance(self.stages[i - 1], RejectionSampleStage):
-                    raise ValueError(f"stage {stage.name!r}: data_from='previous' needs a rejection_sample stage right before it")
+                    raise ValueError(
+                        f"stage {stage.name!r}: data_from='previous' needs a rejection_sample stage right before it"
+                    )
         return self
 
     # -- (de)serialisation ---------------------------------------------------------------

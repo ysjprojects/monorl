@@ -36,7 +36,9 @@ def test_instantiation_without_sglang_raises_actionable_error(no_sglang, sglang_
     with pytest.raises(BackendUnavailable) as info:
         factory(sglang_config)
     message = str(info.value)
-    assert "monorl[sglang]" in message and "rollout.extra.mode='server'" in message and "backend='hf'" in message
+    assert (
+        "monorl[sglang]" in message and "rollout.extra.mode='server'" in message and "backend='hf'" in message
+    )
 
 
 def test_factory_dispatches_modes(fake_sglang, run_config_dict):

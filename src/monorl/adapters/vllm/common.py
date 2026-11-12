@@ -100,7 +100,9 @@ def is_media_prompt(prompt: PromptInput) -> bool:
     return not is_token_prompt(prompt) and messages_have_media(prompt)  # type: ignore[arg-type]
 
 
-def encode_prompt(tokenizer: Any, processor: Any | None, prompt: PromptInput) -> tuple[list[int], list[Any] | None]:
+def encode_prompt(
+    tokenizer: Any, processor: Any | None, prompt: PromptInput
+) -> tuple[list[int], list[Any] | None]:
     """``(prompt_token_ids, images)`` for one prompt.
 
     Text prompts tokenise as :func:`prompt_token_ids`; multimodal chats go through the model's
@@ -196,7 +198,9 @@ def chat_completion_kwargs(params: SamplingParams) -> dict[str, Any]:
     }
 
 
-def completions_from_chat_response(response: dict[str, Any], n: int, *, want_logprobs: bool) -> list[Completion]:
+def completions_from_chat_response(
+    response: dict[str, Any], n: int, *, want_logprobs: bool
+) -> list[Completion]:
     """One ``ChatCompletionResponse`` → ``n`` completions ordered by ``choices[i].index``."""
     choices = response.get("choices") or []
     if len(choices) != n:
@@ -208,7 +212,9 @@ def completions_from_chat_response(response: dict[str, Any], n: int, *, want_log
     for choice in sorted(choices, key=lambda c: c["index"]):
         token_ids = choice.get("token_ids")
         if token_ids is None:
-            raise ValueError("chat response lacks choices[].token_ids; request must set return_token_ids=true")
+            raise ValueError(
+                "chat response lacks choices[].token_ids; request must set return_token_ids=true"
+            )
         lps: list[float] | None = None
         if want_logprobs:
             content = (choice.get("logprobs") or {}).get("content")
@@ -292,7 +298,9 @@ def completions_from_choices(
                 lp_obj = choice.get("logprobs") or {}
                 raw = lp_obj.get("token_logprobs")
                 if raw is None:
-                    raise ValueError("server response lacks logprobs.token_logprobs; request must set logprobs=0")
+                    raise ValueError(
+                        "server response lacks logprobs.token_logprobs; request must set logprobs=0"
+                    )
                 lps = [math.nan if v is None else float(v) for v in raw]
                 if len(lps) != len(token_ids):
                     raise ValueError(f"logprobs length {len(lps)} != token_ids length {len(token_ids)}")
@@ -335,7 +343,18 @@ def chunk_weights(
 
 _DTYPE_NAMES: dict[str, torch.dtype] = {
     name: getattr(torch, name)
-    for name in ("float32", "float16", "bfloat16", "float64", "int64", "int32", "int16", "int8", "uint8", "bool")
+    for name in (
+        "float32",
+        "float16",
+        "bfloat16",
+        "float64",
+        "int64",
+        "int32",
+        "int16",
+        "int8",
+        "uint8",
+        "bool",
+    )
 }
 
 
@@ -365,7 +384,9 @@ def tensor_from_bytes(data: bytes, dtype: str, shape: Sequence[int]) -> torch.Te
     numel = math.prod(shape) if shape else 1
     expected = numel * torch.empty((), dtype=torch_dtype).element_size()
     if len(data) != expected:
-        raise ValueError(f"tensor payload has {len(data)} bytes, expected {expected} for {dtype}{list(shape)}")
+        raise ValueError(
+            f"tensor payload has {len(data)} bytes, expected {expected} for {dtype}{list(shape)}"
+        )
     if numel == 0:
         return torch.empty(shape, dtype=torch_dtype)
     buf = torch.frombuffer(bytearray(data), dtype=torch.uint8)

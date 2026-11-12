@@ -23,14 +23,18 @@ def gpu_cluster(
     ray_nodes: int = 0,
     ray_gpus: int | None = None,
 ) -> ClusterInfo:
-    devices = tuple(GpuInfo(index=i, name="fake-gpu", total_memory_bytes=memory_gib * GIB) for i in range(num_gpus))
+    devices = tuple(
+        GpuInfo(index=i, name="fake-gpu", total_memory_bytes=memory_gib * GIB) for i in range(num_gpus)
+    )
     connected = ray_nodes > 0
     return ClusterInfo(
         cpu_count=16,
         cuda_devices=devices,
         mps_available=False,
         ray_connected=connected,
-        ray_resources={"GPU": float(ray_gpus if ray_gpus is not None else num_gpus), "CPU": 16.0} if connected else {},
+        ray_resources={"GPU": float(ray_gpus if ray_gpus is not None else num_gpus), "CPU": 16.0}
+        if connected
+        else {},
         ray_nodes=ray_nodes,
     )
 

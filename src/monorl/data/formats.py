@@ -126,7 +126,9 @@ def _unwrap_json(payload: Any, path: str) -> list[Any]:
         return payload
     if isinstance(payload, dict):
         # {"data": [...]} / {"rows": [...]} / {"train": [...]} / single-key wrappers
-        lists = {k: v for k, v in payload.items() if isinstance(v, list) and (not v or isinstance(v[0], dict))}
+        lists = {
+            k: v for k, v in payload.items() if isinstance(v, list) and (not v or isinstance(v[0], dict))
+        }
         for key in ("data", "rows", "examples", "train"):
             if key in lists:
                 return lists[key]
@@ -289,7 +291,9 @@ def features_to_columns(features) -> dict[str, str]:
 
 def is_image_dtype(dtype: str) -> bool:
     dt = dtype.lower()
-    return dt in ("image", IMAGE_STRUCT_DTYPE, f"list<{IMAGE_STRUCT_DTYPE}>", "list<image>") or dt.startswith("image(")
+    return dt in ("image", IMAGE_STRUCT_DTYPE, f"list<{IMAGE_STRUCT_DTYPE}>", "list<image>") or dt.startswith(
+        "image("
+    )
 
 
 def image_field_candidates(columns: dict[str, str], sample_rows: list[dict[str, Any]]) -> list[str]:
@@ -328,7 +332,10 @@ def looks_like_chat(value: Any) -> bool:
     return (
         isinstance(value, list)
         and len(value) > 0
-        and all(isinstance(m, dict) and (("role" in m and "content" in m) or ("from" in m and "value" in m)) for m in value)
+        and all(
+            isinstance(m, dict) and (("role" in m and "content" in m) or ("from" in m and "value" in m))
+            for m in value
+        )
     )
 
 
@@ -374,7 +381,9 @@ def sniff_format(columns: dict[str, str], sample_rows: list[dict]) -> dict:
         return result
     text = _find(columns, TEXT_COLUMNS)
     if text is None:
-        text = next((c for c, dt in columns.items() if dt == "string" and c != answer and c not in images), None)
+        text = next(
+            (c for c, dt in columns.items() if dt == "string" and c != answer and c not in images), None
+        )
     if text is not None:
         result.update(prompt_field=text, answer_field=answer)
         result["format"] = "prompt_answer" if answer is not None else "text"

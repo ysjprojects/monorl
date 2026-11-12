@@ -22,7 +22,7 @@ FAKE_VERL_VERSION = "0.9.1"
 
 _VERL_INIT = '__version__ = "{version}"\n'
 
-_TRACKING = '''
+_TRACKING = """
 class LocalLogger:
     def __init__(self):
         self.rows = []
@@ -50,9 +50,9 @@ class Tracking:
 
     def finish(self, exit_code=0):
         self.finished = exit_code
-'''
+"""
 
-_MAIN_PPO = '''
+_MAIN_PPO = """
 import ray
 
 PPO_RAY_RUNTIME_ENV = {"env_vars": {"TOKENIZERS_PARALLELISM": "true"}}
@@ -81,31 +81,31 @@ class TaskRunnerV1:
         tracking.log({"critic/score/mean": 0.5, "actor/pg_loss": -0.1}, step=1)
         type(self).RUNS.append((config, tracking))
         return tracking
-'''
+"""
 
-_PPO_UTILS = '''
+_PPO_UTILS = """
 def need_reference_policy(config):
     return bool(config.get("actor_rollout_ref", {}).get("actor", {}).get("use_kl_loss"))
 
 
 def need_critic(config):
     return config.get("algorithm", {}).get("adv_estimator") == "gae"
-'''
+"""
 
-_UTILS_CONFIG = '''
+_UTILS_CONFIG = """
 VALIDATED = []
 
 
 def validate_config(config, use_reference_policy, use_critic):
     VALIDATED.append((config, use_reference_policy, use_critic))
-'''
+"""
 
-_UTILS_DEVICE = '''
+_UTILS_DEVICE = """
 def auto_set_device(config):
     config.setdefault("trainer", {})["device"] = "cpu"
-'''
+"""
 
-_TOOL_SCHEMAS = '''
+_TOOL_SCHEMAS = """
 from typing import Any
 
 from pydantic import BaseModel, Field
@@ -139,9 +139,9 @@ class ToolResponse(BaseModel):
     text: str | None = None
     image: list[Any] | None = None
     video: list[Any] | None = None
-'''
+"""
 
-_BASE_TOOL = '''
+_BASE_TOOL = """
 from uuid import uuid4
 
 from .schemas import OpenAIFunctionToolSchema, ToolResponse
@@ -168,7 +168,7 @@ class BaseTool:
 
     async def release(self, instance_id, **kwargs):
         pass
-'''
+"""
 
 _HYDRA = '''
 """Minimal hydra.main shim: parses ``key=value`` argv overrides into a plain dict config."""
@@ -241,7 +241,9 @@ def _purge(*names: str) -> None:
 
 
 @pytest.fixture
-def fake_verl(tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch) -> Iterator[FakeVerl]:
+def fake_verl(
+    tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch
+) -> Iterator[FakeVerl]:
     pytest.importorskip("ray")
     if "verl" in sys.modules and not getattr(sys.modules["verl"], "__monorl_fake__", False):
         pytest.skip("real verl is importable; fake-module tests only run without it")
@@ -282,9 +284,20 @@ def base_config(data_file: Path, tmp_path: Path) -> dict[str, Any]:
         "run_name": "verl-test",
         "seed": 7,
         "model": {"name_or_path": "Qwen/Qwen2.5-0.5B-Instruct"},
-        "data": {"uri": str(data_file), "prompt_field": "prompt", "answer_field": "answer", "max_prompt_tokens": 512},
+        "data": {
+            "uri": str(data_file),
+            "prompt_field": "prompt",
+            "answer_field": "answer",
+            "max_prompt_tokens": 512,
+        },
         "algorithm": {"name": "grpo", "kl_coef": 0.001},
-        "rollout": {"backend": "vllm", "group_size": 5, "max_new_tokens": 1024, "temperature": 0.9, "top_p": 0.95},
+        "rollout": {
+            "backend": "vllm",
+            "group_size": 5,
+            "max_new_tokens": 1024,
+            "temperature": 0.9,
+            "top_p": 0.95,
+        },
         "trainer": {
             "backend": "verl",
             "learning_rate": 2e-6,

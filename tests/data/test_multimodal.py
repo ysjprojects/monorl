@@ -101,7 +101,9 @@ def test_parquet_hf_image_feature_becomes_cached_image_part(image_parquet: Path,
         assert img.size == (8, 6) and img.getpixel((0, 0)) == GREEN
 
 
-def test_hf_image_feature_via_datasets_loader_pil_values(image_parquet: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_hf_image_feature_via_datasets_loader_pil_values(
+    image_parquet: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Rows coming from ``datasets`` carry decoded PIL images (HubRows); they are cached too."""
     from datasets import load_dataset
 
@@ -133,7 +135,12 @@ def image_jsonl(tmp_path: Path) -> Path:
     rows = [
         {"id": "rel", "prompt": "relative path", "image": "imgs/a.png", "answer": "r"},
         {"id": "abs", "prompt": "absolute path", "image": str(img_dir / "b.jpg"), "answer": "b"},
-        {"id": "b64", "prompt": "bare base64", "image": base64.b64encode(_png(GREEN)).decode(), "answer": "g"},
+        {
+            "id": "b64",
+            "prompt": "bare base64",
+            "image": base64.b64encode(_png(GREEN)).decode(),
+            "answer": "g",
+        },
         {
             "id": "data",
             "prompt": "data url",
@@ -185,13 +192,23 @@ def test_multi_image_rows_list_column_and_several_columns(tmp_path: Path) -> Non
     src = _open(path, image_field=["images", "extra"])
     parts = src[0].messages[-1]["content"]
     assert [p["type"] for p in parts] == ["image", "image", "image", "text"]
-    assert [p["image"] for p in parts[:3]] == [_cached(_png(RED), "png"), _cached(_png(BLUE), "png"), _cached(_png(GREEN), "png")]
+    assert [p["image"] for p in parts[:3]] == [
+        _cached(_png(RED), "png"),
+        _cached(_png(BLUE), "png"),
+        _cached(_png(GREEN), "png"),
+    ]
     assert parts[3] == {"type": "text", "text": "compare"}
     assert set(src[0].metadata["row"]) == set()
 
 
 def test_image_placeholder_in_prompt_template(tmp_path: Path) -> None:
-    rows = [{"prompt": "which is bigger?", "a": base64.b64encode(_png(RED)).decode(), "b": base64.b64encode(_png(BLUE)).decode()}]
+    rows = [
+        {
+            "prompt": "which is bigger?",
+            "a": base64.b64encode(_png(RED)).decode(),
+            "b": base64.b64encode(_png(BLUE)).decode(),
+        }
+    ]
     path = write_jsonl(tmp_path / "ph.jsonl", rows)
     src = _open(path, image_field=["a", "b"], prompt_template="First: <image> Second: <image>\n{prompt}")
     parts = src[0].messages[-1]["content"]
@@ -218,7 +235,9 @@ def test_place_images_without_placeholder_puts_images_first() -> None:
 
 def test_cache_dedupes_by_content_hash(tmp_path: Path, media_home: Path) -> None:
     red = base64.b64encode(_png(RED)).decode()
-    rows = [{"prompt": f"q{i}", "image": red} for i in range(4)] + [{"prompt": "q", "image": base64.b64encode(_jpeg(RED)).decode()}]
+    rows = [{"prompt": f"q{i}", "image": red} for i in range(4)] + [
+        {"prompt": "q", "image": base64.b64encode(_jpeg(RED)).decode()}
+    ]
     path = write_jsonl(tmp_path / "dup.jsonl", rows)
     src = _open(path, image_field="image")
     refs = [s.messages[-1]["content"][0]["image"] for s in src]
@@ -251,7 +270,12 @@ def test_image_field_must_exist(image_jsonl: Path) -> None:
 def test_image_bytes_in_a_jsonl_row_require_user_turn(tmp_path: Path) -> None:
     path = write_jsonl(
         tmp_path / "sys.jsonl",
-        [{"messages": [{"role": "system", "content": "s"}, {"role": "assistant", "content": "a"}], "image": base64.b64encode(_png(RED)).decode()}],
+        [
+            {
+                "messages": [{"role": "system", "content": "s"}, {"role": "assistant", "content": "a"}],
+                "image": base64.b64encode(_png(RED)).decode(),
+            }
+        ],
     )
     with pytest.raises(DataError, match="no user turn"):
         _open(path, image_field="image")
@@ -277,7 +301,10 @@ def test_chat_rows_with_openai_parts_are_normalised(tmp_path: Path) -> None:
                         "and a bare string part",
                     ],
                 },
-                {"role": "assistant", "content": [{"type": "text", "text": "I see "}, {"type": "text", "text": "two images."}]},
+                {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": "I see "}, {"type": "text", "text": "two images."}],
+                },
             ]
         },
         {"messages": [{"role": "user", "content": "plain"}, {"role": "assistant", "content": "ok"}]},
@@ -302,7 +329,15 @@ def test_chat_rows_with_openai_parts_are_normalised(tmp_path: Path) -> None:
 def test_chat_parts_with_prompt_template_and_extra_image_field(tmp_path: Path) -> None:
     rows = [
         {
-            "messages": [{"role": "user", "content": [{"type": "image_url", "image_url": "https://h/x.png"}, {"type": "text", "text": "q"}]}],
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "image_url", "image_url": "https://h/x.png"},
+                        {"type": "text", "text": "q"},
+                    ],
+                }
+            ],
             "shot": base64.b64encode(_png(GREEN)).decode(),
         }
     ]
@@ -320,9 +355,9 @@ def test_normalize_content_parts_rejects_unknown_types() -> None:
         normalize_content_parts([{"type": "sticker", "id": 1}], MediaResolver(), where="r")
     assert normalize_content_parts("text", MediaResolver(), where="r") == "text"
     assert normalize_content_parts(None, MediaResolver(), where="r") == ""
-    assert normalize_content_parts([{"type": "video", "video_url": {"url": "s3://b/v.mp4"}}], MediaResolver(), where="r") == [
-        {"type": "video", "video": "s3://b/v.mp4"}
-    ]
+    assert normalize_content_parts(
+        [{"type": "video", "video_url": {"url": "s3://b/v.mp4"}}], MediaResolver(), where="r"
+    ) == [{"type": "video", "video": "s3://b/v.mp4"}]
 
 
 # -- MediaResolver edge cases -------------------------------------------------------------------
@@ -367,10 +402,16 @@ def test_resolver_fetches_remote_objects_via_fsspec(tmp_path: Path, monkeypatch:
     mem = MemoryFileSystem()
     mem.store.clear()
     mem.pipe_file("/bucket/imgs/r.png", _png(RED))
-    monkeypatch.setattr(fsspec, "filesystem", lambda scheme, **kw: mem if scheme == "memory" else fsspec.get_filesystem_class(scheme)(**kw))
+    monkeypatch.setattr(
+        fsspec,
+        "filesystem",
+        lambda scheme, **kw: mem if scheme == "memory" else fsspec.get_filesystem_class(scheme)(**kw),
+    )
     assert MediaResolver().image_refs("memory://bucket/imgs/r.png", where="w") == [_cached(_png(RED), "png")]
     # relative path against a remote base
-    assert MediaResolver(base="memory://bucket/imgs").image_refs("r.png", where="w") == [_cached(_png(RED), "png")]
+    assert MediaResolver(base="memory://bucket/imgs").image_refs("r.png", where="w") == [
+        _cached(_png(RED), "png")
+    ]
     with pytest.raises(DataError, match="image not found"):
         MediaResolver().image_refs("memory://bucket/imgs/missing.png", where="w")
 
@@ -387,7 +428,10 @@ def test_response_metadata_prompt_answer_uses_raw_answer(qa_jsonl: Path) -> None
 def test_response_field_overrides(tmp_path: Path) -> None:
     rows = [
         {"question": "q", "answer": "#### 1", "solution_text": "Long solution ending in 1."},
-        {"messages": [{"role": "user", "content": "hi"}, {"role": "assistant", "content": "yo"}], "solution_text": None},
+        {
+            "messages": [{"role": "user", "content": "hi"}, {"role": "assistant", "content": "yo"}],
+            "solution_text": None,
+        },
     ]
     p = write_jsonl(tmp_path / "r.jsonl", rows[:1])
     s = _open(p, response_field="solution_text")[0]
@@ -451,7 +495,12 @@ def test_preview_shows_uris_and_pil_without_bytes(image_jsonl: Path) -> None:
     pil = Image.open(io.BytesIO(_png(RED, size=(3, 2))))
     assert _jsonable({"x": pil}) == {"x": {"__image__": True, "width": 3, "height": 2}}
     assert _jsonable(_png(RED, size=(3, 2))) == {"__image__": True, "width": 3, "height": 2}
-    assert _jsonable({"bytes": _png(RED), "path": "p.png"}) == {"__image__": True, "width": 8, "height": 6, "path": "p.png"}
+    assert _jsonable({"bytes": _png(RED), "path": "p.png"}) == {
+        "__image__": True,
+        "width": 8,
+        "height": 6,
+        "path": "p.png",
+    }
     assert _jsonable({"bytes": None, "path": "p.png"}) == "p.png"
     assert _jsonable(b"\x00\x01")["__bytes__"] == 2
     assert infer_columns([{"i": pil}]) == {"i": "image"}
@@ -472,21 +521,31 @@ def test_reporting_rewards_and_envs_read_text_parts(tmp_path: Path) -> None:
     from monorl.rewards.base import conversation, prompt_text
     from monorl.rewards.reward_model import render_messages
 
-    user = {"role": "user", "content": [{"type": "image", "image": "/x.png"}, {"type": "text", "text": "what is it?"}]}
+    user = {
+        "role": "user",
+        "content": [{"type": "image", "image": "/x.png"}, {"type": "text", "text": "what is it?"}],
+    }
     system = {"role": "system", "content": [{"type": "text", "text": "be brief"}]}
     assert _last_user_text([system, user]) == "what is it?"
     assert _last_user_text([system]) == "be brief"
 
     sample = Sample(id="s", messages=[system, user], reference="cat")
     done = Turn(prompt_token_ids=[1], completion=Completion(text="a cat", token_ids=[2]))
-    traj = Trajectory(sample=sample, group_id="g", messages=[system, user, {"role": "assistant", "content": [{"type": "text", "text": "a cat"}]}], turns=[done])
+    traj = Trajectory(
+        sample=sample,
+        group_id="g",
+        messages=[system, user, {"role": "assistant", "content": [{"type": "text", "text": "a cat"}]}],
+        turns=[done],
+    )
     assert prompt_text(traj) == "be brief\n\nwhat is it?"
     assert conversation(traj)[-1]["content"] == [{"type": "text", "text": "a cat"}]  # not duplicated
 
     class Tok:
         chat_template = None
 
-    assert render_messages(Tok(), conversation(traj)) == "system: be brief\nuser: what is it?\nassistant: a cat"
+    assert (
+        render_messages(Tok(), conversation(traj)) == "system: be brief\nuser: what is it?\nassistant: a cat"
+    )
 
     env = ToolCallingEnv(tools=[], system_prompt="TOOLS: {tools}")
     out = env.reset(sample)

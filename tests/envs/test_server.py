@@ -31,13 +31,25 @@ def test_handle_spec_health_and_episode_lifecycle():
     assert r["messages"][0]["role"] == "system" and r["info"]["episode_id"] == "e1"
     assert srv.active_episodes == 1
 
-    s = srv.handle({"op": "step", "episode_id": "e1", "action": {"text": '<tool_call>{"name": "calculator", "arguments": {"expression": "2+2"}}</tool_call>', "finish_reason": "stop"}})
+    s = srv.handle(
+        {
+            "op": "step",
+            "episode_id": "e1",
+            "action": {
+                "text": '<tool_call>{"name": "calculator", "arguments": {"expression": "2+2"}}</tool_call>',
+                "finish_reason": "stop",
+            },
+        }
+    )
     assert s["done"] is False and s["messages"][0]["content"] == "4" and s["reward"] == 0.0
     s = srv.handle({"op": "step", "episode_id": "e1", "action": {"text": "4"}})
     assert s["done"] is True and s["messages"] == []
     assert srv.active_episodes == 0  # done episodes are closed server-side
 
-    assert srv.handle({"op": "step", "episode_id": "e1", "action": {"text": "x"}})["error"]["type"] == "unknown_episode"
+    assert (
+        srv.handle({"op": "step", "episode_id": "e1", "action": {"text": "x"}})["error"]["type"]
+        == "unknown_episode"
+    )
     srv.handle({"op": "reset", "episode_id": "e2", "sample": _sample()})
     assert srv.handle({"op": "close", "episode_id": "e2"}) == {}
     assert srv.active_episodes == 0

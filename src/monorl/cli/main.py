@@ -551,7 +551,10 @@ def recipes_list(as_json: bool = typer.Option(False, "--json")) -> None:
     if as_json:
         typer.echo(
             json.dumps(
-                [{"name": r.name, "kind": r.kind, "path": str(r.path), "description": r.description} for r in recipes]
+                [
+                    {"name": r.name, "kind": r.kind, "path": str(r.path), "description": r.description}
+                    for r in recipes
+                ]
             )
         )
         return
@@ -586,7 +589,12 @@ def recipes_show(
     if as_json:
         typer.echo(
             json.dumps(
-                {"name": recipe.name, "description": recipe.description, "kind": kind, "config": cfg.to_dict()},
+                {
+                    "name": recipe.name,
+                    "description": recipe.description,
+                    "kind": kind,
+                    "config": cfg.to_dict(),
+                },
                 indent=2,
             )
         )

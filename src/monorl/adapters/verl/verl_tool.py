@@ -32,7 +32,9 @@ class MonorlTool(BaseTool):
             raise KeyError(f"monorl tool {name!r} not found; available: {sorted(tools)}")
         self.tool = tools[name]
 
-    async def execute(self, instance_id: str, parameters: dict[str, Any], **kwargs: Any) -> tuple[ToolResponse, float, dict]:
+    async def execute(
+        self, instance_id: str, parameters: dict[str, Any], **kwargs: Any
+    ) -> tuple[ToolResponse, float, dict]:
         start = time.perf_counter()
         text = self.tool.call(dict(parameters))
         return ToolResponse(text=text), 0.0, {"tool/latency_s": time.perf_counter() - start}

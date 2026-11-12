@@ -16,7 +16,9 @@ from monorl.core.types import Sample
 
 
 class PromptSampler:
-    def __init__(self, samples: Sequence[Sample], *, prompts_per_step: int, seed: int, shuffle: bool = True) -> None:
+    def __init__(
+        self, samples: Sequence[Sample], *, prompts_per_step: int, seed: int, shuffle: bool = True
+    ) -> None:
         if not samples:
             raise ValueError("PromptSampler needs at least one sample")
         self._samples = list(samples)

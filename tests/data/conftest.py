@@ -9,7 +9,8 @@ from typing import Any
 import pytest
 
 QA_ROWS: list[dict[str, Any]] = [
-    {"question": f"What is {i}+{i}?", "answer": f"Add them. #### {2 * i}", "difficulty": i % 3} for i in range(12)
+    {"question": f"What is {i}+{i}?", "answer": f"Add them. #### {2 * i}", "difficulty": i % 3}
+    for i in range(12)
 ]
 
 CHAT_ROWS: list[dict[str, Any]] = [
@@ -112,7 +113,9 @@ def moto_s3(tmp_path_factory: pytest.TempPathFactory) -> Iterator[dict[str, Any]
     local = tmp_path_factory.mktemp("s3src")
     client.upload_file(str(write_jsonl(local / "a.jsonl", QA_ROWS[:6])), bucket, "data/jsonl/a.jsonl")
     client.upload_file(str(write_jsonl(local / "b.jsonl", QA_ROWS[6:])), bucket, "data/jsonl/b.jsonl")
-    client.upload_file(str(write_parquet(local / "chat.parquet", CHAT_ROWS)), bucket, "data/parquet/chat.parquet")
+    client.upload_file(
+        str(write_parquet(local / "chat.parquet", CHAT_ROWS)), bucket, "data/parquet/chat.parquet"
+    )
     client.put_object(Bucket=bucket, Key="data/notes.txt", Body=b"not data")
     try:
         yield {"endpoint": endpoint, "bucket": bucket, "client": client}

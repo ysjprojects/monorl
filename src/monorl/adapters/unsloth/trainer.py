@@ -124,7 +124,9 @@ def from_pretrained_kwargs(config: RunConfig, device: torch.device) -> dict[str,
     if load_in_4bit and load_in_8bit:
         raise ConfigError("trainer.extra: load_in_4bit and load_in_8bit are mutually exclusive")
     if (load_in_4bit or load_in_8bit) and not mc.lora.enabled:
-        raise ConfigError("trainer.extra.load_in_4bit/load_in_8bit need model.lora.enabled=true (QLoRA); quantised weights cannot be trained directly")
+        raise ConfigError(
+            "trainer.extra.load_in_4bit/load_in_8bit need model.lora.enabled=true (QLoRA); quantised weights cannot be trained directly"
+        )
     kwargs: dict[str, Any] = {
         "model_name": mc.name_or_path,
         "max_seq_length": tc.max_seq_len,
@@ -329,7 +331,9 @@ class UnslothTrainer:
         if save_merged is None:  # model not loaded through Unsloth's loader (patch_saving_functions not run)
             from unsloth.save import unsloth_generic_save_pretrained_merged
 
-            unsloth_generic_save_pretrained_merged(self.model, str(path), self.tokenizer, save_method="merged_16bit")
+            unsloth_generic_save_pretrained_merged(
+                self.model, str(path), self.tokenizer, save_method="merged_16bit"
+            )
         else:
             save_merged(str(path), self.tokenizer, save_method="merged_16bit")
         self._training_mode = False  # Unsloth's save path may switch the model to inference mode

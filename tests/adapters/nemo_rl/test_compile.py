@@ -31,7 +31,18 @@ def test_grpo_snapshot(nemo_config: RunConfig, tmp_path: Path) -> None:
     cfg = compile_config(nemo_config, run_dir)
     tr, ro = nemo_config.trainer, nemo_config.rollout
 
-    assert set(cfg) == {"grpo", "loss_fn", "checkpointing", "policy", "data", "env", "logger", "cluster", "data_plane", "on_policy_distillation"}
+    assert set(cfg) == {
+        "grpo",
+        "loss_fn",
+        "checkpointing",
+        "policy",
+        "data",
+        "env",
+        "logger",
+        "cluster",
+        "data_plane",
+        "on_policy_distillation",
+    }
     policy = cfg["policy"]
     assert policy["model_name"] == nemo_config.model.name_or_path
     assert policy["tokenizer"] == {"name": nemo_config.model.name_or_path, "chat_template_kwargs": None}
@@ -46,7 +57,10 @@ def test_grpo_snapshot(nemo_config: RunConfig, tmp_path: Path) -> None:
         "name": "torch.optim.AdamW",
         "kwargs": {"lr": tr.learning_rate, "weight_decay": 0.0, "betas": [0.9, 0.999], "eps": 1e-8},
     }
-    assert policy["scheduler"] == {"name": "torch.optim.lr_scheduler.ConstantLR", "kwargs": {"factor": 1.0, "total_iters": 2}}
+    assert policy["scheduler"] == {
+        "name": "torch.optim.lr_scheduler.ConstantLR",
+        "kwargs": {"factor": 1.0, "total_iters": 2},
+    }
     assert policy["max_grad_norm"] == tr.max_grad_norm
     gen = policy["generation"]
     assert gen["backend"] == "vllm"
@@ -82,7 +96,12 @@ def test_grpo_snapshot(nemo_config: RunConfig, tmp_path: Path) -> None:
     assert data["train"]["dataset_name"] == f"{MODULE_NAME}.MonorlDataset"
     assert data["train"]["data_path"] == str(run_dir.resolve() / "nemo_rl" / "train.jsonl")
     assert data["validation"] is None
-    assert data["default"] == {"prompt_file": None, "system_prompt_file": None, "processor": TASK_NAME, "env_name": ENV_NAME}
+    assert data["default"] == {
+        "prompt_file": None,
+        "system_prompt_file": None,
+        "processor": TASK_NAME,
+        "env_name": ENV_NAME,
+    }
     assert data["max_input_seq_length"] == 128
 
     env = cfg["env"][ENV_NAME]
@@ -100,7 +119,11 @@ def test_grpo_snapshot(nemo_config: RunConfig, tmp_path: Path) -> None:
     assert lg["log_dir"] == str(run_dir.resolve() / "nemo_rl" / "logs")
     assert lg["wandb_enabled"] is False and lg["tensorboard_enabled"] is False
     assert lg["mlflow_enabled"] is False and lg["swanlab_enabled"] is False and lg["monitor_gpus"] is False
-    assert lg["monorl"] == {"enabled": True, "metrics_file": str(run_dir.resolve() / "metrics.jsonl"), "run_dir": str(run_dir.resolve())}
+    assert lg["monorl"] == {
+        "enabled": True,
+        "metrics_file": str(run_dir.resolve() / "metrics.jsonl"),
+        "run_dir": str(run_dir.resolve()),
+    }
 
     assert cfg["cluster"]["gpus_per_node"] == 8 and cfg["cluster"]["num_nodes"] == 1
     assert cfg["data_plane"] is None and cfg["on_policy_distillation"] is None
@@ -108,7 +131,9 @@ def test_grpo_snapshot(nemo_config: RunConfig, tmp_path: Path) -> None:
 
 
 def test_rloo_dapo_reinforce_mapping(nemo_config: RunConfig, tmp_path: Path) -> None:
-    rloo = compile_config(_with(nemo_config, algorithm={"name": "rloo", "advantage_std_norm": False}), tmp_path)
+    rloo = compile_config(
+        _with(nemo_config, algorithm={"name": "rloo", "advantage_std_norm": False}), tmp_path
+    )
     assert rloo["grpo"]["use_leave_one_out_baseline"] is True
     assert rloo["grpo"]["normalize_rewards"] is False
     assert rloo["grpo"]["adv_estimator"]["use_leave_one_out_baseline"] is True
@@ -135,7 +160,9 @@ def test_rloo_dapo_reinforce_mapping(nemo_config: RunConfig, tmp_path: Path) -> 
     assert dapo["grpo"]["reward_shaping"]["enabled"] is True
     assert dapo["grpo"]["reward_shaping"]["overlong_buffer_penalty"] == 0.5
 
-    reinforce = compile_config(_with(nemo_config, algorithm={"name": "reinforce", "advantage_norm": "none"}), tmp_path)
+    reinforce = compile_config(
+        _with(nemo_config, algorithm={"name": "reinforce", "advantage_norm": "none"}), tmp_path
+    )
     assert reinforce["loss_fn"]["disable_ppo_ratio"] is True
     assert reinforce["grpo"]["normalize_rewards"] is False
     assert reinforce["grpo"]["adv_estimator"]["minus_baseline"] is False
@@ -158,7 +185,11 @@ def test_colocated_vs_disaggregated_vllm_cfg(nemo_config: RunConfig, tmp_path: P
     colocated = compile_config(_with(nemo_config, cluster={"placement": "colocated"}), tmp_path)
     assert colocated["policy"]["generation"]["colocated"]["enabled"] is True
 
-    single = _with(nemo_config, cluster={"placement": "disaggregated", "rollout_gpus": 2, "trainer_gpus": 6}, rollout={"tensor_parallel_size": 2, "gpu_memory_utilization": 0.9, "max_model_len": 4096})
+    single = _with(
+        nemo_config,
+        cluster={"placement": "disaggregated", "rollout_gpus": 2, "trainer_gpus": 6},
+        rollout={"tensor_parallel_size": 2, "gpu_memory_utilization": 0.9, "max_model_len": 4096},
+    )
     cfg = compile_config(single, tmp_path)
     gen = cfg["policy"]["generation"]
     assert gen["colocated"] == {"enabled": False, "resources": {"gpus_per_node": 2, "num_nodes": None}}
@@ -166,7 +197,16 @@ def test_colocated_vs_disaggregated_vllm_cfg(nemo_config: RunConfig, tmp_path: P
     assert gen["vllm_cfg"]["gpu_memory_utilization"] == 0.9
     assert gen["vllm_cfg"]["max_model_len"] == 4096
 
-    multi = _with(nemo_config, cluster={"placement": "disaggregated", "num_nodes": 4, "gpus_per_node": 8, "rollout_gpus": 16, "trainer_gpus": 16})
+    multi = _with(
+        nemo_config,
+        cluster={
+            "placement": "disaggregated",
+            "num_nodes": 4,
+            "gpus_per_node": 8,
+            "rollout_gpus": 16,
+            "trainer_gpus": 16,
+        },
+    )
     assert colocation(multi) == {"enabled": False, "resources": {"gpus_per_node": 8, "num_nodes": 2}}
     assert compile_config(multi, tmp_path)["cluster"] == {
         "gpus_per_node": 8,
@@ -193,7 +233,14 @@ def test_scheduler_warmup_lora_eval_and_logging(nemo_config: RunConfig, tmp_path
     cfg = compile_config(
         _with(
             nemo_config,
-            trainer={"scheduler": "cosine", "warmup_steps": 5, "max_steps": 50, "eval_every": 10, "optimizer": "sgd", "weight_decay": 0.1},
+            trainer={
+                "scheduler": "cosine",
+                "warmup_steps": 5,
+                "max_steps": 50,
+                "eval_every": 10,
+                "optimizer": "sgd",
+                "weight_decay": 0.1,
+            },
             model={"lora": {"enabled": True, "r": 8, "alpha": 16, "target_modules": ["q_proj", "v_proj"]}},
             data={"eval_uri": str(Path(nemo_config.data.uri)), "eval_split": "test"},
             logging={"wandb_project": "proj", "tensorboard": True},
@@ -203,7 +250,10 @@ def test_scheduler_warmup_lora_eval_and_logging(nemo_config: RunConfig, tmp_path
     )
     sched = cfg["policy"]["scheduler"]
     assert sched[0]["name"].endswith("LinearLR") and sched[0]["kwargs"]["total_iters"] == 5
-    assert sched[1] == {"name": "torch.optim.lr_scheduler.CosineAnnealingLR", "kwargs": {"T_max": 45, "eta_min": 0.0}}
+    assert sched[1] == {
+        "name": "torch.optim.lr_scheduler.CosineAnnealingLR",
+        "kwargs": {"T_max": 45, "eta_min": 0.0},
+    }
     assert sched[2] == {"milestones": [5]}
     assert cfg["policy"]["optimizer"]["name"] == "torch.optim.SGD"
     assert cfg["policy"]["optimizer"]["kwargs"]["weight_decay"] == 0.1
@@ -221,7 +271,13 @@ def test_scheduler_warmup_lora_eval_and_logging(nemo_config: RunConfig, tmp_path
 
 def test_megatron_from_trainer_extra(nemo_config: RunConfig, tmp_path: Path) -> None:
     cfg = compile_config(
-        _with(nemo_config, trainer={"extra": {"megatron": {"enabled": True, "tensor_model_parallel_size": 2}}, "learning_rate": 2e-6}),
+        _with(
+            nemo_config,
+            trainer={
+                "extra": {"megatron": {"enabled": True, "tensor_model_parallel_size": 2}},
+                "learning_rate": 2e-6,
+            },
+        ),
         tmp_path,
     )
     mcfg = cfg["policy"]["megatron_cfg"]
@@ -232,20 +288,37 @@ def test_megatron_from_trainer_extra(nemo_config: RunConfig, tmp_path: Path) -> 
     assert cfg["policy"]["dtensor_cfg"] == {"enabled": False}
     assert cfg["policy"]["optimizer"] is None and cfg["policy"]["scheduler"] is None
 
-    dt = compile_config(_with(nemo_config, trainer={"extra": {"dtensor": {"tensor_parallel_size": 4, "sequence_parallel": True}}}), tmp_path)
+    dt = compile_config(
+        _with(
+            nemo_config,
+            trainer={"extra": {"dtensor": {"tensor_parallel_size": 4, "sequence_parallel": True}}},
+        ),
+        tmp_path,
+    )
     assert dt["policy"]["dtensor_cfg"]["tensor_parallel_size"] == 4
     assert dt["policy"]["dtensor_cfg"]["sequence_parallel"] is True
 
 
 def test_extra_nemo_rl_deep_merges_last(nemo_config: RunConfig, tmp_path: Path) -> None:
     override = {
-        "policy": {"sequence_packing": {"enabled": True, "train_mb_tokens": 4096, "algorithm": "modified_first_fit_decreasing"}, "generation": {"vllm_cfg": {"enforce_eager": True}}},
+        "policy": {
+            "sequence_packing": {
+                "enabled": True,
+                "train_mb_tokens": 4096,
+                "algorithm": "modified_first_fit_decreasing",
+            },
+            "generation": {"vllm_cfg": {"enforce_eager": True}},
+        },
         "grpo": {"max_val_samples": 16},
         "logger": {"monitor_gpus": True},
         "custom_section": {"a": 1},
     }
     cfg = compile_config(_with(nemo_config, trainer={"extra": {"nemo_rl": override}}), tmp_path)
-    assert cfg["policy"]["sequence_packing"] == {"enabled": True, "train_mb_tokens": 4096, "algorithm": "modified_first_fit_decreasing"}
+    assert cfg["policy"]["sequence_packing"] == {
+        "enabled": True,
+        "train_mb_tokens": 4096,
+        "algorithm": "modified_first_fit_decreasing",
+    }
     gen = cfg["policy"]["generation"]
     assert gen["vllm_cfg"]["enforce_eager"] is True
     assert gen["vllm_cfg"]["tensor_parallel_size"] == 1  # siblings untouched

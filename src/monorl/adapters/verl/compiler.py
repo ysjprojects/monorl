@@ -88,7 +88,9 @@ def deep_merge(base: dict[str, Any], extra: dict[str, Any]) -> dict[str, Any]:
     return base
 
 
-def compile_config(config: RunConfig, run_dir: str | Path, *, multimodal: bool | None = None) -> dict[str, Any]:
+def compile_config(
+    config: RunConfig, run_dir: str | Path, *, multimodal: bool | None = None
+) -> dict[str, Any]:
     """Build the verl override tree for ``config``; paths point into ``run_dir``.
 
     Does not touch the filesystem: the data/reward/tool artefacts referenced here are written by
@@ -201,7 +203,10 @@ def compile_config(config: RunConfig, run_dir: str | Path, *, multimodal: bool |
             "filter_groups": {"enable": False},
         },
         "reward": {
-            "custom_reward_function": {"path": str(reward_module_path(run_dir)), "name": REWARD_FUNCTION_NAME},
+            "custom_reward_function": {
+                "path": str(reward_module_path(run_dir)),
+                "name": REWARD_FUNCTION_NAME,
+            },
         },
         "trainer": {
             "nnodes": cluster.num_nodes,
@@ -231,7 +236,9 @@ def compile_config(config: RunConfig, run_dir: str | Path, *, multimodal: bool |
         mm_limit = rollout.extra.get("limit_mm_per_prompt")
         if mm_limit is not None:
             limit = {"image": int(mm_limit)} if isinstance(mm_limit, int) else dict(mm_limit)
-            tree["actor_rollout_ref"]["rollout"]["engine_kwargs"] = {rollout_name: {"+limit_mm_per_prompt": limit}}
+            tree["actor_rollout_ref"]["rollout"]["engine_kwargs"] = {
+                rollout_name: {"+limit_mm_per_prompt": limit}
+            }
 
     if tool_calling:
         tree["actor_rollout_ref"]["rollout"]["multi_turn"].update(
@@ -266,7 +273,11 @@ def compile_config(config: RunConfig, run_dir: str | Path, *, multimodal: bool |
                 "max_resp_len": rollout.max_new_tokens,
             }
     elif algo.dynamic_sampling:
-        tree["algorithm"]["filter_groups"] = {"enable": True, "metric": "reward", "max_num_gen_batches": DAPO_MAX_NUM_GEN_BATCHES}
+        tree["algorithm"]["filter_groups"] = {
+            "enable": True,
+            "metric": "reward",
+            "max_num_gen_batches": DAPO_MAX_NUM_GEN_BATCHES,
+        }
         tree["data"]["gen_batch_size"] = trainer.prompts_per_step * DAPO_GEN_BATCH_MULTIPLIER
 
     if algo.name == "ppo":
@@ -297,7 +308,9 @@ SFT_SCHEDULER = {"constant": "constant", "cosine": "cosine", "linear": "cosine"}
 SFT_ENGINE_DTYPE = {"bf16": "bfloat16", "fp16": "float16"}
 
 
-def compile_sft_config(config: RunConfig, run_dir: str | Path, *, multimodal: bool | None = None) -> dict[str, Any]:
+def compile_sft_config(
+    config: RunConfig, run_dir: str | Path, *, multimodal: bool | None = None
+) -> dict[str, Any]:
     """Override tree for ``verl.trainer.sft_trainer_ray`` (``sft_trainer_engine.yaml``).
 
     ``trainer.prompts_per_step`` sequences per optimizer step (``data.train_batch_size``),

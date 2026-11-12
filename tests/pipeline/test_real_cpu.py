@@ -40,7 +40,11 @@ def real_pipeline(run_config_dict: dict[str, Any], tmp_path: Path) -> PipelineCo
                         "trainer": {"max_steps": 2, "prompts_per_step": 2},
                     },
                 },
-                {"type": "train", "name": "grpo", "overrides": {"trainer": {"max_steps": 1}, "rollout": {"group_size": 2}}},
+                {
+                    "type": "train",
+                    "name": "grpo",
+                    "overrides": {"trainer": {"max_steps": 1}, "rollout": {"group_size": 2}},
+                },
                 {
                     "type": "rejection_sample",
                     "name": "rs",
@@ -59,7 +63,10 @@ def real_pipeline(run_config_dict: dict[str, Any], tmp_path: Path) -> PipelineCo
                     "type": "train",
                     "name": "sft_on_samples",
                     "data_from": "previous",
-                    "overrides": {"algorithm": {"name": "sft"}, "trainer": {"max_steps": 1, "prompts_per_step": 2}},
+                    "overrides": {
+                        "algorithm": {"name": "sft"},
+                        "trainer": {"max_steps": 1, "prompts_per_step": 2},
+                    },
                 },
                 {"type": "eval", "name": "eval", "max_prompts": 2},
             ],
@@ -69,7 +76,10 @@ def real_pipeline(run_config_dict: dict[str, Any], tmp_path: Path) -> PipelineCo
 
 def test_real_mini_pipeline(real_pipeline: PipelineConfig) -> None:
     result = run_pipeline(real_pipeline)
-    assert result.state == "succeeded", (result.error, [(s["name"], s["state"], s["error"]) for s in result.stages])
+    assert result.state == "succeeded", (
+        result.error,
+        [(s["name"], s["state"], s["error"]) for s in result.stages],
+    )
 
     run_dir = Path(result.run_dir)
     manifest = read_manifest(run_dir)

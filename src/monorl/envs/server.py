@@ -129,7 +129,12 @@ class MEPServer:
             with self._lock:
                 self._episodes.pop(episode_id, None)
             env.close()
-        return {"messages": result.messages, "reward": float(result.reward), "done": bool(result.done), "info": dict(result.info)}
+        return {
+            "messages": result.messages,
+            "reward": float(result.reward),
+            "done": bool(result.done),
+            "info": dict(result.info),
+        }
 
     def _close(self, episode_id: str) -> dict[str, Any]:
         with self._lock:
@@ -214,7 +219,9 @@ class HttpServerHandle:
         import uvicorn
 
         self.mep = server
-        self._config = uvicorn.Config(create_app(server), host=host, port=port, log_level="warning", lifespan="off")
+        self._config = uvicorn.Config(
+            create_app(server), host=host, port=port, log_level="warning", lifespan="off"
+        )
         self._server = uvicorn.Server(self._config)
         self._thread = threading.Thread(target=self._server.run, name="monorl-mep-http", daemon=True)
         self.host = host

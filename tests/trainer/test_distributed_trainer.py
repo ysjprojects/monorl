@@ -45,11 +45,15 @@ def _trainable(trainer: ReferenceTrainer) -> dict[str, torch.Tensor]:
     return {n: p.detach().clone() for n, p in trainer.model.named_parameters() if p.requires_grad}
 
 
-def _worker(rank: int, port: int, model_dir: str, lora: bool, loss_agg: str, batch_path: str, out_dir: str) -> None:
+def _worker(
+    rank: int, port: int, model_dir: str, lora: bool, loss_agg: str, batch_path: str, out_dir: str
+) -> None:
     os.environ["MASTER_ADDR"] = "127.0.0.1"
     os.environ["MASTER_PORT"] = str(port)
     torch.manual_seed(SEED)
-    trainer = ReferenceTrainer(_config(Path(model_dir), lora, loss_agg), loss_fn=reinforce_loss, rank=rank, world_size=WORLD_SIZE)
+    trainer = ReferenceTrainer(
+        _config(Path(model_dir), lora, loss_agg), loss_fn=reinforce_loss, rank=rank, world_size=WORLD_SIZE
+    )
     assert trainer.rank == rank and trainer.world_size == WORLD_SIZE
     batch: TrainBatch = torch.load(batch_path, weights_only=False)
     metrics = trainer.train_step(_shard(batch, rank, WORLD_SIZE))
@@ -61,7 +65,12 @@ def _worker(rank: int, port: int, model_dir: str, lora: bool, loss_agg: str, bat
     assert (out / "export" / "config.json").exists()
     exported = dict(trainer.export_weights())
     torch.save(
-        {"params": _trainable(trainer), "metrics": metrics, "logprobs": logprobs, "export_keys": sorted(exported)},
+        {
+            "params": _trainable(trainer),
+            "metrics": metrics,
+            "logprobs": logprobs,
+            "export_keys": sorted(exported),
+        },
         out / f"rank{rank}.pt",
     )
     trainer.shutdown()
@@ -73,7 +82,9 @@ def _worker(rank: int, port: int, model_dir: str, lora: bool, loss_agg: str, bat
     [(False, "token"), (True, "token"), (False, "sequence")],
     ids=["full-token", "lora-token", "full-sequence"],
 )
-def test_two_rank_step_matches_single_process(tiny_model_dir: Path, tokenizer, tmp_path: Path, lora: bool, loss_agg: str) -> None:
+def test_two_rank_step_matches_single_process(
+    tiny_model_dir: Path, tokenizer, tmp_path: Path, lora: bool, loss_agg: str
+) -> None:
     # 3 sequences with 6/5/6 response tokens (incl. EOS): the shards are uneven in both sequences
     # and tokens, so only global loss normalisation reproduces the full-batch gradient.
     batch = make_batch(tokenizer, batch_size=3)
@@ -99,7 +110,9 @@ def test_two_rank_step_matches_single_process(tiny_model_dir: Path, tokenizer, t
     for r, data in enumerate(ranks):
         assert list(data["params"]) == list(expected), f"rank {r} trainable parameter set"
         for name, tensor in expected.items():
-            torch.testing.assert_close(data["params"][name], tensor, atol=1e-6, rtol=0, msg=f"rank {r} {name}")
+            torch.testing.assert_close(
+                data["params"][name], tensor, atol=1e-6, rtol=0, msg=f"rank {r} {name}"
+            )
         for key in ("loss/policy", "loss/total", "loss/entropy", "grad_norm", "lr", "tokens/response_mean"):
             assert data["metrics"][key] == pytest.approx(expected_metrics[key], abs=1e-5), f"rank {r} {key}"
         torch.testing.assert_close(data["logprobs"], single.compute_logprobs(batch), atol=1e-5, rtol=0)

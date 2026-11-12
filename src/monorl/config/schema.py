@@ -34,7 +34,9 @@ class LoraConfig(_Model):
 class ModelConfig(_Model):
     name_or_path: str = Field(..., description="Hugging Face model id or local path.")
     revision: str | None = Field(None, description="Hub revision (branch, tag or commit).")
-    tokenizer_name_or_path: str | None = Field(None, description="Override tokenizer (defaults to the model).")
+    tokenizer_name_or_path: str | None = Field(
+        None, description="Override tokenizer (defaults to the model)."
+    )
     trust_remote_code: bool = False
     dtype: Literal["auto", "float32", "bfloat16", "float16"] = Field(
         "auto", description="Parameter dtype; 'auto' picks bf16 on accelerators and fp32 on CPU."
@@ -77,7 +79,8 @@ class DataConfig(_Model):
     )
     system_prompt: str | None = Field(None, description="System prompt prepended to every sample.")
     prompt_template: str | None = Field(
-        None, description="Python format string applied to the prompt column, e.g. '{prompt}\\nThink step by step.'"
+        None,
+        description="Python format string applied to the prompt column, e.g. '{prompt}\\nThink step by step.'",
     )
     max_prompt_tokens: int = Field(1024, ge=1, description="Samples with longer prompts are dropped.")
     limit: int | None = Field(None, ge=1, description="Use only the first N samples (after shuffling).")
@@ -94,22 +97,31 @@ class AlgorithmConfig(_Model):
         description="Policy-gradient objective, or 'sft' for supervised fine-tuning on the dataset responses (no rollouts).",
     )
     sft_label_smoothing: float = Field(0.0, ge=0.0, lt=1.0, description="Label smoothing for sft.")
-    sft_train_on_prompt: bool = Field(False, description="sft: include prompt tokens in the loss (default: response only).")
-    kl_coef: float = Field(0.0, ge=0.0, description="Coefficient of the KL penalty to the reference policy (0 disables).")
+    sft_train_on_prompt: bool = Field(
+        False, description="sft: include prompt tokens in the loss (default: response only)."
+    )
+    kl_coef: float = Field(
+        0.0, ge=0.0, description="Coefficient of the KL penalty to the reference policy (0 disables)."
+    )
     kl_estimator: Literal["k1", "k2", "k3"] = Field("k3", description="KL estimator (Schulman's k1/k2/k3).")
     clip_eps: float = Field(0.2, gt=0.0, description="PPO clipping epsilon (lower bound).")
     clip_eps_high: float | None = Field(None, gt=0.0, description="Asymmetric upper clip (DAPO clip-higher).")
     advantage_norm: Literal["group", "batch", "none"] = Field(
-        "group", description="Normalise rewards within the prompt group (GRPO), across the batch, or not at all."
+        "group",
+        description="Normalise rewards within the prompt group (GRPO), across the batch, or not at all.",
     )
-    advantage_std_norm: bool = Field(True, description="Divide by std in group normalisation (False = Dr.GRPO style).")
+    advantage_std_norm: bool = Field(
+        True, description="Divide by std in group normalisation (False = Dr.GRPO style)."
+    )
     loss_agg: Literal["token", "sequence"] = Field(
         "token", description="Average the loss over all response tokens or per sequence first."
     )
     entropy_coef: float = Field(0.0, ge=0.0)
     num_epochs: int = Field(1, ge=1, description="Optimizer passes over each rollout batch.")
     dynamic_sampling: bool = Field(False, description="Drop groups whose rewards are all identical (DAPO).")
-    overlong_penalty: float = Field(0.0, ge=0.0, description="Reward penalty for truncated (length) completions.")
+    overlong_penalty: float = Field(
+        0.0, ge=0.0, description="Reward penalty for truncated (length) completions."
+    )
     gamma: float = Field(1.0, ge=0.0, le=1.0, description="Discount for multi-turn per-turn rewards.")
     lam: float = Field(1.0, ge=0.0, le=1.0, description="GAE lambda (ppo only).")
     value_coef: float = Field(0.5, ge=0.0, description="Value loss weight (ppo only).")
@@ -129,7 +141,9 @@ class RolloutConfig(_Model):
     max_model_len: int | None = None
     enable_sleep_mode: bool = Field(True, description="Offload engine memory while training (colocated).")
     async_steps_ahead: int = Field(
-        0, ge=0, description="Generate up to N batches ahead of training (off-policy staleness bound). 0 = synchronous."
+        0,
+        ge=0,
+        description="Generate up to N batches ahead of training (off-policy staleness bound). 0 = synchronous.",
     )
     device: str | None = Field(None, description="Device for the 'hf' backend (cpu/mps/cuda); auto if unset.")
     extra: dict[str, Any] = Field(default_factory=dict, description="Engine-specific options passed through.")
@@ -141,13 +155,17 @@ class TrainerConfig(_Model):
         description="Trainer: 'reference' (torch), 'unsloth', or a pipeline backend: 'trl', 'verl', 'nemo_rl'.",
     )
     learning_rate: float = Field(1e-6, gt=0.0)
-    prompts_per_step: int = Field(8, ge=1, description="Prompts per optimizer step (x group_size = sequences).")
+    prompts_per_step: int = Field(
+        8, ge=1, description="Prompts per optimizer step (x group_size = sequences)."
+    )
     micro_batch_size: int = Field(4, ge=1, description="Sequences per forward/backward pass.")
     max_steps: int = Field(100, ge=1)
     warmup_steps: int = Field(0, ge=0)
     weight_decay: float = Field(0.0, ge=0.0)
     max_grad_norm: float = Field(1.0, gt=0.0)
-    precision: Literal["fp32", "bf16", "fp16"] = Field("bf16", description="Mixed-precision mode (fp32 forced on CPU).")
+    precision: Literal["fp32", "bf16", "fp16"] = Field(
+        "bf16", description="Mixed-precision mode (fp32 forced on CPU)."
+    )
     gradient_checkpointing: bool = False
     optimizer: Literal["adamw", "adam", "sgd"] = "adamw"
     scheduler: Literal["constant", "linear", "cosine"] = "constant"
@@ -155,7 +173,9 @@ class TrainerConfig(_Model):
     eval_every: int | None = Field(None, ge=1)
     max_seq_len: int = Field(2048, ge=16, description="Prompt + response truncation for training.")
     device: str | None = Field(None, description="cpu/mps/cuda; auto if unset.")
-    extra: dict[str, Any] = Field(default_factory=dict, description="Backend-specific options (e.g. verl/nemo overrides).")
+    extra: dict[str, Any] = Field(
+        default_factory=dict, description="Backend-specific options (e.g. verl/nemo overrides)."
+    )
 
 
 class RewardSpec(_Model):
@@ -165,7 +185,9 @@ class RewardSpec(_Model):
 
 
 class EnvConfig(_Model):
-    type: str = Field("single_turn", description="Environment: 'single_turn', 'tool_calling', 'openenv', 'hermes', ...")
+    type: str = Field(
+        "single_turn", description="Environment: 'single_turn', 'tool_calling', 'openenv', 'hermes', ..."
+    )
     max_turns: int = Field(1, ge=1)
     params: dict[str, Any] = Field(default_factory=dict, description="Environment-specific parameters.")
 
@@ -182,7 +204,8 @@ class ClusterConfig(_Model):
     rollout_gpus: int | None = Field(None, ge=0, description="GPUs for inference when disaggregated.")
     trainer_gpus: int | None = Field(None, ge=0, description="GPUs for training when disaggregated.")
     weight_sync: str = Field(
-        "auto", description="Weight sync strategy: 'auto', 'inprocess', 'checkpoint', 'broadcast', 'cuda_ipc'."
+        "auto",
+        description="Weight sync strategy: 'auto', 'inprocess', 'checkpoint', 'broadcast', 'cuda_ipc'.",
     )
     extra: dict[str, Any] = Field(default_factory=dict)
 

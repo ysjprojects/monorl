@@ -43,7 +43,9 @@ class TrainerPolicyEngine(HFRolloutEngine):
     case image prompts take the processor path of :class:`HFRolloutEngine`.
     """
 
-    def __init__(self, model: Any, processing_class: Any, *, device: torch.device, eos_token_ids: Sequence[int]) -> None:  # noqa: D107
+    def __init__(
+        self, model: Any, processing_class: Any, *, device: torch.device, eos_token_ids: Sequence[int]
+    ) -> None:  # noqa: D107
         from monorl.rollout.media import is_vlm_processor
 
         self.config = None
@@ -145,14 +147,21 @@ class EpisodeRollout:
     def default_engine(trainer: Any) -> RolloutEngine:
         model = trainer.accelerator.unwrap_model(trainer.model)
         return TrainerPolicyEngine(
-            model, trainer.processing_class, device=trainer.accelerator.device, eos_token_ids=trainer.eos_token_ids
+            model,
+            trainer.processing_class,
+            device=trainer.accelerator.device,
+            eos_token_ids=trainer.eos_token_ids,
         )
 
     @staticmethod
     def engine_tokenizer(trainer: Any) -> Any:
         """Plain tokenizer for the episode runner (``processing_class.tokenizer`` for VLM processors)."""
         pc = trainer.processing_class
-        return pc.tokenizer if getattr(pc, "image_processor", None) is not None and hasattr(pc, "tokenizer") else pc
+        return (
+            pc.tokenizer
+            if getattr(pc, "image_processor", None) is not None and hasattr(pc, "tokenizer")
+            else pc
+        )
 
     # -- rollout_func --------------------------------------------------------------------------
     def __call__(self, prompts: list[Any], trainer: Any) -> dict[str, Any]:
@@ -177,7 +186,9 @@ class EpisodeRollout:
     def run(self, prompts: list[Any], inputs: list[dict[str, Any]], trainer: Any) -> list[Trajectory]:
         from trl.models import unwrap_model_for_generation
 
-        group = max(1, int(trainer.num_generations if trainer.model.training else trainer.num_generations_eval))
+        group = max(
+            1, int(trainer.num_generations if trainer.model.training else trainer.num_generations_eval)
+        )
         step = int(trainer.state.global_step)
         samples = [sample_from_row(row) for row in inputs]
         params = sampling_params(trainer.args, stop=self.config.rollout.stop)
@@ -190,7 +201,9 @@ class EpisodeRollout:
             ),
             torch.no_grad(),
         ):
-            engine = BatchingEngine(self.engine_factory(trainer), max_batch_size=len(prompts), max_wait_ms=self.batch_wait_ms)
+            engine = BatchingEngine(
+                self.engine_factory(trainer), max_batch_size=len(prompts), max_wait_ms=self.batch_wait_ms
+            )
             try:
                 specs = [
                     EpisodeSpec(sample=s, group_id=f"{step}-{i // group}-{s.id}", engine=engine)

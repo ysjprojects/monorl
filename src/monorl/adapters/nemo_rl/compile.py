@@ -93,9 +93,13 @@ def _check_supported(config: RunConfig) -> None:
     if algo.name == "sft":
         return
     if algo.num_epochs != 1:
-        raise ConfigError("algorithm.num_epochs > 1 has no NeMo-RL equivalent (one optimizer pass per rollout batch)")
+        raise ConfigError(
+            "algorithm.num_epochs > 1 has no NeMo-RL equivalent (one optimizer pass per rollout batch)"
+        )
     if algo.entropy_coef > 0:
-        raise ConfigError("algorithm.entropy_coef > 0 has no NeMo-RL equivalent (ClippedPGLossFn has no entropy bonus)")
+        raise ConfigError(
+            "algorithm.entropy_coef > 0 has no NeMo-RL equivalent (ClippedPGLossFn has no entropy bonus)"
+        )
     if config.rollout.backend not in GENERATION_BACKENDS:
         raise ConfigError(
             f"trainer.backend='nemo_rl' supports rollout.backend in {sorted(GENERATION_BACKENDS)}, "
@@ -132,14 +136,24 @@ def _scheduler(config: RunConfig) -> dict[str, Any] | list[dict[str, Any]]:
             "kwargs": {"start_factor": 1.0, "end_factor": 0.0, "total_iters": main_steps},
         }
     elif tr.scheduler == "cosine":
-        main = {"name": "torch.optim.lr_scheduler.CosineAnnealingLR", "kwargs": {"T_max": main_steps, "eta_min": 0.0}}
+        main = {
+            "name": "torch.optim.lr_scheduler.CosineAnnealingLR",
+            "kwargs": {"T_max": main_steps, "eta_min": 0.0},
+        }
     else:
-        main = {"name": "torch.optim.lr_scheduler.ConstantLR", "kwargs": {"factor": 1.0, "total_iters": main_steps}}
+        main = {
+            "name": "torch.optim.lr_scheduler.ConstantLR",
+            "kwargs": {"factor": 1.0, "total_iters": main_steps},
+        }
     if tr.warmup_steps == 0:
         return main
     warmup = {
         "name": "torch.optim.lr_scheduler.LinearLR",
-        "kwargs": {"start_factor": 1.0 / (tr.warmup_steps + 1), "end_factor": 1.0, "total_iters": tr.warmup_steps},
+        "kwargs": {
+            "start_factor": 1.0 / (tr.warmup_steps + 1),
+            "end_factor": 1.0,
+            "total_iters": tr.warmup_steps,
+        },
     }
     return [warmup, main, {"milestones": [tr.warmup_steps]}]
 
@@ -300,7 +314,10 @@ def colocation(config: RunConfig) -> dict[str, Any]:
         resources = {"gpus_per_node": rollout_gpus, "num_nodes": None}
     else:
         per_node = max(cl.gpus_per_node, 1)
-        resources = {"gpus_per_node": cl.gpus_per_node, "num_nodes": max(1, math.ceil(rollout_gpus / per_node))}
+        resources = {
+            "gpus_per_node": cl.gpus_per_node,
+            "num_nodes": max(1, math.ceil(rollout_gpus / per_node)),
+        }
     return {"enabled": False, "resources": resources}
 
 
@@ -344,7 +361,10 @@ def _policy(config: RunConfig, precision: str, *, sequences_per_step: int) -> di
     tr = config.trainer
     return {
         "model_name": config.model.name_or_path,
-        "tokenizer": {"name": config.model.tokenizer_name_or_path or config.model.name_or_path, "chat_template_kwargs": None},
+        "tokenizer": {
+            "name": config.model.tokenizer_name_or_path or config.model.name_or_path,
+            "chat_template_kwargs": None,
+        },
         "hf_config_overrides": {},
         "train_global_batch_size": sequences_per_step,
         "train_micro_batch_size": tr.micro_batch_size,
@@ -393,7 +413,11 @@ def _logger(config: RunConfig, run_dir: Path, paths: Any) -> dict[str, Any]:
         "wandb": {"project": lg.wandb_project or "monorl", "name": run_name},
         "swanlab": {"project": "monorl", "name": run_name},
         "tensorboard": {},
-        "mlflow": {"experiment_name": "monorl", "run_name": run_name, "tracking_uri": "http://localhost:5000"},
+        "mlflow": {
+            "experiment_name": "monorl",
+            "run_name": run_name,
+            "tracking_uri": "http://localhost:5000",
+        },
         "gpu_monitoring": {"collection_interval": 10, "flush_interval": 10},
         "monorl": {"enabled": True, "metrics_file": str(run_dir / METRICS_FILE), "run_dir": str(run_dir)},
     }
@@ -457,8 +481,15 @@ def compile_sft_config(config: RunConfig, run_dir: str | Path) -> dict[str, Any]
         "add_generation_prompt": False,
         "shuffle": dt.shuffle,
         "num_workers": 1,
-        "train": {"dataset_name": SFT_DATASET, "data_path": str(paths.sft_train_jsonl), "split_validation_size": 0, "seed": config.seed},
-        "validation": {"dataset_name": SFT_DATASET, "data_path": str(paths.sft_eval_jsonl)} if dt.eval_uri is not None else None,
+        "train": {
+            "dataset_name": SFT_DATASET,
+            "data_path": str(paths.sft_train_jsonl),
+            "split_validation_size": 0,
+            "seed": config.seed,
+        },
+        "validation": {"dataset_name": SFT_DATASET, "data_path": str(paths.sft_eval_jsonl)}
+        if dt.eval_uri is not None
+        else None,
         "default": {"prompt_file": None, "system_prompt_file": None, "processor": SFT_PROCESSOR},
     }
     checkpointing = _checkpointing(config, run_dir)
@@ -589,7 +620,9 @@ def compile_config(config: RunConfig, run_dir: str | Path) -> dict[str, Any]:
             "seed": config.seed,
         },
         "validation": (
-            {"dataset_name": dataset_class, "data_path": str(paths.eval_jsonl)} if dt.eval_uri is not None else None
+            {"dataset_name": dataset_class, "data_path": str(paths.eval_jsonl)}
+            if dt.eval_uri is not None
+            else None
         ),
         "default": {
             "prompt_file": None,

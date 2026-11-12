@@ -45,7 +45,11 @@ def vlm_batch(vlm_engine: HFRolloutEngine, test_images: dict[str, Path]) -> Trai
                 )
             )
     batch, stats = build_train_batch(
-        trajectories, [1.0] * len(trajectories), pad_token_id=vlm_engine.tokenizer.pad_token_id, max_seq_len=128, processor=vlm_engine.processor
+        trajectories,
+        [1.0] * len(trajectories),
+        pad_token_id=vlm_engine.tokenizer.pad_token_id,
+        max_seq_len=128,
+        processor=vlm_engine.processor,
     )
     assert stats["tokens/prefix_mismatch"] == 0
     return batch
@@ -71,8 +75,12 @@ def test_batch_carries_media_tensors(vlm_batch: TrainBatch, vlm_engine: HFRollou
 
 
 @pytest.mark.parametrize("micro_batch_size", [1, 2, 6])
-def test_compute_logprobs_matches_engine(tiny_vlm_dir: Path, vlm_batch: TrainBatch, micro_batch_size: int) -> None:
-    trainer = ReferenceTrainer(make_config(tiny_vlm_dir, micro_batch_size=micro_batch_size, max_seq_len=128), loss_fn=reinforce_loss)
+def test_compute_logprobs_matches_engine(
+    tiny_vlm_dir: Path, vlm_batch: TrainBatch, micro_batch_size: int
+) -> None:
+    trainer = ReferenceTrainer(
+        make_config(tiny_vlm_dir, micro_batch_size=micro_batch_size, max_seq_len=128), loss_fn=reinforce_loss
+    )
     assert type(trainer.hf_model).__name__ == "Qwen2VLForConditionalGeneration"
     lp = trainer.compute_logprobs(vlm_batch)
     assert lp.shape == vlm_batch.input_ids.shape
@@ -82,7 +90,9 @@ def test_compute_logprobs_matches_engine(tiny_vlm_dir: Path, vlm_batch: TrainBat
 
 
 def test_lora_train_step_decreases_loss(tiny_vlm_dir: Path, vlm_batch: TrainBatch) -> None:
-    trainer = ReferenceTrainer(make_config(tiny_vlm_dir, lora=True, micro_batch_size=2, max_seq_len=128), loss_fn=reinforce_loss)
+    trainer = ReferenceTrainer(
+        make_config(tiny_vlm_dir, lora=True, micro_batch_size=2, max_seq_len=128), loss_fn=reinforce_loss
+    )
     assert all("lora_" in n for n, p in trainer.model.named_parameters() if p.requires_grad)
     before = trainer.compute_logprobs(vlm_batch)
     losses = []

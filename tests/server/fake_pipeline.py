@@ -34,10 +34,14 @@ def main() -> int:
     reporter = RunReporter(args.run_dir, echo=False)
     stages_root = reporter.run_dir / "stages"
     records = [
-        StageRecord(index=i, name=s["name"], type=s["type"], run_dir=str(stages_root / stage_dir_name(i, s["name"])))
+        StageRecord(
+            index=i, name=s["name"], type=s["type"], run_dir=str(stages_root / stage_dir_name(i, s["name"]))
+        )
         for i, s in enumerate(config["stages"])
     ]
-    manifest = Manifest(name=config.get("name") or "fake", run_dir=str(reporter.run_dir), stages=records, state="running")
+    manifest = Manifest(
+        name=config.get("name") or "fake", run_dir=str(reporter.run_dir), stages=records, state="running"
+    )
     manifest.write()
     reporter.set_status("running", "fake pipeline started", step=0)
     print("fake pipeline stdout line", flush=True)
@@ -52,26 +56,59 @@ def main() -> int:
     for record in records:
         record.state, record.started_at = "running", time.time()
         manifest.write()
-        reporter.set_status("running", f"stage {record.index + 1}/{len(records)} {record.name} ({record.type})", step=record.index)
+        reporter.set_status(
+            "running",
+            f"stage {record.index + 1}/{len(records)} {record.name} ({record.type})",
+            step=record.index,
+        )
         stage = RunReporter(record.run_dir, echo=False)
         stage.set_status("running", "fake stage", step=0)
         for step in range(1, 3):
             if record.type == "rejection_sample":
-                stage.log_metrics(step, {"rs/sampled": 4.0, "rs/accepted": float(step), "rs/accept_rate": step / 4, "reward/mean": 0.5}, phase="rejection")
+                stage.log_metrics(
+                    step,
+                    {
+                        "rs/sampled": 4.0,
+                        "rs/accepted": float(step),
+                        "rs/accept_rate": step / 4,
+                        "reward/mean": 0.5,
+                    },
+                    phase="rejection",
+                )
             elif record.type == "eval":
                 stage.log_metrics(step, {"eval/reward_mean": 0.75}, phase="eval")
             else:
                 stage.log_metrics(step, {"reward/mean": step * 0.25, "loss/policy": 1.0 / step})
             stage.log(f"stage {record.name} step {step}")
             with open(stage.run_dir / "trajectories.jsonl", "a") as f:
-                f.write(json.dumps({"step": step, "group_id": f"g{step}", "prompt": "p", "response": "r", "reward": 0.5}) + "\n")
+                f.write(
+                    json.dumps(
+                        {"step": step, "group_id": f"g{step}", "prompt": "p", "response": "r", "reward": 0.5}
+                    )
+                    + "\n"
+                )
         if record.type == "train":
             stage.checkpoint_path(2).mkdir(parents=True, exist_ok=True)
             stage.final_dir.mkdir(exist_ok=True)
             record.summary = {"reward/mean": 0.5, "final_model_path": str(stage.final_dir)}
         elif record.type == "rejection_sample":
-            (stage.run_dir / DATASET_FILE).write_text(json.dumps({"messages": [{"role": "user", "content": "p"}, {"role": "assistant", "content": "r"}], "reference": "r", "reward": 1.0, "source": "sampled"}) + "\n")
-            record.summary = {"sampled": 8, "accepted": 3, "accept_rate": 0.375, "dataset": str(stage.run_dir / DATASET_FILE)}
+            (stage.run_dir / DATASET_FILE).write_text(
+                json.dumps(
+                    {
+                        "messages": [{"role": "user", "content": "p"}, {"role": "assistant", "content": "r"}],
+                        "reference": "r",
+                        "reward": 1.0,
+                        "source": "sampled",
+                    }
+                )
+                + "\n"
+            )
+            record.summary = {
+                "sampled": 8,
+                "accepted": 3,
+                "accept_rate": 0.375,
+                "dataset": str(stage.run_dir / DATASET_FILE),
+            }
         else:
             record.summary = {"eval/reward_mean": 0.75}
         stage.set_status("succeeded", "done", step=2)
@@ -87,7 +124,9 @@ def main() -> int:
             return 0
         time.sleep(float(os.environ.get("FAKE_PIPELINE_STAGE_SLEEP", "0.02")))
     manifest.state = "succeeded"
-    manifest.final_model_path = next((r.summary.get("final_model_path") for r in reversed(records) if r.type == "train"), None)
+    manifest.final_model_path = next(
+        (r.summary.get("final_model_path") for r in reversed(records) if r.type == "train"), None
+    )
     manifest.write()
     reporter.set_status("succeeded", f"finished {len(records)} stages", step=len(records))
     return 0

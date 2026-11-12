@@ -107,7 +107,13 @@ def resolve_run_dir(config: Any = None) -> str | None:
 
 def _build_init(original: Any) -> Any:
     @functools.wraps(original)
-    def __init__(self: Any, project_name: Any, experiment_name: Any, default_backend: Any = "console", config: Any = None) -> None:
+    def __init__(
+        self: Any,
+        project_name: Any,
+        experiment_name: Any,
+        default_backend: Any = "console",
+        config: Any = None,
+    ) -> None:
         self._monorl_run_dir = resolve_run_dir(config)
         original(self, project_name, experiment_name, default_backend, config)
 

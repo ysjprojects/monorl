@@ -93,7 +93,9 @@ class Tool:
             return f"error: bad arguments: {e}"
         text = result if isinstance(result, str) else json.dumps(result, default=str)
         if len(text) > self.max_output_chars:
-            text = text[: self.max_output_chars] + f"... [truncated {len(text) - self.max_output_chars} chars]"
+            text = (
+                text[: self.max_output_chars] + f"... [truncated {len(text) - self.max_output_chars} chars]"
+            )
         return text
 
 
@@ -146,7 +148,11 @@ _CONSTS: dict[str, float] = {"pi": math.pi, "e": math.e}
 def _safe_eval(node: ast.AST) -> Any:
     if isinstance(node, ast.Expression):
         return _safe_eval(node.body)
-    if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)) and not isinstance(node.value, bool):
+    if (
+        isinstance(node, ast.Constant)
+        and isinstance(node.value, (int, float))
+        and not isinstance(node.value, bool)
+    ):
         return node.value
     if isinstance(node, ast.BinOp) and type(node.op) in _BIN_OPS:
         left, right = _safe_eval(node.left), _safe_eval(node.right)
@@ -157,7 +163,12 @@ def _safe_eval(node: ast.AST) -> Any:
         return _UNARY_OPS[type(node.op)](_safe_eval(node.operand))
     if isinstance(node, ast.Name) and node.id in _CONSTS:
         return _CONSTS[node.id]
-    if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in _FUNCS and not node.keywords:
+    if (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id in _FUNCS
+        and not node.keywords
+    ):
         return _FUNCS[node.func.id](*(_safe_eval(a) for a in node.args))
     raise ValueError(f"unsupported expression: {ast.dump(node)[:80]}")
 
@@ -222,7 +233,9 @@ def builtin_tools(params: Mapping[str, Any]) -> dict[str, Tool]:
             description="Evaluate an arithmetic expression (+ - * / // % **, abs, round, sqrt, log, exp, sin, cos, pi, e).",
             parameters={
                 "type": "object",
-                "properties": {"expression": {"type": "string", "description": "Expression to evaluate, e.g. '2*(3+4)'."}},
+                "properties": {
+                    "expression": {"type": "string", "description": "Expression to evaluate, e.g. '2*(3+4)'."}
+                },
                 "required": ["expression"],
             },
             fn=calculator,
@@ -233,7 +246,9 @@ def builtin_tools(params: Mapping[str, Any]) -> dict[str, Tool]:
             description="Execute a Python snippet in an isolated interpreter and return its stdout/stderr.",
             parameters={
                 "type": "object",
-                "properties": {"code": {"type": "string", "description": "Python source to run; print() what you need."}},
+                "properties": {
+                    "code": {"type": "string", "description": "Python source to run; print() what you need."}
+                },
                 "required": ["code"],
             },
             fn=lambda code: python_exec(code, timeout_s=timeout_s, max_output_chars=max_out),
@@ -410,7 +425,9 @@ class ToolCallingEnv:
         executed: list[dict[str, Any]] = []
         calls = parsed.calls[: self.max_calls_per_turn]
         if len(parsed.calls) > self.max_calls_per_turn:
-            errors.append(f"too many tool calls ({len(parsed.calls)} > {self.max_calls_per_turn}); extra calls ignored")
+            errors.append(
+                f"too many tool calls ({len(parsed.calls)} > {self.max_calls_per_turn}); extra calls ignored"
+            )
         for call in calls:
             name = call["name"]
             tool_ = self._tools.get(name)
@@ -420,7 +437,9 @@ class ToolCallingEnv:
             else:
                 content = tool_.call(call.get("arguments") or {})
             results.append({"role": "tool", "name": name, "tool_call_id": call["id"], "content": content})
-            executed.append({"id": call["id"], "name": name, "arguments": call.get("arguments"), "result": content})
+            executed.append(
+                {"id": call["id"], "name": name, "arguments": call.get("arguments"), "result": content}
+            )
         for err in parsed.errors:
             results.append({"role": "tool", "name": "error", "content": f"error: {err}"})
         invalid = len(errors)
@@ -434,14 +453,21 @@ class ToolCallingEnv:
             messages=results,
             reward=reward,
             done=done,
-            info={"turn": self._turn, "tool_calls": executed, "invalid_calls": invalid, "final_answer": final_answer},
+            info={
+                "turn": self._turn,
+                "tool_calls": executed,
+                "invalid_calls": invalid,
+                "final_answer": final_answer,
+            },
         )
 
     def close(self) -> None:
         self._sample = None
 
 
-def make_tool_calling_env(params: Mapping[str, Any], *, max_turns: int, system_prompt: str | None = None) -> ToolCallingEnv:
+def make_tool_calling_env(
+    params: Mapping[str, Any], *, max_turns: int, system_prompt: str | None = None
+) -> ToolCallingEnv:
     return ToolCallingEnv(
         tools=load_tools(params),
         max_turns=max_turns,

@@ -55,7 +55,11 @@ def trajectory_from_verl(
         group_id=str(info.get("index", sample.id)),
         messages=[*messages, {"role": "assistant", "content": str(solution_str)}],
         turns=[turn],
-        info={"data_source": data_source, "num_turns": num_turns, "rollout_reward_scores": info.get("rollout_reward_scores")},
+        info={
+            "data_source": data_source,
+            "num_turns": num_turns,
+            "rollout_reward_scores": info.get("rollout_reward_scores"),
+        },
     )
 
 
@@ -70,7 +74,12 @@ class RewardBridge:
         self.reward = build_reward(self.specs, config=self.config)
 
     def __call__(
-        self, data_source: str, solution_str: str, ground_truth: Any, extra_info: dict[str, Any] | None = None, **_: Any
+        self,
+        data_source: str,
+        solution_str: str,
+        ground_truth: Any,
+        extra_info: dict[str, Any] | None = None,
+        **_: Any,
     ) -> dict[str, float]:
         traj = trajectory_from_verl(solution_str, ground_truth, extra_info, data_source=data_source)
         result = self.reward([traj])[0]
@@ -98,7 +107,9 @@ def {name}(data_source, solution_str, ground_truth, extra_info=None, **kwargs):
 '''
 
 
-def write_reward_module(config: RunConfig, run_dir: str | Path, *, config_path: str | Path | None = None) -> Path:
+def write_reward_module(
+    config: RunConfig, run_dir: str | Path, *, config_path: str | Path | None = None
+) -> Path:
     """Write ``<run_dir>/monorl_reward.py`` exposing ``compute_score`` for ``config.rewards``."""
     if not config.rewards:
         raise ValueError("verl backend needs at least one entry in `rewards`")

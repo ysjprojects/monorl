@@ -34,7 +34,14 @@ def _fake_plan(config: RunConfig, cluster: ClusterInfo, *, with_estimate: bool =
     gpus = cluster.num_gpus
     params = 7_000_000_000
     est = (
-        ModelEstimate(params=params, dtype_bytes=2, weight_bytes=params * 2, kv_bytes=1 << 30, engine_bytes=params * 2 + (1 << 30), trainer_bytes=params * 16)
+        ModelEstimate(
+            params=params,
+            dtype_bytes=2,
+            weight_bytes=params * 2,
+            kv_bytes=1 << 30,
+            engine_bytes=params * 2 + (1 << 30),
+            trainer_bytes=params * 16,
+        )
         if with_estimate
         else None
     )
@@ -118,7 +125,10 @@ def test_estimate_step_lora_kl_and_async_overlap() -> None:
     assert est.train_s == pytest.approx(base.train_s * 4 / 6)  # LoRA
     assert est.total_s == pytest.approx(max(est.generation_s, est.logprob_s + est.train_s) + est.sync_s)
     assert any("async_steps_ahead" in n for n in est.notes)
-    assert estimate_step(cfg, _fake_plan(cfg, synthetic_cluster(8, 80), with_estimate=False), hardware=hw) is None
+    assert (
+        estimate_step(cfg, _fake_plan(cfg, synthetic_cluster(8, 80), with_estimate=False), hardware=hw)
+        is None
+    )
 
 
 def test_run_plan_with_fake_plan_placement() -> None:

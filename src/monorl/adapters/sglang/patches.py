@@ -93,7 +93,9 @@ def build_logprob_floats(original: Callable[..., Any]) -> Callable[..., Any]:
     in the HTTP server rejects and which break ``float()``-free consumers)."""
 
     @functools.wraps(original)
-    def detokenize_logprob_tokens(self: Any, token_logprobs_val: Any, token_logprobs_idx: Any, decode_to_text: Any) -> Any:
+    def detokenize_logprob_tokens(
+        self: Any, token_logprobs_val: Any, token_logprobs_idx: Any, decode_to_text: Any
+    ) -> Any:
         vals = [_as_float(v) for v in token_logprobs_val]
         idxs = [_as_int(i) for i in token_logprobs_idx]
         return original(self, vals, idxs, decode_to_text)
@@ -104,7 +106,9 @@ def build_logprob_floats(original: Callable[..., Any]) -> Callable[..., Any]:
 # -- seeded parallel sampling -----------------------------------------------------------------
 
 
-def _seeded_fanout(sampling_params: Any, prompts: Any, input_ids: Any) -> tuple[list[dict[str, Any]], Any, Any] | None:
+def _seeded_fanout(
+    sampling_params: Any, prompts: Any, input_ids: Any
+) -> tuple[list[dict[str, Any]], Any, Any] | None:
     """Rewrite ``(sampling_params, prompt, input_ids)`` so each of the ``n`` samples per prompt
     gets its own ``sampling_seed``. Returns ``None`` when nothing needs rewriting."""
     if prompts is not None and input_ids is not None:
@@ -112,7 +116,11 @@ def _seeded_fanout(sampling_params: Any, prompts: Any, input_ids: Any) -> tuple[
     if isinstance(sampling_params, Mapping):
         per_request = None
         template = sampling_params
-    elif isinstance(sampling_params, list) and sampling_params and all(isinstance(s, Mapping) for s in sampling_params):
+    elif (
+        isinstance(sampling_params, list)
+        and sampling_params
+        and all(isinstance(s, Mapping) for s in sampling_params)
+    ):
         per_request = sampling_params
         template = None
     else:
@@ -133,7 +141,10 @@ def _seeded_fanout(sampling_params: Any, prompts: Any, input_ids: Any) -> tuple[
     def sp_for(i: int) -> Mapping[str, Any]:
         return template if template is not None else per_request[i]  # type: ignore[index]
 
-    needs = any(int(sp_for(i).get("n", 1) or 1) > 1 and sp_for(i).get("sampling_seed") is not None for i in range(len(batch)))
+    needs = any(
+        int(sp_for(i).get("n", 1) or 1) > 1 and sp_for(i).get("sampling_seed") is not None
+        for i in range(len(batch))
+    )
     if not needs:
         return None
 
@@ -167,7 +178,9 @@ def build_seeded_parallel_sampling(original: Callable[..., Any]) -> Callable[...
         arguments = bound.arguments
         if arguments.get("stream") or any(isinstance(arguments.get(k), list) for k in _PER_REQUEST_ARGS):
             return original(self, *args, **kwargs)
-        rewritten = _seeded_fanout(arguments.get("sampling_params"), arguments.get("prompt"), arguments.get("input_ids"))
+        rewritten = _seeded_fanout(
+            arguments.get("sampling_params"), arguments.get("prompt"), arguments.get("input_ids")
+        )
         if rewritten is None:
             return original(self, *args, **kwargs)
         sps, prompt, input_ids = rewritten
@@ -268,7 +281,9 @@ PATCHES = PatchSet(
                 "meta_info.output_token_logprobs entries are (float, int, text): numpy/torch scalars "
                 "coming out of the scheduler are coerced before the tuples are built."
             ),
-            verify=lambda original: has_params(original, "token_logprobs_val", "token_logprobs_idx", "decode_to_text"),
+            verify=lambda original: has_params(
+                original, "token_logprobs_val", "token_logprobs_idx", "decode_to_text"
+            ),
         ),
         Patch(
             id="sglang.seeded_parallel_sampling",
@@ -280,7 +295,9 @@ PATCHES = PatchSet(
                 "Engine.generate with sampling_seed and n>1 derives a distinct seed per sample instead of "
                 "returning n identical completions."
             ),
-            verify=lambda original: has_params(original, "prompt", "sampling_params", "input_ids", "return_logprob", "stream"),
+            verify=lambda original: has_params(
+                original, "prompt", "sampling_params", "input_ids", "return_logprob", "stream"
+            ),
         ),
         Patch(
             id="sglang.release_memory_guard",

@@ -36,7 +36,15 @@ def test_config_schema(client: TestClient) -> None:
     assert r.status_code == 200
     schema = r.json()
     assert schema["title"] == "RunConfig"
-    assert set(schema["properties"]) >= {"model", "data", "algorithm", "rollout", "trainer", "rewards", "logging"}
+    assert set(schema["properties"]) >= {
+        "model",
+        "data",
+        "algorithm",
+        "rollout",
+        "trainer",
+        "rewards",
+        "logging",
+    }
     assert "ModelConfig" in schema["$defs"]
 
 
@@ -89,7 +97,9 @@ def test_malformed_body_is_422(client: TestClient) -> None:
 
 
 def test_recipe_description() -> None:
-    text = "#!/usr/bin/env monorl\n# GRPO on GSM8K\n#   with a tiny model\n\nrun_name: x\n# trailing comment\n"
+    text = (
+        "#!/usr/bin/env monorl\n# GRPO on GSM8K\n#   with a tiny model\n\nrun_name: x\n# trailing comment\n"
+    )
     assert recipe_description(text) == "GRPO on GSM8K with a tiny model"
     assert recipe_description("run_name: x\n") == ""
 
@@ -98,7 +108,9 @@ def test_recipes(client: TestClient, recipes_dir: Path, config_dict: dict[str, A
     import yaml
 
     (recipes_dir / "b-recipe.yaml").write_text("# Second recipe.\n" + yaml.safe_dump(config_dict))
-    (recipes_dir / "a-recipe.yaml").write_text("# First recipe\n# spans two lines.\n" + yaml.safe_dump(config_dict))
+    (recipes_dir / "a-recipe.yaml").write_text(
+        "# First recipe\n# spans two lines.\n" + yaml.safe_dump(config_dict)
+    )
     (recipes_dir / "broken.yaml").write_text("# Broken\nmodel: {name_or_path: x}\n")
     (recipes_dir / "notes.txt").write_text("ignored")
     r = client.get("/api/recipes")
@@ -148,7 +160,13 @@ class _FakeHfApi:
     def list_datasets(self, **kw: Any):
         self.calls.append(("list_datasets", kw))
         yield types.SimpleNamespace(
-            id="org/ds", downloads=5, likes=0, tags=["task:qa"], last_modified=None, gated=False, private=False
+            id="org/ds",
+            downloads=5,
+            likes=0,
+            tags=["task:qa"],
+            last_modified=None,
+            gated=False,
+            private=False,
         )
 
     def model_info(self, repo_id: str, **kw: Any) -> _FakeModel:
@@ -260,7 +278,12 @@ def fake_data(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
         return {
             "columns": {"prompt": "string", "answer": "string"},
             "rows": [{"prompt": "2+2?", "answer": "4"}][:limit],
-            "inferred": {"format": "prompt_answer", "prompt_field": "prompt", "answer_field": "answer", "messages_field": None},
+            "inferred": {
+                "format": "prompt_answer",
+                "prompt_field": "prompt",
+                "answer_field": "answer",
+                "messages_field": None,
+            },
             "num_rows": 1,
         }
 
@@ -319,7 +342,11 @@ def test_connectors_never_echo_secrets(client: TestClient, monkeypatch: pytest.M
     assert body["s3"]["configured"] is True
     assert body["s3"]["region"] == "eu-west-1"
     assert body["s3"]["endpoint_url"] == "http://localhost:9000"
-    assert set(body["s3"]["vars_present"]) >= {"AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_DEFAULT_REGION"}
+    assert set(body["s3"]["vars_present"]) >= {
+        "AWS_ACCESS_KEY_ID",
+        "AWS_SECRET_ACCESS_KEY",
+        "AWS_DEFAULT_REGION",
+    }
     assert body["hf"]["configured"] is True
     assert "supersecretvalue" not in r.text and "AKIASECRETKEYID" not in r.text and "hf_secret" not in r.text
 
@@ -344,8 +371,20 @@ def test_envs(client: TestClient, envs_bin: Path, tmp_path: Path) -> None:
     assert "single_turn" in body["types"]
     assert {"openenv", "hermes"} <= set(body["types"])
     assert body["examples"] == [
-        {"name": "echo-env-go", "language": "go", "path": str(exe), "transport": "stdio", "command": [str(exe)]},
-        {"name": "counter_env", "language": "cpp", "path": str(bin_cpp), "transport": "stdio", "command": [str(bin_cpp)]},
+        {
+            "name": "echo-env-go",
+            "language": "go",
+            "path": str(exe),
+            "transport": "stdio",
+            "command": [str(exe)],
+        },
+        {
+            "name": "counter_env",
+            "language": "cpp",
+            "path": str(bin_cpp),
+            "transport": "stdio",
+            "command": [str(bin_cpp)],
+        },
     ]
 
 
@@ -353,7 +392,12 @@ def test_envs(client: TestClient, envs_bin: Path, tmp_path: Path) -> None:
 
 
 def test_unknown_job_404(client: TestClient) -> None:
-    for path in ("/api/jobs/nope", "/api/jobs/nope/metrics", "/api/jobs/nope/logs", "/api/jobs/nope/checkpoints"):
+    for path in (
+        "/api/jobs/nope",
+        "/api/jobs/nope/metrics",
+        "/api/jobs/nope/logs",
+        "/api/jobs/nope/checkpoints",
+    ):
         r = client.get(path)
         assert r.status_code == 404, path
         assert r.json() == {"detail": "unknown job 'nope'"}

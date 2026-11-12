@@ -198,9 +198,7 @@ def apply(framework: str, force: bool = False) -> ApplyReport:
     return report
 
 
-def _apply_one(
-    patch: Patch, journal: dict[str, _Applied], installed: str, *, force: bool
-) -> tuple[str, str]:
+def _apply_one(patch: Patch, journal: dict[str, _Applied], installed: str, *, force: bool) -> tuple[str, str]:
     record = journal.get(patch.id)
     if record is not None:
         if record.in_place and not force:
@@ -244,9 +242,7 @@ def _apply_one(
     try:
         setattr(resolved.owner, resolved.attr, replacement)
     except (AttributeError, TypeError) as e:
-        raise PatchError(
-            f"patch {patch.id!r}: cannot set {patch.target} on {resolved.owner!r}: {e}"
-        ) from e
+        raise PatchError(f"patch {patch.id!r}: cannot set {patch.target} on {resolved.owner!r}: {e}") from e
     journal[patch.id] = _Applied(
         patch=patch,
         owner=resolved.owner,
@@ -387,7 +383,9 @@ def _status_one(
     if install_error:
         return make(False, applied, None, install_error)
     if installed is None:
-        return make(False, False, None, f"framework {patch.framework or patch.module_name!r} is not installed")
+        return make(
+            False, False, None, f"framework {patch.framework or patch.module_name!r} is not installed"
+        )
     ok, reason = patch.version_applicable(installed)
     if not ok:
         return make(False, applied, True if applied else None, reason)

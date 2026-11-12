@@ -28,7 +28,9 @@ def _image_token_id(engine: HFRolloutEngine) -> int:
     return int(engine.model.config.image_token_id)
 
 
-def test_detection_and_processor(vlm_config: RunConfig, tiny_config: RunConfig, vlm_engine: HFRolloutEngine) -> None:
+def test_detection_and_processor(
+    vlm_config: RunConfig, tiny_config: RunConfig, vlm_engine: HFRolloutEngine
+) -> None:
     assert is_vlm_model(vlm_config)
     assert not is_vlm_model(tiny_config)
     assert load_processor(tiny_config) is None
@@ -44,7 +46,9 @@ def test_text_prompt_on_vlm_uses_tokenizer_path(vlm_engine: HFRolloutEngine) -> 
     assert _image_token_id(vlm_engine) not in enc.ids
 
 
-def test_media_prompt_ids_include_placeholders(vlm_engine: HFRolloutEngine, test_images: dict[str, Path]) -> None:
+def test_media_prompt_ids_include_placeholders(
+    vlm_engine: HFRolloutEngine, test_images: dict[str, Path]
+) -> None:
     proc = vlm_engine.processor
     chat = image_chat(test_images["red"])
     enc = encode_prompt(chat, vlm_engine.tokenizer, proc)
@@ -64,7 +68,9 @@ def test_media_prompt_ids_include_placeholders(vlm_engine: HFRolloutEngine, test
     assert wide.ids.count(image_id) == 8
 
 
-def test_generate_n_completions_with_images(vlm_engine: HFRolloutEngine, test_images: dict[str, Path]) -> None:
+def test_generate_n_completions_with_images(
+    vlm_engine: HFRolloutEngine, test_images: dict[str, Path]
+) -> None:
     params = SamplingParams(n=3, max_new_tokens=5, temperature=1.0, seed=1)
     prompts = [image_chat(test_images["red"]), image_chat(test_images["blue"], "Describe it."), TEXT_CHAT]
     out = vlm_engine.generate(prompts, params)
@@ -89,21 +95,27 @@ def test_seed_is_deterministic_with_images(vlm_engine: HFRolloutEngine, test_ima
     assert [[c.logprobs for c in g] for g in a] == [[c.logprobs for c in g] for g in b]
 
 
-def _reference_logprobs(engine: HFRolloutEngine, chat: list[dict], completion_ids: list[int], temperature: float) -> torch.Tensor:
+def _reference_logprobs(
+    engine: HFRolloutEngine, chat: list[dict], completion_ids: list[int], temperature: float
+) -> torch.Tensor:
     enc = vlm_encode(engine.processor, chat)
     prompt = enc["input_ids"]
     full = torch.cat([prompt, torch.tensor([completion_ids])], dim=1)
     kwargs = {k: v for k, v in enc.items() if k not in ("input_ids", "attention_mask", "mm_token_type_ids")}
     mm = torch.cat([enc["mm_token_type_ids"], torch.zeros((1, len(completion_ids)), dtype=torch.long)], dim=1)
     with torch.no_grad():
-        logits = engine.model(input_ids=full, attention_mask=torch.ones_like(full), mm_token_type_ids=mm, **kwargs).logits
+        logits = engine.model(
+            input_ids=full, attention_mask=torch.ones_like(full), mm_token_type_ids=mm, **kwargs
+        ).logits
     start = prompt.shape[1]
     lp = torch.log_softmax(logits[0, start - 1 : -1].float() / temperature, dim=-1)
     return lp.gather(1, torch.tensor(completion_ids)[:, None]).squeeze(1)
 
 
 @pytest.mark.parametrize("temperature", [1.0, 0.7])
-def test_logprobs_match_forward_pass(vlm_engine: HFRolloutEngine, test_images: dict[str, Path], temperature: float) -> None:
+def test_logprobs_match_forward_pass(
+    vlm_engine: HFRolloutEngine, test_images: dict[str, Path], temperature: float
+) -> None:
     params = SamplingParams(n=2, max_new_tokens=6, temperature=temperature, seed=5, logprobs=True)
     prompts = [image_chat(test_images["blue"]), image_chat(test_images["red"], "Short answer please.")]
     out = vlm_engine.generate(prompts, params)
@@ -114,26 +126,37 @@ def test_logprobs_match_forward_pass(vlm_engine: HFRolloutEngine, test_images: d
 
 
 def test_greedy_replicates_n_with_images(vlm_engine: HFRolloutEngine, test_images: dict[str, Path]) -> None:
-    out = vlm_engine.generate([image_chat(test_images["red"])], SamplingParams(n=3, max_new_tokens=4, temperature=0.0))
+    out = vlm_engine.generate(
+        [image_chat(test_images["red"])], SamplingParams(n=3, max_new_tokens=4, temperature=0.0)
+    )
     assert len(out[0]) == 3
     assert len({tuple(c.token_ids) for c in out[0]}) == 1
 
 
-def test_multi_turn_chat_is_prefix_consistent(vlm_engine: HFRolloutEngine, test_images: dict[str, Path]) -> None:
+def test_multi_turn_chat_is_prefix_consistent(
+    vlm_engine: HFRolloutEngine, test_images: dict[str, Path]
+) -> None:
     """Re-encoding the full chat after an assistant turn extends the first prompt token-exactly,
     which is what lets the batch builder train every turn of a multimodal episode. (A fixed
     assistant text: the random model's samples may start with newlines that BPE-merge with the
     template's ``\\n`` — the same re-tokenisation caveat the text path reports as
     ``tokens/prefix_mismatch``.)"""
-    first = vlm_engine.generate([image_chat(test_images["red"])], SamplingParams(n=1, max_new_tokens=4, temperature=0.0))[0][0]
-    chat = image_chat(test_images["red"]) + [{"role": "assistant", "content": "Red."}, {"role": "user", "content": "Sure?"}]
+    first = vlm_engine.generate(
+        [image_chat(test_images["red"])], SamplingParams(n=1, max_new_tokens=4, temperature=0.0)
+    )[0][0]
+    chat = image_chat(test_images["red"]) + [
+        {"role": "assistant", "content": "Red."},
+        {"role": "user", "content": "Sure?"},
+    ]
     second = vlm_engine.generate([chat], SamplingParams(n=1, max_new_tokens=2, temperature=0.0))[0][0]
     head = first.prompt_token_ids
     assert second.prompt_token_ids[: len(head)] == head
     assert second.prompt_token_ids.count(_image_token_id(vlm_engine)) == 4
 
 
-def test_collate_media_concatenates_in_order(vlm_engine: HFRolloutEngine, test_images: dict[str, Path]) -> None:
+def test_collate_media_concatenates_in_order(
+    vlm_engine: HFRolloutEngine, test_images: dict[str, Path]
+) -> None:
     red = encode_prompt(image_chat(test_images["red"]), vlm_engine.tokenizer, vlm_engine.processor).media
     blue = encode_prompt(image_chat(test_images["blue"]), vlm_engine.tokenizer, vlm_engine.processor).media
     batched = collate_media([red, None, blue])

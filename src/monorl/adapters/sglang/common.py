@@ -84,7 +84,12 @@ SERVER_ARG_PASSTHROUGH: frozenset[str] = frozenset(
     }
 )
 
-_FINISH: dict[str | None, FinishReason] = {"stop": "stop", "length": "length", "abort": "error", None: "error"}
+_FINISH: dict[str | None, FinishReason] = {
+    "stop": "stop",
+    "length": "length",
+    "abort": "error",
+    None: "error",
+}
 
 
 # -- prompts -----------------------------------------------------------------------------------
@@ -114,7 +119,9 @@ def is_media_prompt(prompt: PromptInput) -> bool:
     return not is_token_prompt(prompt) and messages_have_media(prompt)  # type: ignore[arg-type]
 
 
-def encode_prompt(tokenizer: Any, processor: Any | None, prompt: PromptInput) -> tuple[list[int], list[Any] | None]:
+def encode_prompt(
+    tokenizer: Any, processor: Any | None, prompt: PromptInput
+) -> tuple[list[int], list[Any] | None]:
     """``(prompt_token_ids, images)``: text prompts via :func:`prompt_token_ids`; multimodal chats
     through the model's ``AutoProcessor`` chat template (``monorl.rollout.media``) so the ids carry
     the image placeholder tokens sglang's multimodal processor expands."""
@@ -130,7 +137,9 @@ def encode_prompt(tokenizer: Any, processor: Any | None, prompt: PromptInput) ->
     return vlm_prompt_ids(processor, prompt), chat_images(prompt)  # type: ignore[arg-type]
 
 
-def expand_image_data(images: Sequence[list[Any] | None], params: SamplingParams) -> list[list[Any] | None] | None:
+def expand_image_data(
+    images: Sequence[list[Any] | None], params: SamplingParams
+) -> list[list[Any] | None] | None:
     """Per-request ``image_data`` aligned with :func:`expand_requests` (``None`` when no prompt
     has images; entries are repeated ``n`` times when a seed forces one request per sample)."""
     if all(imgs is None for imgs in images):
@@ -150,7 +159,10 @@ def image_data_urls(image_data: list[list[Any] | None] | None) -> list[list[str]
         return None
     from monorl.rollout.media import image_data_url
 
-    return [None if entry is None else [img if isinstance(img, str) else image_data_url(img) for img in entry] for entry in image_data]
+    return [
+        None if entry is None else [img if isinstance(img, str) else image_data_url(img) for img in entry]
+        for entry in image_data
+    ]
 
 
 # -- sampling ----------------------------------------------------------------------------------
@@ -225,12 +237,16 @@ def output_token_ids(output: Mapping[str, Any]) -> list[int]:
     if ids is None:
         entries = output.get("meta_info", {}).get("output_token_logprobs")
         if entries is None:
-            raise ValueError("sglang output carries neither 'output_ids' nor 'meta_info.output_token_logprobs'")
+            raise ValueError(
+                "sglang output carries neither 'output_ids' nor 'meta_info.output_token_logprobs'"
+            )
         ids = [entry[1] for entry in entries]
     return [int(t) for t in ids]
 
 
-def completion_from_output(output: Mapping[str, Any], *, prompt_ids: list[int], want_logprobs: bool) -> Completion:
+def completion_from_output(
+    output: Mapping[str, Any], *, prompt_ids: list[int], want_logprobs: bool
+) -> Completion:
     meta = output.get("meta_info") or {}
     token_ids = output_token_ids(output)
     logprobs = output_logprobs(meta) if want_logprobs else None
@@ -256,11 +272,15 @@ def group_outputs(
     """Flat, prompt-major sglang outputs → ``params.n`` completions per prompt, order preserved."""
     expected = len(prompt_ids) * params.n
     if len(outputs) != expected:
-        raise ValueError(f"sglang returned {len(outputs)} outputs, expected {expected} ({len(prompt_ids)} x {params.n})")
+        raise ValueError(
+            f"sglang returned {len(outputs)} outputs, expected {expected} ({len(prompt_ids)} x {params.n})"
+        )
     grouped: list[list[Completion]] = []
     for i, ids in enumerate(prompt_ids):
         chunk = outputs[i * params.n : (i + 1) * params.n]
-        grouped.append([completion_from_output(o, prompt_ids=ids, want_logprobs=params.logprobs) for o in chunk])
+        grouped.append(
+            [completion_from_output(o, prompt_ids=ids, want_logprobs=params.logprobs) for o in chunk]
+        )
     return grouped
 
 
@@ -362,9 +382,13 @@ def server_url(config: RunConfig, replica: int) -> str:
     urls = extra.get("urls")
     if urls:
         if replica >= len(urls):
-            raise ConfigError(f"rollout.extra.urls has {len(urls)} entries but replica {replica} was requested")
+            raise ConfigError(
+                f"rollout.extra.urls has {len(urls)} entries but replica {replica} was requested"
+            )
         return str(urls[replica]).rstrip("/")
     url = extra.get("url")
     if not url:
-        raise ConfigError("rollout.extra.mode='server' needs rollout.extra.url (or urls) of an sglang HTTP server")
+        raise ConfigError(
+            "rollout.extra.mode='server' needs rollout.extra.url (or urls) of an sglang HTTP server"
+        )
     return str(url).rstrip("/")

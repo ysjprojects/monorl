@@ -10,7 +10,13 @@ for line in sys.stdin:
     req = json.loads(line)
     op, ep = req.get("op"), req.get("episode_id")
     if op == "spec":
-        out = {"name": "bench-echo", "version": "1", "protocol": "MEP/1", "max_turns": 3, "parallel_episodes": 2}
+        out = {
+            "name": "bench-echo",
+            "version": "1",
+            "protocol": "MEP/1",
+            "max_turns": 3,
+            "parallel_episodes": 2,
+        }
     elif op == "health":
         out = {"ok": True}
     elif op == "reset":
@@ -20,7 +26,12 @@ for line in sys.stdin:
         time.sleep(0.002)
         turns[ep] += 1
         done = turns[ep] >= 3
-        out = {"messages": [] if done else [{"role": "user", "content": "again"}], "reward": 1.0, "done": done, "info": {"turn": turns[ep]}}
+        out = {
+            "messages": [] if done else [{"role": "user", "content": "again"}],
+            "reward": 1.0,
+            "done": done,
+            "info": {"turn": turns[ep]},
+        }
     elif op == "close":
         turns.pop(ep, None)
         out = {}

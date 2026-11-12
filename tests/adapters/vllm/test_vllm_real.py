@@ -23,7 +23,10 @@ pytestmark = [
 def test_patches_apply_to_installed_vllm() -> None:
     report = apply("vllm")
     assert report.failed == [], report
-    assert {s.id for s in status("vllm") if s.applied} >= {"vllm.llm.sleep_guard", "vllm.outputs.sampled_logprobs"}
+    assert {s.id for s in status("vllm") if s.applied} >= {
+        "vllm.llm.sleep_guard",
+        "vllm.outputs.sampled_logprobs",
+    }
 
 
 def test_colocated_engine_roundtrip(vllm_config: RunConfig, tiny_model_dir) -> None:

@@ -119,7 +119,9 @@ def phase_for(prefix: str) -> str:
     return "train"
 
 
-def translate_metrics(metrics: dict[str, Any], prefix: str | None = "", *, algorithm: str | None = None) -> dict[str, float]:
+def translate_metrics(
+    metrics: dict[str, Any], prefix: str | None = "", *, algorithm: str | None = None
+) -> dict[str, float]:
     """Numeric ``metrics`` logged under NeMo-RL ``prefix`` → contract-named ``{name: float}``.
 
     Unknown keys are kept as ``nemo/<prefix>/<key>`` so nothing numeric is lost. ``algorithm``
@@ -158,12 +160,19 @@ def metrics_path(run_dir: str | os.PathLike[str]) -> Path:
     return Path(run_dir) / METRICS_FILE
 
 
-def append_metrics_row(run_dir: str | os.PathLike[str], step: int, metrics: dict[str, Any], prefix: str | None) -> dict[str, Any] | None:
+def append_metrics_row(
+    run_dir: str | os.PathLike[str], step: int, metrics: dict[str, Any], prefix: str | None
+) -> dict[str, Any] | None:
     """Translate and append one row to ``<run_dir>/metrics.jsonl``; returns the row (or ``None`` if empty)."""
     translated = translate_metrics(metrics, prefix)
     if not translated:
         return None
-    row: dict[str, Any] = {"step": int(step), "time": time.time(), "phase": phase_for(prefix or ""), **translated}
+    row: dict[str, Any] = {
+        "step": int(step),
+        "time": time.time(),
+        "phase": phase_for(prefix or ""),
+        **translated,
+    }
     path = metrics_path(run_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "a") as f:

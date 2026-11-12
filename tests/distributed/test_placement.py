@@ -54,7 +54,9 @@ def test_auto_small_clusters_are_colocated(make_config, mode, gpus, expected):
 
 
 def test_auto_with_explicit_split_is_disaggregated(make_config):
-    cfg = make_config(cluster={"mode": "ray", "rollout_gpus": 1, "trainer_gpus": 3}, trainer={"prompts_per_step": 4})
+    cfg = make_config(
+        cluster={"mode": "ray", "rollout_gpus": 1, "trainer_gpus": 3}, trainer={"prompts_per_step": 4}
+    )
     plan = plan_placement(cfg, gpu_cluster(4))
     assert plan.placement == "disaggregated"
     assert (plan.rollout_gpus, plan.trainer_gpus) == (1, 3)
@@ -65,7 +67,9 @@ def test_auto_with_explicit_split_is_disaggregated(make_config):
 
 
 def test_auto_multi_gpu_tiny_model_stays_colocated(make_config):
-    plan = plan_placement(make_config(cluster={"mode": "ray"}, trainer={"prompts_per_step": 4}), gpu_cluster(4))
+    plan = plan_placement(
+        make_config(cluster={"mode": "ray"}, trainer={"prompts_per_step": 4}), gpu_cluster(4)
+    )
     assert plan.placement == "colocated"
     assert plan.trainer_world_size == 4
     assert plan.trainer_devices == ["cuda:0", "cuda:1", "cuda:2", "cuda:3"]
@@ -105,7 +109,11 @@ def test_auto_heuristic_lora_fits_colocated(make_config, llama_7b_dir):
 
 
 def test_auto_heuristic_unknown_model_defaults_colocated(make_config):
-    cfg = make_config(model={"name_or_path": "/nonexistent/model-dir"}, cluster={"mode": "ray"}, trainer={"prompts_per_step": 4})
+    cfg = make_config(
+        model={"name_or_path": "/nonexistent/model-dir"},
+        cluster={"mode": "ray"},
+        trainer={"prompts_per_step": 4},
+    )
     plan = plan_placement(cfg, gpu_cluster(4))
     assert plan.placement == "colocated"
     assert plan.model_estimate is None
@@ -114,7 +122,13 @@ def test_auto_heuristic_unknown_model_defaults_colocated(make_config):
 
 def test_explicit_disaggregated_reports_idle_gpus(make_config):
     cfg = make_config(
-        cluster={"mode": "ray", "placement": "disaggregated", "gpus_per_node": 4, "rollout_gpus": 2, "trainer_gpus": 1}
+        cluster={
+            "mode": "ray",
+            "placement": "disaggregated",
+            "gpus_per_node": 4,
+            "rollout_gpus": 2,
+            "trainer_gpus": 1,
+        }
     )
     plan = plan_placement(cfg, gpu_cluster(4))
     assert plan.placement == "disaggregated"
@@ -182,8 +196,16 @@ def test_explicit_sync_names_pass_through(make_config, name):
         ({"rollout": {"tensor_parallel_size": 2}, "cluster": {"num_nodes": 2}}, 2, "cannot span nodes"),
         ({"cluster": {"placement": "disaggregated"}}, 0, "cluster.mode='ray'"),
         ({"cluster": {"placement": "disaggregated"}}, 2, "needs rollout_gpus and trainer_gpus"),
-        ({"cluster": {"placement": "disaggregated", "rollout_gpus": 2, "trainer_gpus": 2}}, 2, "exceeds 2 GPUs"),
-        ({"cluster": {"placement": "disaggregated", "rollout_gpus": 1, "trainer_gpus": 0}}, 2, "trainer_gpus >= 1"),
+        (
+            {"cluster": {"placement": "disaggregated", "rollout_gpus": 2, "trainer_gpus": 2}},
+            2,
+            "exceeds 2 GPUs",
+        ),
+        (
+            {"cluster": {"placement": "disaggregated", "rollout_gpus": 1, "trainer_gpus": 0}},
+            2,
+            "trainer_gpus >= 1",
+        ),
         ({"cluster": {"placement": "colocated", "rollout_gpus": 2}}, 2, "must equal tp\\*dp"),
         ({"cluster": {"weight_sync": "broadcast"}}, 0, "cluster.mode='ray'"),
         ({"cluster": {"weight_sync": "cuda_ipc"}}, 1, "cluster.mode='ray'"),

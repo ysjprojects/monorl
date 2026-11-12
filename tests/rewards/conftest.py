@@ -21,7 +21,12 @@ def make_trajectory(
     turns = []
     for text in [*(earlier_turns or []), response]:
         ids = token_ids if token_ids is not None else list(range(len(text.split())))
-        turns.append(Turn(prompt_token_ids=[1, 2, 3], completion=Completion(text=text, token_ids=ids, finish_reason=finish_reason)))
+        turns.append(
+            Turn(
+                prompt_token_ids=[1, 2, 3],
+                completion=Completion(text=text, token_ids=ids, finish_reason=finish_reason),
+            )
+        )
     return Trajectory(sample=sample, group_id=group_id, messages=list(sample.messages), turns=turns)
 
 

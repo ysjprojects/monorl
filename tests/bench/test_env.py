@@ -77,7 +77,9 @@ def test_measure_parallel_runs_all_episodes(mep_command) -> None:
 
 
 def test_run_env_benchmark_stdio_parallel_1_and_4(mep_command) -> None:
-    bench = run_env_benchmark(EnvTarget(command=mep_command, timeout_s=20), parallel_levels=[4, 1], episodes=12, turns=10)
+    bench = run_env_benchmark(
+        EnvTarget(command=mep_command, timeout_s=20), parallel_levels=[4, 1], episodes=12, turns=10
+    )
     assert [r.parallel for r in bench.results] == [1, 4]
     assert bench.turns == 3  # clamped to spec.max_turns
     assert bench.spec["name"] == "bench-echo"
@@ -95,7 +97,11 @@ def test_run_env_benchmark_stdio_parallel_1_and_4(mep_command) -> None:
 
 
 def test_run_env_benchmark_counts_failures() -> None:
-    bad = [sys.executable, "-c", "import sys; print('{\"name\":\"x\",\"parallel_episodes\":1}'); sys.stdout.flush(); sys.exit(0)"]
+    bad = [
+        sys.executable,
+        "-c",
+        'import sys; print(\'{"name":"x","parallel_episodes":1}\'); sys.stdout.flush(); sys.exit(0)',
+    ]
     bench = run_env_benchmark(EnvTarget(command=bad, timeout_s=5), parallel_levels=[1], episodes=2)
     assert bench.results[0].episodes == 0 and bench.results[0].errors == 2
     assert bench.best_parallel is None
@@ -159,7 +165,9 @@ def http_url():
 
 def test_run_env_benchmark_http(http_url) -> None:
     pytest.importorskip("httpx")
-    bench = run_env_benchmark(EnvTarget(url=http_url, timeout_s=10), parallel_levels=[1, 4], episodes=6, turns=2)
+    bench = run_env_benchmark(
+        EnvTarget(url=http_url, timeout_s=10), parallel_levels=[1, 4], episodes=6, turns=2
+    )
     assert bench.spec["name"] == "http-echo"
     for r in bench.results:
         assert r.episodes == 6 and r.steps == 12 and r.errors == 0 and r.processes == 0

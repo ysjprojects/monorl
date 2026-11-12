@@ -45,7 +45,13 @@ def test_full_pipeline_manifest_and_handoff(make_pipeline: Any, tmp_path: Path) 
     assert [s["name"] for s in stages] == ["warmup", "grpo_1", "rs", "sft_like", "eval"]
     assert [s["type"] for s in stages] == ["train", "train", "rejection_sample", "train", "eval"]
     assert all(s["state"] == "succeeded" for s in stages)
-    assert [Path(s["run_dir"]).name for s in stages] == ["00-warmup", "01-grpo_1", "02-rs", "03-sft_like", "04-eval"]
+    assert [Path(s["run_dir"]).name for s in stages] == [
+        "00-warmup",
+        "01-grpo_1",
+        "02-rs",
+        "03-sft_like",
+        "04-eval",
+    ]
     assert all(Path(s["run_dir"]).parent == run_dir / "stages" for s in stages)
     assert all(s["started_at"] is not None and s["finished_at"] is not None for s in stages)
     assert result.stages == stages
@@ -84,14 +90,24 @@ def test_full_pipeline_manifest_and_handoff(make_pipeline: Any, tmp_path: Path) 
         assert row["messages"][-1]["content"] == row["reference"]  # exact-match accepted
         assert row["messages"][0]["role"] == "user"
     metric_rows = [r for _, r in iter_metrics(rs["run_dir"]) if r["phase"] == "rejection"]
-    assert metric_rows and {"rs/prompts", "rs/sampled", "rs/accepted", "rs/accept_rate", "reward/mean"} <= set(metric_rows[0])
+    assert metric_rows and {
+        "rs/prompts",
+        "rs/sampled",
+        "rs/accepted",
+        "rs/accept_rate",
+        "reward/mean",
+    } <= set(metric_rows[0])
     assert sum(r["rs/accepted"] for r in metric_rows) == len(rows)
     assert [r for _, r in iter_trajectories(rs["run_dir"])]
     assert read_status(rs["run_dir"])["state"] == "succeeded"
 
     # data_from: previous → the SFT-like stage reads the rejection dataset in chat format
     sft_data = _stage_config(sft_like)["data"]
-    assert sft_data["uri"] == str(dataset) and sft_data["format"] == "chat" and sft_data["messages_field"] == "messages"
+    assert (
+        sft_data["uri"] == str(dataset)
+        and sft_data["format"] == "chat"
+        and sft_data["messages_field"] == "messages"
+    )
     assert sft_data["prompt_field"] is None and sft_data["answer_field"] is None
     assert sft_data["max_prompt_tokens"] == config.base.data.max_prompt_tokens
 
@@ -111,7 +127,12 @@ def test_mix_datasets_and_filters(make_pipeline: Any, tmp_path: Path) -> None:
     mix_file = fakes.write_jsonl(
         tmp_path / "mix.jsonl",
         [
-            {"messages": [{"role": "user", "content": "hello"}, {"role": "assistant", "content": "hi there"}]},
+            {
+                "messages": [
+                    {"role": "user", "content": "hello"},
+                    {"role": "assistant", "content": "hi there"},
+                ]
+            },
             {"messages": [{"role": "user", "content": "no answer"}]},
         ],
     )
@@ -125,7 +146,12 @@ def test_mix_datasets_and_filters(make_pipeline: Any, tmp_path: Path) -> None:
             "mix": [str(mix_file)],
             "rollout_overrides": {"extra": {"fake_mode": "always_right", "max_parallel_episodes": 4}},
         },
-        {"type": "train", "name": "sft_like", "data_from": "previous", "overrides": {"trainer": {"max_steps": 1}}},
+        {
+            "type": "train",
+            "name": "sft_like",
+            "data_from": "previous",
+            "overrides": {"trainer": {"max_steps": 1}},
+        },
     ]
     config = make_pipeline(stages)
     result = run_pipeline(config)
@@ -178,7 +204,12 @@ def test_resume_skips_succeeded_stages(make_pipeline: Any, tmp_path: Path) -> No
     stages = [
         {"type": "train", "name": "first", "overrides": {"trainer": {"max_steps": 1}}},
         {"type": "rejection_sample", "name": "rs", "num_samples": 2, "min_reward": 1.0},
-        {"type": "train", "name": "second", "data_from": "previous", "overrides": {"trainer": {"max_steps": 2, "extra": {"fake_fail_at": 1}}}},
+        {
+            "type": "train",
+            "name": "second",
+            "data_from": "previous",
+            "overrides": {"trainer": {"max_steps": 2, "extra": {"fake_fail_at": 1}}},
+        },
         {"type": "train", "name": "third", "overrides": {"trainer": {"max_steps": 1}}},
     ]
     first = run_pipeline(make_pipeline(stages))
@@ -191,7 +222,12 @@ def test_resume_skips_succeeded_stages(make_pipeline: Any, tmp_path: Path) -> No
 
     fakes.reset_recorders()
     fixed = [*stages]
-    fixed[2] = {"type": "train", "name": "second", "data_from": "previous", "overrides": {"trainer": {"max_steps": 2}}}
+    fixed[2] = {
+        "type": "train",
+        "name": "second",
+        "data_from": "previous",
+        "overrides": {"trainer": {"max_steps": 2}},
+    }
     resumed = run_pipeline(make_pipeline(fixed), run_dir, resume=True)
     assert resumed.state == "succeeded", resumed.error
     assert [s["state"] for s in resumed.stages] == ["succeeded"] * 4
@@ -201,7 +237,9 @@ def test_resume_skips_succeeded_stages(make_pipeline: Any, tmp_path: Path) -> No
     second_cfg = _stage_config(resumed.stages[2])
     assert second_cfg["data"]["uri"] == dataset_before
     assert second_cfg["model"]["name_or_path"] == first_final
-    assert _stage_config(resumed.stages[3])["model"]["name_or_path"] == str(Path(resumed.stages[2]["run_dir"]) / "final")
+    assert _stage_config(resumed.stages[3])["model"]["name_or_path"] == str(
+        Path(resumed.stages[2]["run_dir"]) / "final"
+    )
     assert read_status(run_dir)["step"] == 4
     assert "already succeeded; reusing" in (run_dir / "run.log").read_text()
 
@@ -219,10 +257,16 @@ def _sigterm_self() -> None:
     os.kill(os.getpid(), signal.SIGTERM)
 
 
-def test_sigterm_during_train_stage_cancels_pipeline(make_pipeline: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_sigterm_during_train_stage_cancels_pipeline(
+    make_pipeline: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
     stages = [
         {"type": "train", "name": "quick", "overrides": {"trainer": {"max_steps": 1}}},
-        {"type": "train", "name": "long", "overrides": {"trainer": {"max_steps": 10_000, "save_every": 1_000}}},
+        {
+            "type": "train",
+            "name": "long",
+            "overrides": {"trainer": {"max_steps": 10_000, "save_every": 1_000}},
+        },
         {"type": "eval", "name": "eval"},
     ]
     config = make_pipeline(stages)
@@ -248,7 +292,9 @@ def test_sigterm_during_train_stage_cancels_pipeline(make_pipeline: Any, monkeyp
     assert "received SIGTERM" in (Path(result.stages[1]["run_dir"]) / "run.log").read_text()
 
 
-def test_sigterm_during_rejection_stage_cancels_pipeline(make_pipeline: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_sigterm_during_rejection_stage_cancels_pipeline(
+    make_pipeline: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
     stages = [
         {
             "type": "rejection_sample",

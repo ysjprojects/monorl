@@ -66,7 +66,10 @@ def test_run_writes_complete_run_dir(make_config: Any, tmp_path: Path) -> None:
     assert rows[0]["policy/staleness"] == 0.0
     assert rows[0]["tokens/prefix_mismatch"] == 0.0
 
-    assert list_checkpoints(run_dir) == [str(run_dir / "checkpoints" / "step-1"), str(run_dir / "checkpoints" / "step-2")]
+    assert list_checkpoints(run_dir) == [
+        str(run_dir / "checkpoints" / "step-1"),
+        str(run_dir / "checkpoints" / "step-2"),
+    ]
     assert result.checkpoints == list_checkpoints(run_dir)
     assert (run_dir / "final" / "config.json").exists()
     assert result.final_model_path == str(run_dir / "final")
@@ -202,7 +205,11 @@ def test_dynamic_sampling_drops_uniform_groups_and_skips_update(make_config: Any
 
 
 def test_dynamic_sampling_keeps_mixed_groups(make_config: Any) -> None:
-    cfg = make_config(algorithm={"dynamic_sampling": True}, rollout={"extra": {"max_parallel_episodes": 1}}, trainer={"max_steps": 1})
+    cfg = make_config(
+        algorithm={"dynamic_sampling": True},
+        rollout={"extra": {"max_parallel_episodes": 1}},
+        trainer={"max_steps": 1},
+    )
     result = run(cfg)
     row = _rows(Path(result.run_dir))[0]
     assert row["rollout/groups_dropped"] == 0.0 and row["rollout/resample_rounds"] == 0.0
@@ -255,11 +262,15 @@ def test_prefix_mismatch_is_counted_and_masks_final_turn_only(make_config: Any) 
     metrics = _rows(Path(result.run_dir))[0]
     assert metrics["tokens/prefix_mismatch"] == 4.0
     batch = fakes.TRAINERS[-1].batches[0]
-    assert batch.response_mask[0].sum().item() == len("AGAIN1") + 2  # final completion only (+ mismatch token + EOS)
+    assert (
+        batch.response_mask[0].sum().item() == len("AGAIN1") + 2
+    )  # final completion only (+ mismatch token + EOS)
 
 
 def test_eval_every_logs_greedy_eval_metrics(make_config: Any, tmp_path: Path) -> None:
-    eval_file = fakes.write_jsonl(tmp_path / "eval.jsonl", [{"prompt": "xyz", "answer": "XYZ"}, {"prompt": "uvw", "answer": "UVW"}])
+    eval_file = fakes.write_jsonl(
+        tmp_path / "eval.jsonl", [{"prompt": "xyz", "answer": "XYZ"}, {"prompt": "uvw", "answer": "UVW"}]
+    )
     cfg = make_config(
         data={"eval_uri": str(eval_file)},
         trainer={"max_steps": 2, "eval_every": 2},

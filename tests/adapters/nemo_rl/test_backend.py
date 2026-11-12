@@ -36,7 +36,9 @@ def _with_extra(config: RunConfig, **extra) -> RunConfig:
     return RunConfig.from_dict(data)
 
 
-def test_home_resolution(nemo_config: RunConfig, fake_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_home_resolution(
+    nemo_config: RunConfig, fake_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.delenv(HOME_ENV, raising=False)
     with pytest.raises(BackendUnavailable, match="NEMO_RL_HOME"):
         nemo_rl_home(nemo_config)
@@ -50,27 +52,48 @@ def test_home_resolution(nemo_config: RunConfig, fake_home: Path, tmp_path: Path
     assert nemo_rl_home(_with_extra(nemo_config, nemo_rl_home=str(other))) == other.resolve()
 
 
-def test_run_raises_backend_unavailable_without_home(nemo_config: RunConfig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_run_raises_backend_unavailable_without_home(
+    nemo_config: RunConfig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.delenv(HOME_ENV, raising=False)
     reporter = RunReporter(tmp_path / "run", echo=False)
     with pytest.raises(BackendUnavailable):
         NemoRLBackend().run(nemo_config, tmp_path / "run", reporter=reporter)
 
 
-def test_build_command_and_env(nemo_config: RunConfig, fake_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_build_command_and_env(
+    nemo_config: RunConfig, fake_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     run_dir = tmp_path / "run"
     yaml_path = run_dir / "nemo_rl" / "nemo_rl.yaml"
     tail = [
-        "-m", ENTRY_MODULE, "--config", str(yaml_path), "--run-dir", str(run_dir), "--nemo-rl-home", str(fake_home),
-        "--script", "examples/run_grpo.py",
+        "-m",
+        ENTRY_MODULE,
+        "--config",
+        str(yaml_path),
+        "--run-dir",
+        str(run_dir),
+        "--nemo-rl-home",
+        str(fake_home),
+        "--script",
+        "examples/run_grpo.py",
     ]
 
-    monkeypatch.setattr("monorl.adapters.nemo_rl.backend.shutil.which", lambda name: "/usr/bin/uv" if name == "uv" else None)
+    monkeypatch.setattr(
+        "monorl.adapters.nemo_rl.backend.shutil.which", lambda name: "/usr/bin/uv" if name == "uv" else None
+    )
     assert build_command(nemo_config, fake_home, yaml_path, run_dir) == ["uv", "run", "python", *tail]
     monkeypatch.setattr("monorl.adapters.nemo_rl.backend.shutil.which", lambda name: None)
     assert build_command(nemo_config, fake_home, yaml_path, run_dir) == [sys.executable, *tail]
-    assert build_command(_with_extra(nemo_config, nemo_rl_launcher="uv"), fake_home, yaml_path, run_dir)[:3] == ["uv", "run", "python"]
-    custom = _with_extra(nemo_config, nemo_rl_launcher="python", nemo_rl_python="/opt/py", nemo_rl_overrides=["grpo.max_num_steps=3"])
+    assert build_command(_with_extra(nemo_config, nemo_rl_launcher="uv"), fake_home, yaml_path, run_dir)[
+        :3
+    ] == ["uv", "run", "python"]
+    custom = _with_extra(
+        nemo_config,
+        nemo_rl_launcher="python",
+        nemo_rl_python="/opt/py",
+        nemo_rl_overrides=["grpo.max_num_steps=3"],
+    )
     assert build_command(custom, fake_home, yaml_path, run_dir) == ["/opt/py", *tail, "grpo.max_num_steps=3"]
     with pytest.raises(ConfigError, match="nemo_rl_launcher"):
         build_command(_with_extra(nemo_config, nemo_rl_launcher="conda"), fake_home, yaml_path, run_dir)
@@ -82,7 +105,12 @@ def test_build_command_and_env(nemo_config: RunConfig, fake_home: Path, tmp_path
     assert env["MONORL_ALGORITHM"] == "grpo"
     assert env["PYTHONPATH"].split(os.pathsep) == [str(run_dir), str(monorl_src_root()), "/extra"]
     assert env["PYTHONUNBUFFERED"] == "1" and "RAY_ADDRESS" not in env and env["PATH"] == "/bin"
-    ray_cfg = RunConfig.from_dict({**nemo_config.to_dict(), "cluster": {**nemo_config.cluster.model_dump(mode="json"), "ray_address": "auto"}})
+    ray_cfg = RunConfig.from_dict(
+        {
+            **nemo_config.to_dict(),
+            "cluster": {**nemo_config.cluster.model_dump(mode="json"), "ray_address": "auto"},
+        }
+    )
     assert build_env(ray_cfg, fake_home, run_dir, base={})["RAY_ADDRESS"] == "auto"
 
 
@@ -106,7 +134,9 @@ def test_latest_step_reads_metrics(tmp_path: Path) -> None:
 
 
 def test_entry_parse_args() -> None:
-    args, overrides = parse_args(["--config", "c.yaml", "--run-dir", "r", "grpo.max_num_steps=3", "++policy.x=1"])
+    args, overrides = parse_args(
+        ["--config", "c.yaml", "--run-dir", "r", "grpo.max_num_steps=3", "++policy.x=1"]
+    )
     assert (args.config, args.run_dir, args.nemo_rl_home) == ("c.yaml", "r", None)
     assert overrides == ["grpo.max_num_steps=3", "++policy.x=1"]
 
@@ -157,7 +187,9 @@ def test_run_end_to_end_with_fake_checkout(python_launch: RunConfig, fake_home: 
     assert (run_dir / "nemo_rl" / "nemo_rl.yaml").exists()
 
 
-def test_run_reports_failure(python_launch: RunConfig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_run_reports_failure(
+    python_launch: RunConfig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.setenv("FAKE_NEMO_RL_FAIL", "1")
     run_dir = tmp_path / "run"
     result = NemoRLBackend().run(python_launch, run_dir, reporter=RunReporter(run_dir, echo=False))
@@ -166,13 +198,17 @@ def test_run_reports_failure(python_launch: RunConfig, tmp_path: Path, monkeypat
     assert "boom" in (run_dir / "run.log").read_text()
 
 
-def test_cancel_propagates_to_child(python_launch: RunConfig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_cancel_propagates_to_child(
+    python_launch: RunConfig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.setenv("FAKE_NEMO_RL_SLEEP", "1")
     run_dir = tmp_path / "run"
     reporter = RunReporter(run_dir, echo=False)
     backend = NemoRLBackend()
     results: list = []
-    thread = threading.Thread(target=lambda: results.append(backend.run(python_launch, run_dir, reporter=reporter)))
+    thread = threading.Thread(
+        target=lambda: results.append(backend.run(python_launch, run_dir, reporter=reporter))
+    )
     thread.start()
     deadline = time.monotonic() + 60
     while time.monotonic() < deadline:

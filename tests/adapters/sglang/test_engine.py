@@ -123,7 +123,9 @@ def test_generate_with_seed_fans_out_requests(engine):
     assert groups[0][0].token_ids != groups[0][1].token_ids
 
 
-@pytest.mark.parametrize("finish, expected", [("stop", "stop"), ("length", "length"), ("abort", "error"), (None, "error")])
+@pytest.mark.parametrize(
+    "finish, expected", [("stop", "stop"), ("length", "length"), ("abort", "error"), (None, "error")]
+)
 def test_generate_finish_reasons(engine, finish, expected):
     fake_of(engine).script.finish = finish
     groups = engine.generate([[1]], SamplingParams(n=1))

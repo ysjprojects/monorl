@@ -78,7 +78,9 @@ class LLMJudgeReward:
         if api_key:
             headers["Authorization"] = f"Bearer {api_key}"
         if client is None:
-            client = httpx.Client(base_url=str(base_url).rstrip("/"), timeout=float(params.get("timeout_s", 60)))
+            client = httpx.Client(
+                base_url=str(base_url).rstrip("/"), timeout=float(params.get("timeout_s", 60))
+            )
         else:
             client.base_url = httpx.URL(str(base_url).rstrip("/"))
         client.headers.update(headers)
@@ -113,15 +115,21 @@ class LLMJudgeReward:
         except (httpx.HTTPError, KeyError, IndexError, TypeError, ValueError) as e:
             if self.on_error == "raise":
                 raise
-            return RewardResult(score=0.0, breakdown={self.name: 0.0}, info={"error": f"{type(e).__name__}: {e}"})
+            return RewardResult(
+                score=0.0, breakdown={self.name: 0.0}, info={"error": f"{type(e).__name__}: {e}"}
+            )
         raw = parse_score(content)
         if raw is None:
             if self.on_error == "raise":
                 raise ValueError(f"llm_judge: no <score> tag in judge output: {content[:200]!r}")
-            return RewardResult(score=0.0, breakdown={self.name: 0.0}, info={"error": "no_score", "judge_output": content})
+            return RewardResult(
+                score=0.0, breakdown={self.name: 0.0}, info={"error": "no_score", "judge_output": content}
+            )
         raw = min(max(raw, 0.0), self.max_score)
         score = raw / self.max_score if self.normalize else raw
-        return RewardResult(score=score, breakdown={self.name: score}, info={"raw_score": raw, "judge_output": content})
+        return RewardResult(
+            score=score, breakdown={self.name: score}, info={"raw_score": raw, "judge_output": content}
+        )
 
     def __call__(self, trajectories: Sequence[Trajectory]) -> list[RewardResult]:
         check_trajectories(trajectories)

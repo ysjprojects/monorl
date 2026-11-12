@@ -95,9 +95,13 @@ def test_format_flags_and_fullmatch(traj):
 
 def test_length_reward_band_and_penalty(traj):
     fn = registry.get("reward", "length")({"min_tokens": 2, "max_tokens": 4, "penalty_per_token": 0.25})
-    scores = [r.score for r in fn([traj("a b c"), traj("a b c d e f"), traj("a"), traj("a b c d e f g h i j")])]
+    scores = [
+        r.score for r in fn([traj("a b c"), traj("a b c d e f"), traj("a"), traj("a b c d e f g h i j")])
+    ]
     assert scores == [1.0, 0.5, 0.75, 0.0]
-    chars = registry.get("reward", "length")({"max_tokens": 3, "unit": "chars", "penalty_per_token": 0.1, "base": 0.0, "min_reward": -1.0})
+    chars = registry.get("reward", "length")(
+        {"max_tokens": 3, "unit": "chars", "penalty_per_token": 0.1, "base": 0.0, "min_reward": -1.0}
+    )
     assert chars([traj("abcdef")])[0].score == pytest.approx(-0.3)
     assert chars([traj("abcdef")])[0].info["length"] == 6
     with pytest.raises(ValueError):
@@ -153,7 +157,9 @@ def test_build_reward_weighted_sum_with_breakdown(traj):
 
 
 def test_build_reward_accepts_dicts_and_registered_composite(traj):
-    fn = build_reward([{"type": "exact_match"}, {"type": "length", "weight": 0.1, "params": {"max_tokens": 1}}])
+    fn = build_reward(
+        [{"type": "exact_match"}, {"type": "length", "weight": 0.1, "params": {"max_tokens": 1}}]
+    )
     [res] = fn([traj("4 4", "4")])
     assert res.score == pytest.approx(1.0 + 0.1 * 0.99)
     nested = registry.get("reward", "composite")(

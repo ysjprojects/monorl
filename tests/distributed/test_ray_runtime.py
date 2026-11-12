@@ -46,7 +46,9 @@ def _trainer_tag(trainer: Trainer) -> str:
 
 
 def test_ray_runtime_object_store_sync(ray_session, make_config, tmp_path: Path):
-    cfg = make_config(cluster={"mode": "ray", "extra": {"providers": ["distributed_fakes"], "sync_chunk_bytes": 64}})
+    cfg = make_config(
+        cluster={"mode": "ray", "extra": {"providers": ["distributed_fakes"], "sync_chunk_bytes": 64}}
+    )
     rt = build_runtime(cfg)
     try:
         assert rt.placement["mode"] == "ray" and rt.placement["placement"] == "colocated"

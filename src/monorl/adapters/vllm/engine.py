@@ -69,7 +69,9 @@ def import_vllm() -> Any:
     if version is not None:
         try:
             if Version(version) not in SpecifierSet(VLLM_VERSIONS, prereleases=True):
-                log.warning("vllm %s is outside the supported range %s; proceeding anyway", version, VLLM_VERSIONS)
+                log.warning(
+                    "vllm %s is outside the supported range %s; proceeding anyway", version, VLLM_VERSIONS
+                )
         except InvalidVersion:
             log.warning("could not parse vllm version %r", version)
     return vllm

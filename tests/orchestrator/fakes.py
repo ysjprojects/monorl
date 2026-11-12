@@ -151,7 +151,9 @@ class FakeEngine:
         out: list[list[Completion]] = []
         for prompt in prompts:
             if prompt and isinstance(prompt[0], dict):
-                prompt_ids = self._tokenizer.apply_chat_template(prompt, add_generation_prompt=True, tokenize=True)
+                prompt_ids = self._tokenizer.apply_chat_template(
+                    prompt, add_generation_prompt=True, tokenize=True
+                )
             else:
                 prompt_ids = [int(t) for t in prompt]
             prompt_text = self._tokenizer.decode(prompt_ids)
@@ -227,7 +229,9 @@ class FakeTrainer:
         old = batch.old_logprobs if batch.old_logprobs is not None else torch.zeros_like(batch.advantages)
         return {
             "loss/policy": float(-(batch.advantages * old).sum().item() / n),
-            "loss/kl": 0.0 if batch.ref_logprobs is None else float(batch.ref_logprobs.abs().sum().item() / n),
+            "loss/kl": 0.0
+            if batch.ref_logprobs is None
+            else float(batch.ref_logprobs.abs().sum().item() / n),
             "loss/entropy": 0.0,
             "policy/clipfrac": 0.0,
             "policy/approx_kl": 0.0,
@@ -244,7 +248,9 @@ class FakeTrainer:
 
     def save_checkpoint(self, path: Path) -> None:
         Path(path).mkdir(parents=True, exist_ok=True)
-        (Path(path) / "state.json").write_text(json.dumps({"step": self._step, "weight": float(self.weight[0])}))
+        (Path(path) / "state.json").write_text(
+            json.dumps({"step": self._step, "weight": float(self.weight[0])})
+        )
 
     def load_checkpoint(self, path: Path) -> None:
         state = json.loads((Path(path) / "state.json").read_text())
@@ -311,7 +317,10 @@ class CompositeReward:
     name = "composite"
 
     def __init__(self, specs: Sequence[Any]) -> None:
-        self.members = [(spec.type, float(spec.weight), registry.get("reward", spec.type)(dict(spec.params))) for spec in specs]
+        self.members = [
+            (spec.type, float(spec.weight), registry.get("reward", spec.type)(dict(spec.params)))
+            for spec in specs
+        ]
 
     def __call__(self, trajectories: Sequence[Trajectory]) -> list[RewardResult]:
         results = [RewardResult(score=0.0) for _ in trajectories]
@@ -329,7 +338,9 @@ def fake_build_reward(specs: Sequence[Any], *, config: RunConfig | None = None) 
 # -- algorithms -------------------------------------------------------------------------------
 
 
-def fake_compute_advantages(rewards: torch.Tensor, group_ids: Sequence[str], *, algorithm: Any) -> torch.Tensor:
+def fake_compute_advantages(
+    rewards: torch.Tensor, group_ids: Sequence[str], *, algorithm: Any
+) -> torch.Tensor:
     rewards = rewards.to(torch.float32)
     adv = rewards.clone()
     if algorithm.advantage_norm == "group":
@@ -365,7 +376,9 @@ class FakeDataSource:
         return {"prompt": "string", "answer": "string"}
 
 
-def fake_open_source(data_config: DataConfig, *, split: str | None = None, tokenizer: Any = None, seed: int = 0) -> FakeDataSource:
+def fake_open_source(
+    data_config: DataConfig, *, split: str | None = None, tokenizer: Any = None, seed: int = 0
+) -> FakeDataSource:
     prompt_field = data_config.prompt_field or "prompt"
     answer_field = data_config.answer_field or "answer"
     samples: list[Sample] = []
@@ -379,7 +392,9 @@ def fake_open_source(data_config: DataConfig, *, split: str | None = None, token
             if data_config.system_prompt:
                 messages.append({"role": "system", "content": data_config.system_prompt})
             messages.append({"role": "user", "content": str(row[prompt_field])})
-            samples.append(Sample(id=str(row.get("id", i)), messages=messages, reference=row.get(answer_field)))
+            samples.append(
+                Sample(id=str(row.get("id", i)), messages=messages, reference=row.get(answer_field))
+            )
     if data_config.limit:
         samples = samples[: data_config.limit]
     return FakeDataSource(samples)
@@ -442,8 +457,19 @@ def fake_config_dict(tmp_path: Path, **overrides: Any) -> dict[str, Any]:
         "model": {"name_or_path": str(model_dir)},
         "data": {"uri": str(data_file), "prompt_field": "prompt", "answer_field": "answer"},
         "algorithm": {"name": "grpo"},
-        "rollout": {"backend": "fake", "group_size": 2, "max_new_tokens": 16, "extra": {"max_parallel_episodes": 4}},
-        "trainer": {"backend": "fake", "prompts_per_step": 2, "max_steps": 2, "save_every": 1, "max_seq_len": 64},
+        "rollout": {
+            "backend": "fake",
+            "group_size": 2,
+            "max_new_tokens": 16,
+            "extra": {"max_parallel_episodes": 4},
+        },
+        "trainer": {
+            "backend": "fake",
+            "prompts_per_step": 2,
+            "max_steps": 2,
+            "save_every": 1,
+            "max_seq_len": 64,
+        },
         "rewards": [{"type": "test_exact"}],
         "env": {"type": "single_turn"},
         "logging": {"run_root": str(tmp_path / "runs")},

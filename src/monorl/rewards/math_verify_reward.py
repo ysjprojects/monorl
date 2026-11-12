@@ -32,7 +32,9 @@ def _import_math_verify() -> Any:
     try:
         import math_verify
     except ImportError as e:  # pragma: no cover - exercised only when the extra is missing
-        raise BackendUnavailable("math_verify reward needs the 'math-verify' package (pip install monorl[rewards])") from e
+        raise BackendUnavailable(
+            "math_verify reward needs the 'math-verify' package (pip install monorl[rewards])"
+        ) from e
     return math_verify
 
 
@@ -89,7 +91,9 @@ class MathVerifyReward:
         check_trajectories(trajectories)
         out = []
         for t in trajectories:
-            score, extracted = self.score_text(response_text(t, self.scope), reference_value(t, self.reference_key))
+            score, extracted = self.score_text(
+                response_text(t, self.scope), reference_value(t, self.reference_key)
+            )
             out.append(RewardResult(score=score, breakdown={self.name: score}, info={"extracted": extracted}))
         return out
 

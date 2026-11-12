@@ -25,7 +25,9 @@ def load_vlm_processor():
     last: Exception | None = None
     for local_only in (True, False):
         try:
-            return AutoProcessor.from_pretrained(VLM_PROCESSOR_ID, local_files_only=local_only, size=dict(IMAGE_SIZE))
+            return AutoProcessor.from_pretrained(
+                VLM_PROCESSOR_ID, local_files_only=local_only, size=dict(IMAGE_SIZE)
+            )
         except Exception as e:  # noqa: BLE001 - try the network next, then skip
             last = e
     pytest.skip(f"Qwen2-VL processor files unavailable (needs one-time network access): {last}")

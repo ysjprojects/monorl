@@ -68,7 +68,9 @@ def test_export_dataset_writes_jsonl_and_paths(nemo_config: RunConfig, tmp_path:
 
 def test_processor_builds_datum_spec(tiny_model_dir: Path) -> None:
     tokenizer = AutoTokenizer.from_pretrained(tiny_model_dir)
-    sample = Sample(id="s1", messages=[{"role": "user", "content": "What is 2+2?"}], reference="4", metadata={"k": "v"})
+    sample = Sample(
+        id="s1", messages=[{"role": "user", "content": "What is 2+2?"}], reference="4", metadata={"k": "v"}
+    )
     datum = monorl_data_processor(sample_to_row(sample), _Spec(), tokenizer, 512, 7)
     assert datum["task_name"] == TASK_NAME
     assert datum["idx"] == 7 and datum["loss_multiplier"] == 1.0
@@ -79,7 +81,12 @@ def test_processor_builds_datum_spec(tiny_model_dir: Path) -> None:
     assert datum["length"] == msg["token_ids"].shape[0] > 0
     expected = tokenizer.apply_chat_template(sample.messages, tokenize=False, add_generation_prompt=True)
     assert msg["content"] == expected
-    assert datum["extra_env_info"] == {"sample_id": "s1", "messages": sample.messages, "reference": "4", "metadata": {"k": "v"}}
+    assert datum["extra_env_info"] == {
+        "sample_id": "s1",
+        "messages": sample.messages,
+        "reference": "4",
+        "metadata": {"k": "v"},
+    }
 
 
 def test_processor_masks_overlong_and_applies_task_spec(tiny_model_dir: Path) -> None:
@@ -91,7 +98,13 @@ def test_processor_masks_overlong_and_applies_task_spec(tiny_model_dir: Path) ->
     assert datum["length"] >= 32
 
     spec = _Spec(prompt="Q: {}\nThink step by step.", system_prompt="You are terse.")
-    datum = monorl_data_processor(sample_to_row(Sample(id="s2", messages=[{"role": "user", "content": "2+2?"}], reference="4")), spec, tokenizer, 512, 1)
+    datum = monorl_data_processor(
+        sample_to_row(Sample(id="s2", messages=[{"role": "user", "content": "2+2?"}], reference="4")),
+        spec,
+        tokenizer,
+        512,
+        1,
+    )
     rendered = datum["extra_env_info"]["messages"]
     assert rendered[0] == {"role": "system", "content": "You are terse."}
     assert rendered[1]["content"] == "Q: 2+2?\nThink step by step."
@@ -137,7 +150,9 @@ def test_bridge_module_importable_from_run_dir(tmp_path: Path) -> None:
 
 
 def test_export_jsonl_counts(tmp_path: Path) -> None:
-    samples = [Sample(id=str(i), messages=[{"role": "user", "content": f"q{i}"}], reference=str(i)) for i in range(3)]
+    samples = [
+        Sample(id=str(i), messages=[{"role": "user", "content": f"q{i}"}], reference=str(i)) for i in range(3)
+    ]
     assert export_jsonl(samples, tmp_path / "nested" / "x.jsonl") == 3
     assert (tmp_path / "nested" / "x.jsonl").read_text().count("\n") == 3
 

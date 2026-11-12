@@ -53,7 +53,9 @@ def test_end_to_end_hf_engine_reference_trainer(run_config_dict: dict[str, Any])
     assert (run_dir / "checkpoints" / "step-1").is_dir()
     assert [Path(p).name for p in list_checkpoints(run_dir)] == ["step-1", "step-2"]
     assert (run_dir / "final" / "config.json").exists()
-    assert json.loads((run_dir / "final" / "config.json").read_text())["architectures"] == ["LlamaForCausalLM"]
+    assert json.loads((run_dir / "final" / "config.json").read_text())["architectures"] == [
+        "LlamaForCausalLM"
+    ]
 
     trajectories = [row for _, row in iter_trajectories(run_dir)]
     assert {t["step"] for t in trajectories} == {1, 2}
@@ -67,12 +69,16 @@ def test_end_to_end_hf_engine_reference_trainer(run_config_dict: dict[str, Any])
 
 @pytest.mark.slow
 def test_end_to_end_resume_with_real_trainer(run_config_dict: dict[str, Any]) -> None:
-    config = RunConfig.from_dict({**run_config_dict, "trainer": {**run_config_dict["trainer"], "max_steps": 1}})
+    config = RunConfig.from_dict(
+        {**run_config_dict, "trainer": {**run_config_dict["trainer"], "max_steps": 1}}
+    )
     first = run(config)
     assert first.state == "succeeded" and first.final_step == 1
     run_dir = Path(first.run_dir)
 
-    config2 = RunConfig.from_dict({**run_config_dict, "trainer": {**run_config_dict["trainer"], "max_steps": 2}})
+    config2 = RunConfig.from_dict(
+        {**run_config_dict, "trainer": {**run_config_dict["trainer"], "max_steps": 2}}
+    )
     resumed = run(config2, resume=True)
     assert resumed.state == "succeeded" and resumed.final_step == 2
     assert [Path(p).name for p in list_checkpoints(run_dir)] == ["step-1", "step-2"]

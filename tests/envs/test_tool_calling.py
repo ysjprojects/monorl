@@ -93,7 +93,7 @@ def test_calculator():
     assert calculator("2 * (3 + 4)") == "14"
     assert calculator("2 ** 10 + sqrt(16)") == "1028"
     assert calculator("7 / 2") == "3.5"
-    assert calculator("-pi") .startswith("-3.14")
+    assert calculator("-pi").startswith("-3.14")
     assert calculator("1/0").startswith("error")
     assert calculator("__import__('os').system('ls')").startswith("error")
     assert calculator("9 ** 99999").startswith("error")
@@ -135,7 +135,11 @@ def test_load_tools_unknown_and_registered(monkeypatch):
     mod = types.ModuleType("_monorl_test_tools")
 
     def _define():
-        @tool("shout", "Upper-case the input.", {"type": "object", "properties": {"s": {"type": "string"}}, "required": ["s"]})
+        @tool(
+            "shout",
+            "Upper-case the input.",
+            {"type": "object", "properties": {"s": {"type": "string"}}, "required": ["s"]},
+        )
         def shout(s: str) -> str:
             return s.upper()
 
@@ -157,19 +161,28 @@ def test_reset_prepends_tool_system_prompt_and_merges_existing_system():
     env = make_tool_calling_env({"tools": ["calculator"]}, max_turns=3)
     msgs = env.reset(_sample())
     assert msgs[0]["role"] == "system" and "<tools>" in msgs[0]["content"]
-    assert json.loads(msgs[0]["content"].split("<tools>\n")[1].split("\n</tools>")[0])["function"]["name"] == "calculator"
+    assert (
+        json.loads(msgs[0]["content"].split("<tools>\n")[1].split("\n</tools>")[0])["function"]["name"]
+        == "calculator"
+    )
     assert msgs[1] == {"role": "user", "content": "What is 6*7?"}
     assert env.tools[0]["function"]["name"] == "calculator"
 
     env2 = make_tool_calling_env({"tools": ["calculator"], "system_prompt": "Tools: {tools}"}, max_turns=3)
-    msgs = env2.reset(Sample(id="s", messages=[{"role": "system", "content": "Be terse."}, {"role": "user", "content": "q"}]))
+    msgs = env2.reset(
+        Sample(
+            id="s", messages=[{"role": "system", "content": "Be terse."}, {"role": "user", "content": "q"}]
+        )
+    )
     assert msgs[0]["role"] == "system"
     assert msgs[0]["content"].startswith("Tools: ") and msgs[0]["content"].endswith("Be terse.")
     assert len(msgs) == 2
 
 
 def test_step_executes_tools_and_finishes_on_plain_answer():
-    env = make_tool_calling_env({"tools": ["calculator", "lookup"], "corpus": {"Paris": "capital of France"}}, max_turns=4)
+    env = make_tool_calling_env(
+        {"tools": ["calculator", "lookup"], "corpus": {"Paris": "capital of France"}}, max_turns=4
+    )
     env.reset(_sample())
     r = env.step(
         _c(
@@ -192,7 +205,9 @@ def test_step_executes_tools_and_finishes_on_plain_answer():
 def test_invalid_calls_are_penalised_once_per_turn():
     env = make_tool_calling_env({"tools": ["calculator"], "invalid_call_penalty": 0.3}, max_turns=5)
     env.reset(_sample())
-    r = env.step(_c('<tool_call>{oops}</tool_call><tool_call>{"name": "missing", "arguments": {}}</tool_call>'))
+    r = env.step(
+        _c('<tool_call>{oops}</tool_call><tool_call>{"name": "missing", "arguments": {}}</tool_call>')
+    )
     assert not r.done
     assert r.reward == pytest.approx(-0.3)
     assert r.info["invalid_calls"] == 2
@@ -214,7 +229,9 @@ def test_done_at_max_turns_even_with_tool_calls():
 
 
 def test_max_calls_per_turn():
-    env = make_tool_calling_env({"tools": ["calculator"], "max_calls_per_turn": 1, "invalid_call_penalty": 1.0}, max_turns=3)
+    env = make_tool_calling_env(
+        {"tools": ["calculator"], "max_calls_per_turn": 1, "invalid_call_penalty": 1.0}, max_turns=3
+    )
     env.reset(_sample())
     call = '<tool_call>{"name": "calculator", "arguments": {"expression": "1"}}</tool_call>'
     r = env.step(_c(call * 3))

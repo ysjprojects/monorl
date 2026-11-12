@@ -69,7 +69,11 @@ def test_hf_content_parts_and_chat_images(png: Path) -> None:
         {"role": "system", "content": "Be brief."},
         {
             "role": "user",
-            "content": [{"type": "image", "image": str(png)}, {"type": "text", "text": "What?"}, {"type": "video", "video": "v.mp4"}],
+            "content": [
+                {"type": "image", "image": str(png)},
+                {"type": "text", "text": "What?"},
+                {"type": "video", "video": "v.mp4"},
+            ],
         },
     ]
     assert needs_processor(messages)
@@ -91,5 +95,7 @@ def test_vlm_detection_predicates() -> None:
     assert is_vlm_config(SimpleNamespace(model_type="custom", vision_config=object()))
     assert is_vlm_config(SimpleNamespace(model_type="custom", image_token_index=5))
     assert not is_vlm_config(SimpleNamespace(model_type="llama"))
-    assert is_vlm_processor(SimpleNamespace(image_processor=object(), apply_chat_template=lambda *a, **k: None))
+    assert is_vlm_processor(
+        SimpleNamespace(image_processor=object(), apply_chat_template=lambda *a, **k: None)
+    )
     assert not is_vlm_processor(SimpleNamespace(apply_chat_template=lambda *a, **k: None))

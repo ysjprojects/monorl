@@ -159,7 +159,9 @@ def read_status(run_dir: str | os.PathLike[str]) -> dict[str, Any] | None:
         return None
 
 
-def iter_metrics(run_dir: str | os.PathLike[str], *, start_line: int = 0) -> Iterator[tuple[int, dict[str, Any]]]:
+def iter_metrics(
+    run_dir: str | os.PathLike[str], *, start_line: int = 0
+) -> Iterator[tuple[int, dict[str, Any]]]:
     """Yield ``(line_number, row)`` starting at ``start_line`` (0-based) for incremental tailing."""
     p = Path(run_dir) / METRICS_FILE
     if not p.exists():
@@ -177,7 +179,9 @@ def iter_metrics(run_dir: str | os.PathLike[str], *, start_line: int = 0) -> Ite
                 continue
 
 
-def iter_trajectories(run_dir: str | os.PathLike[str], *, start_line: int = 0) -> Iterator[tuple[int, dict[str, Any]]]:
+def iter_trajectories(
+    run_dir: str | os.PathLike[str], *, start_line: int = 0
+) -> Iterator[tuple[int, dict[str, Any]]]:
     p = Path(run_dir) / TRAJECTORIES_FILE
     if not p.exists():
         return

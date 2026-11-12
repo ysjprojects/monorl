@@ -121,21 +121,70 @@ class FakeGPUWorker:
 #: vllm/v1/worker/worker_base.py). ``init_worker`` asserts the extension defines none of them.
 GPU_WORKER_ATTRS = frozenset(
     {
-        "sleep_mode_backend", "sleep", "wake_up", "discard", "checkpoint_prepare", "checkpoint_restore",
-        "compute_weight_checksums", "reset_weights", "init_device", "handle_ft_command", "load_model",
-        "update_config", "reload_weights", "determine_available_memory", "get_kv_connector_handshake_metadata",
-        "get_kv_cache_spec", "update_max_model_len", "initialize_from_config",
-        "get_simple_cpu_offload_num_cpu_blocks", "compile_or_warm_up_model", "reset_mm_cache",
-        "reset_encoder_cache", "get_model", "get_draft_model", "supports_draft_weight_updates",
-        "get_supported_tasks", "get_compilation_match_table", "get_encoder_timing_stats", "annotate_profile",
-        "sample_tokens", "execute_model", "take_draft_token_ids", "profile", "randomize_dummy_inputs",
-        "execute_dummy_batch", "add_lora", "remove_lora", "list_loras", "pin_lora", "check_health",
-        "save_sharded_state", "save_tensorized_model", "init_weight_transfer_engine",
-        "shutdown_weight_transfer_engine", "start_weight_update", "start_draft_weight_update", "update_weights",
-        "finish_weight_update", "shutdown", "elastic_ep_execute", "get_supported_kv_cache_layouts",
-        "set_kv_cache_layout", "synchronize_device", "release_late_interaction_query_cache", "apply_model",
-        "get_model_inspection", "get_cache_block_size_bytes", "vocab_size", "model_runner", "rank", "device",
-        "vllm_config", "model_config", "weight_transfer_engine",
+        "sleep_mode_backend",
+        "sleep",
+        "wake_up",
+        "discard",
+        "checkpoint_prepare",
+        "checkpoint_restore",
+        "compute_weight_checksums",
+        "reset_weights",
+        "init_device",
+        "handle_ft_command",
+        "load_model",
+        "update_config",
+        "reload_weights",
+        "determine_available_memory",
+        "get_kv_connector_handshake_metadata",
+        "get_kv_cache_spec",
+        "update_max_model_len",
+        "initialize_from_config",
+        "get_simple_cpu_offload_num_cpu_blocks",
+        "compile_or_warm_up_model",
+        "reset_mm_cache",
+        "reset_encoder_cache",
+        "get_model",
+        "get_draft_model",
+        "supports_draft_weight_updates",
+        "get_supported_tasks",
+        "get_compilation_match_table",
+        "get_encoder_timing_stats",
+        "annotate_profile",
+        "sample_tokens",
+        "execute_model",
+        "take_draft_token_ids",
+        "profile",
+        "randomize_dummy_inputs",
+        "execute_dummy_batch",
+        "add_lora",
+        "remove_lora",
+        "list_loras",
+        "pin_lora",
+        "check_health",
+        "save_sharded_state",
+        "save_tensorized_model",
+        "init_weight_transfer_engine",
+        "shutdown_weight_transfer_engine",
+        "start_weight_update",
+        "start_draft_weight_update",
+        "update_weights",
+        "finish_weight_update",
+        "shutdown",
+        "elastic_ep_execute",
+        "get_supported_kv_cache_layouts",
+        "set_kv_cache_layout",
+        "synchronize_device",
+        "release_late_interaction_query_cache",
+        "apply_model",
+        "get_model_inspection",
+        "get_cache_block_size_bytes",
+        "vocab_size",
+        "model_runner",
+        "rank",
+        "device",
+        "vllm_config",
+        "model_config",
+        "weight_transfer_engine",
     }
 )
 
@@ -184,8 +233,12 @@ class FakeLLM:
         self.calls: list[tuple[str, Any]] = []
         FakeLLM.instances.append(self)
 
-    def generate(self, prompts: Any, sampling_params: Any = None, *, use_tqdm: Any = True, **kw: Any) -> list[Any]:
-        self.calls.append(("generate", {"prompts": prompts, "sampling_params": sampling_params, "use_tqdm": use_tqdm}))
+    def generate(
+        self, prompts: Any, sampling_params: Any = None, *, use_tqdm: Any = True, **kw: Any
+    ) -> list[Any]:
+        self.calls.append(
+            ("generate", {"prompts": prompts, "sampling_params": sampling_params, "use_tqdm": use_tqdm})
+        )
         outs = []
         for p, prompt in enumerate(prompts):
             comps = []
@@ -249,7 +302,9 @@ def build_fake_vllm() -> dict[str, types.ModuleType]:
         m.__dict__.update(attrs)
         return m
 
-    vllm = mod("vllm", __version__="0.33.0", LLM=FakeLLM, SamplingParams=SamplingParams, TokensPrompt=TokensPrompt)
+    vllm = mod(
+        "vllm", __version__="0.33.0", LLM=FakeLLM, SamplingParams=SamplingParams, TokensPrompt=TokensPrompt
+    )
     vllm.__path__ = []  # mark as package so submodule imports resolve via sys.modules
     tree = {
         "vllm": vllm,

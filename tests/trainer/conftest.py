@@ -17,7 +17,9 @@ class SimpleLossOutput:
     metrics: dict[str, float]
 
 
-def reinforce_loss(logprobs, old_logprobs, advantages, response_mask, *, algorithm, ref_logprobs=None, entropy=None):
+def reinforce_loss(
+    logprobs, old_logprobs, advantages, response_mask, *, algorithm, ref_logprobs=None, entropy=None
+):
     """Token-mean REINFORCE: ``-mean(adv * logprob)`` over response positions."""
     mask = response_mask.float()
     loss = -(logprobs * advantages * mask).sum() / mask.sum().clamp(min=1)
@@ -51,7 +53,9 @@ def make_config(tiny_model_dir: Path, *, lora: bool = False, **trainer: Any) -> 
     )
 
 
-def make_batch(tokenizer: Any, *, target: int = 1234, batch_size: int = 4, response_len: int = 5) -> TrainBatch:
+def make_batch(
+    tokenizer: Any, *, target: int = 1234, batch_size: int = 4, response_len: int = 5
+) -> TrainBatch:
     """Right-padded synthetic batch: chat prompts of different lengths, responses of ``target``
     repeated, advantage +1 on every response token."""
     from monorl.rollout.hf_engine import chat_prompt_ids

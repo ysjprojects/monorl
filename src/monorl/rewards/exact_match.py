@@ -92,8 +92,12 @@ class ExactMatchReward:
         check_trajectories(trajectories)
         out = []
         for t in trajectories:
-            score, prediction = self.score_text(response_text(t, self.scope), reference_value(t, self.reference_key))
-            out.append(RewardResult(score=score, breakdown={self.name: score}, info={"extracted": prediction}))
+            score, prediction = self.score_text(
+                response_text(t, self.scope), reference_value(t, self.reference_key)
+            )
+            out.append(
+                RewardResult(score=score, breakdown={self.name: score}, info={"extracted": prediction})
+            )
         return out
 
 

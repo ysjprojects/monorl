@@ -24,7 +24,9 @@ from monorl.patching import status
 
 # -- data ---------------------------------------------------------------------------------------
 def test_sample_row_roundtrip() -> None:
-    s = Sample(id="x1", messages=[{"role": "user", "content": "hi"}], reference={"answer": 4}, metadata={"k": "v"})
+    s = Sample(
+        id="x1", messages=[{"role": "user", "content": "hi"}], reference={"answer": 4}, metadata={"k": "v"}
+    )
     row = sample_to_row(s)
     assert row["prompt"] == [{"role": "user", "content": "hi"}]
     assert row["reference"] == '{"answer": 4}'
@@ -47,7 +49,10 @@ def test_reward_wrapper_single_turn(tiny_model_dir: Path) -> None:
     tok = AutoTokenizer.from_pretrained(tiny_model_dir)
     fn = MonorlRewardFunc(VowelReward(), tokenizer=tok, eos_token_ids=[tok.eos_token_id])
     assert fn.__name__ == "monorl"
-    samples = [Sample(id=f"s{i}", messages=[{"role": "user", "content": f"q{i}"}], reference=str(i)) for i in range(2)]
+    samples = [
+        Sample(id=f"s{i}", messages=[{"role": "user", "content": f"q{i}"}], reference=str(i))
+        for i in range(2)
+    ]
     rows = [sample_to_row(s) for s in samples]
     logged: dict[str, float] = {}
     scores = fn(
@@ -79,10 +84,19 @@ def test_reward_wrapper_uses_prebuilt_trajectories_and_env_return(tiny_model_dir
         messages=[],
         turns=[
             Turn(prompt_token_ids=[1], completion=Completion(text="x", token_ids=[2]), reward=1.0),
-            Turn(prompt_token_ids=[1, 2, 3], completion=Completion(text="y", token_ids=[4], finish_reason="length"), reward=2.0),
+            Turn(
+                prompt_token_ids=[1, 2, 3],
+                completion=Completion(text="y", token_ids=[4], finish_reason="length"),
+                reward=2.0,
+            ),
         ],
     )
-    out = fn(prompts=[[{"role": "user", "content": "?"}]], completions=["xy"], completion_ids=[[2, 3, 4]], **{TRAJECTORY_FIELD: [traj]})
+    out = fn(
+        prompts=[[{"role": "user", "content": "?"}]],
+        completions=["xy"],
+        completion_ids=[[2, 3, 4]],
+        **{TRAJECTORY_FIELD: [traj]},
+    )
     assert out == [pytest.approx(1.0 + 0.5 * 2.0 - 0.25)]
     assert traj.reward_breakdown == {"env": 2.0, "overlong_penalty": -0.25}
     assert fn.last_batch[0] is traj
@@ -90,9 +104,13 @@ def test_reward_wrapper_uses_prebuilt_trajectories_and_env_return(tiny_model_dir
 
 # -- rollout flattening ---------------------------------------------------------------------------
 def _two_turn_trajectory(chain_ok: bool) -> Trajectory:
-    t0 = Turn(prompt_token_ids=[10, 11], completion=Completion(text="a", token_ids=[20, 21], logprobs=[-0.1, -0.2]))
+    t0 = Turn(
+        prompt_token_ids=[10, 11], completion=Completion(text="a", token_ids=[20, 21], logprobs=[-0.1, -0.2])
+    )
     prefix = [10, 11, 20, 21] if chain_ok else [10, 11, 99, 21]
-    t1 = Turn(prompt_token_ids=prefix + [30, 31], completion=Completion(text="b", token_ids=[40], logprobs=[-0.3]))
+    t1 = Turn(
+        prompt_token_ids=prefix + [30, 31], completion=Completion(text="b", token_ids=[40], logprobs=[-0.3])
+    )
     return Trajectory(sample=Sample(id="s", messages=[]), group_id="g", messages=[], turns=[t0, t1])
 
 
@@ -111,9 +129,19 @@ def test_flatten_prefix_mismatch_trains_last_completion_only() -> None:
 
 
 def test_sampling_params_from_grpo_args() -> None:
-    args = SimpleNamespace(max_completion_length=16, temperature=0.7, top_p=0.9, top_k=0, min_p=None, repetition_penalty=1.1)
+    args = SimpleNamespace(
+        max_completion_length=16, temperature=0.7, top_p=0.9, top_k=0, min_p=None, repetition_penalty=1.1
+    )
     p = sampling_params(args, stop=["</s>"])
-    assert (p.n, p.max_new_tokens, p.temperature, p.top_p, p.top_k, p.min_p, p.stop) == (1, 16, 0.7, 0.9, -1, 0.0, ["</s>"])
+    assert (p.n, p.max_new_tokens, p.temperature, p.top_p, p.top_k, p.min_p, p.stop) == (
+        1,
+        16,
+        0.7,
+        0.9,
+        -1,
+        0.0,
+        ["</s>"],
+    )
     assert p.logprobs is True
 
 

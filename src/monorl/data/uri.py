@@ -88,7 +88,9 @@ def _parse_hf(uri: str) -> ParsedURI:
     subpath = "/".join(parts[2:]) or None
     if not org or not name:
         raise DataError(f"hf uri must look like hf://org/name[@revision]; got {uri!r}")
-    return ParsedURI(raw=uri, kind="hf", scheme="hf", path=f"{org}/{name}", revision=revision, subpath=subpath)
+    return ParsedURI(
+        raw=uri, kind="hf", scheme="hf", path=f"{org}/{name}", revision=revision, subpath=subpath
+    )
 
 
 # -- credentials / storage options -----------------------------------------------------------

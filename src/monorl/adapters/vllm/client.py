@@ -57,11 +57,15 @@ def server_url(config: RunConfig, replica: int) -> str:
     urls = extra.get("urls")
     if urls:
         if replica >= len(urls):
-            raise ConfigError(f"rollout.extra.urls has {len(urls)} entries but replica {replica} was requested")
+            raise ConfigError(
+                f"rollout.extra.urls has {len(urls)} entries but replica {replica} was requested"
+            )
         return str(urls[replica]).rstrip("/")
     url = extra.get("url")
     if not url:
-        raise ConfigError("rollout.extra.mode='server' needs rollout.extra.url (or urls) of a monorl vLLM server")
+        raise ConfigError(
+            "rollout.extra.mode='server' needs rollout.extra.url (or urls) of a monorl vLLM server"
+        )
     return str(url).rstrip("/")
 
 
@@ -126,7 +130,9 @@ class VllmServerClient:
                     **sampling_kwargs(params),
                 }
                 resp = self._post("/v1/completions", json=body)
-                grouped = completions_from_choices(resp.json()["choices"], ids, params.n, want_logprobs=params.logprobs)
+                grouped = completions_from_choices(
+                    resp.json()["choices"], ids, params.n, want_logprobs=params.logprobs
+                )
                 for i, comps in zip(text_idx, grouped, strict=True):
                     result[i] = comps
             for i in media_idx:
@@ -136,7 +142,9 @@ class VllmServerClient:
                     **chat_completion_kwargs(params),
                 }
                 resp = self._post("/v1/chat/completions", json=body)
-                result[i] = completions_from_chat_response(resp.json(), params.n, want_logprobs=params.logprobs)
+                result[i] = completions_from_chat_response(
+                    resp.json(), params.n, want_logprobs=params.logprobs
+                )
         return [r for r in result if r is not None]
 
     def update_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> None:
@@ -146,7 +154,11 @@ class VllmServerClient:
                 t = tensor.detach()
                 self._post(
                     "/update_named_param",
-                    params={"name": name, "dtype": dtype_name(t.dtype), "shape": ",".join(str(s) for s in t.shape)},
+                    params={
+                        "name": name,
+                        "dtype": dtype_name(t.dtype),
+                        "shape": ",".join(str(s) for s in t.shape),
+                    },
                     content=tensor_to_bytes(t),
                     headers={"content-type": "application/octet-stream"},
                 )

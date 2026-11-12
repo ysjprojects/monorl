@@ -75,7 +75,9 @@ def test_compute_logprobs_alignment_and_reference(tiny_model_dir: Path, tokenize
     after = trainer.compute_logprobs(batch)
     assert not torch.allclose(after, lp)
     # Reference policy is frozen at the initial weights (adapters disabled / frozen base copy).
-    torch.testing.assert_close(trainer.compute_logprobs(batch, reference=True), initial_ref, atol=1e-5, rtol=0)
+    torch.testing.assert_close(
+        trainer.compute_logprobs(batch, reference=True), initial_ref, atol=1e-5, rtol=0
+    )
     if not lora:
         assert trainer._reference_model is not None
 
@@ -119,7 +121,9 @@ def test_checkpoint_roundtrip(tiny_model_dir: Path, tokenizer, tmp_path: Path, l
     assert not torch.allclose(restored.compute_logprobs(batch), trainer.compute_logprobs(batch))
     restored.load_checkpoint(ckpt)
     assert restored.step == 2
-    torch.testing.assert_close(restored.compute_logprobs(batch), trainer.compute_logprobs(batch), atol=1e-6, rtol=0)
+    torch.testing.assert_close(
+        restored.compute_logprobs(batch), trainer.compute_logprobs(batch), atol=1e-6, rtol=0
+    )
     a, b = trainer.optimizer.state_dict(), restored.optimizer.state_dict()
     assert a["param_groups"] == b["param_groups"]
     assert a["state"].keys() == b["state"].keys() and len(a["state"]) > 0
@@ -131,11 +135,15 @@ def test_checkpoint_roundtrip(tiny_model_dir: Path, tokenizer, tmp_path: Path, l
     m1 = trainer.train_step(batch)
     m2 = restored.train_step(batch)
     assert m1["lr"] == m2["lr"] and m1["loss/policy"] == pytest.approx(m2["loss/policy"], abs=1e-6)
-    torch.testing.assert_close(restored.compute_logprobs(batch), trainer.compute_logprobs(batch), atol=1e-6, rtol=0)
+    torch.testing.assert_close(
+        restored.compute_logprobs(batch), trainer.compute_logprobs(batch), atol=1e-6, rtol=0
+    )
 
 
 @LORA
-def test_export_update_roundtrip_matches_save_pretrained(tiny_model_dir: Path, tokenizer, tmp_path: Path, lora: bool) -> None:
+def test_export_update_roundtrip_matches_save_pretrained(
+    tiny_model_dir: Path, tokenizer, tmp_path: Path, lora: bool
+) -> None:
     cfg = make_config(tiny_model_dir, lora=lora)
     batch = make_batch(tokenizer)
     trainer = ReferenceTrainer(cfg, loss_fn=reinforce_loss)
@@ -192,7 +200,14 @@ def test_export_update_roundtrip_matches_save_pretrained(tiny_model_dir: Path, t
 @pytest.mark.parametrize("optimizer", ["adamw", "adam", "sgd"])
 @pytest.mark.parametrize("scheduler", ["constant", "linear", "cosine"])
 def test_optimizers_and_schedulers(tiny_model_dir: Path, tokenizer, optimizer: str, scheduler: str) -> None:
-    cfg = make_config(tiny_model_dir, optimizer=optimizer, scheduler=scheduler, warmup_steps=2, max_steps=4, learning_rate=1e-3)
+    cfg = make_config(
+        tiny_model_dir,
+        optimizer=optimizer,
+        scheduler=scheduler,
+        warmup_steps=2,
+        max_steps=4,
+        learning_rate=1e-3,
+    )
     trainer = ReferenceTrainer(cfg, loss_fn=reinforce_loss)
     batch = make_batch(tokenizer)
     lrs = [trainer.train_step(batch)["lr"] for _ in range(4)]
@@ -206,7 +221,9 @@ def test_optimizers_and_schedulers(tiny_model_dir: Path, tokenizer, optimizer: s
 
 @LORA
 def test_gradient_checkpointing(tiny_model_dir: Path, tokenizer, lora: bool) -> None:
-    trainer = ReferenceTrainer(make_config(tiny_model_dir, lora=lora, gradient_checkpointing=True), loss_fn=reinforce_loss)
+    trainer = ReferenceTrainer(
+        make_config(tiny_model_dir, lora=lora, gradient_checkpointing=True), loss_fn=reinforce_loss
+    )
     batch = make_batch(tokenizer)
     before = target_logprob(trainer, batch)
     metrics = trainer.train_step(batch)

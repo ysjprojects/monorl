@@ -45,7 +45,10 @@ def test_chat_rows_strip_trailing_assistant_and_override_system(chat_jsonl: Path
     src = _open(chat_jsonl, system_prompt="New system.")
     s = src[1]
     assert s.id == "chat-1"
-    assert s.messages == [{"role": "system", "content": "New system."}, {"role": "user", "content": "Say the number 1."}]
+    assert s.messages == [
+        {"role": "system", "content": "New system."},
+        {"role": "user", "content": "Say the number 1."},
+    ]
     assert s.reference == "1"
     assert s.metadata["assistant_turn"] == {"role": "assistant", "content": "1"}
     assert src.layout.format == "chat"
@@ -60,7 +63,13 @@ def test_chat_template_applies_to_last_user_turn(chat_jsonl: Path) -> None:
 
 def test_sharegpt_and_json_string_messages(tmp_path: Path) -> None:
     rows = [
-        {"conversations": [{"from": "system", "value": "sys"}, {"from": "human", "value": "hi"}, {"from": "gpt", "value": "yo"}]},
+        {
+            "conversations": [
+                {"from": "system", "value": "sys"},
+                {"from": "human", "value": "hi"},
+                {"from": "gpt", "value": "yo"},
+            ]
+        },
         {"conversations": '[{"role": "user", "content": "json-encoded"}]'},
     ]
     src = _open(write_jsonl(tmp_path / "sg.jsonl", rows))
@@ -122,16 +131,26 @@ def test_streaming_shuffle_is_deterministic(qa_jsonl: Path) -> None:
 
 
 def test_max_prompt_tokens_filter_with_tokenizer(tmp_path: Path, tiny_tokenizer) -> None:
-    rows = [{"prompt": "short", "answer": "1"}, {"prompt": "word " * 200, "answer": "2"}, {"prompt": "also short", "answer": "3"}]
+    rows = [
+        {"prompt": "short", "answer": "1"},
+        {"prompt": "word " * 200, "answer": "2"},
+        {"prompt": "also short", "answer": "3"},
+    ]
     p = write_jsonl(tmp_path / "len.jsonl", rows)
     src = open_source(DataConfig(uri=str(p), shuffle=False, max_prompt_tokens=64), tokenizer=tiny_tokenizer)
     assert [s.reference for s in src] == ["1", "3"]
     assert src.mapper.dropped == 1
     assert all(0 < s.metadata["prompt_tokens"] <= 64 for s in src)
-    chat_len = len(tiny_tokenizer.apply_chat_template(src[0].messages, tokenize=False, add_generation_prompt=True))
+    chat_len = len(
+        tiny_tokenizer.apply_chat_template(src[0].messages, tokenize=False, add_generation_prompt=True)
+    )
     assert chat_len > len("short"), "count is taken after the chat template"
-    assert len(open_source(DataConfig(uri=str(p), shuffle=False, max_prompt_tokens=64))) == 3, "no tokenizer → no filter"
-    streaming = open_source(DataConfig(uri=str(p), shuffle=False, streaming=True, max_prompt_tokens=64), tokenizer=tiny_tokenizer)
+    assert len(open_source(DataConfig(uri=str(p), shuffle=False, max_prompt_tokens=64))) == 3, (
+        "no tokenizer → no filter"
+    )
+    streaming = open_source(
+        DataConfig(uri=str(p), shuffle=False, streaming=True, max_prompt_tokens=64), tokenizer=tiny_tokenizer
+    )
     assert [s.reference for s in streaming] == ["1", "3"]
     with pytest.raises(DataError):
         len(streaming)

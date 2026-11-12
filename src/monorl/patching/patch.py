@@ -302,9 +302,7 @@ def resolve_target(target: str, *, patch_id: str = "") -> ResolvedTarget:
         try:
             owner = getattr(owner, name)
         except AttributeError as e:
-            raise PatchError(
-                f"{label}target {target!r}: {owner!r} has no attribute {name!r}"
-            ) from e
+            raise PatchError(f"{label}target {target!r}: {owner!r} has no attribute {name!r}") from e
     attr = parts[-1]
     current = getattr(owner, attr, MISSING)
     try:

@@ -28,7 +28,9 @@ def _coerce_specs(raw: Sequence[RewardSpec | dict[str, Any]]) -> list[RewardSpec
     return [s if isinstance(s, RewardSpec) else RewardSpec.model_validate(s) for s in raw]
 
 
-def build_reward(specs: Sequence[RewardSpec | dict[str, Any]], *, config: RunConfig | None = None) -> RewardFunction:
+def build_reward(
+    specs: Sequence[RewardSpec | dict[str, Any]], *, config: RunConfig | None = None
+) -> RewardFunction:
     """Weighted composite of ``specs``; ``RewardResult.breakdown[spec.params["name"] or spec.type]``
     holds each member's raw score. Factories receive ``config=config`` when given."""
     specs = _coerce_specs(specs)

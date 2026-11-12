@@ -85,7 +85,9 @@ def _training_args_kwargs(config: RunConfig, run_dir: Path, device: torch.device
     return kwargs
 
 
-def sft_config_kwargs(config: RunConfig, run_dir: Path, *, device: torch.device | None = None) -> dict[str, Any]:
+def sft_config_kwargs(
+    config: RunConfig, run_dir: Path, *, device: torch.device | None = None
+) -> dict[str, Any]:
     """Keyword arguments for ``SFTConfig`` (TRL 1.17 ``trl/trainer/sft_config.py``).
 
     ``trainer.prompts_per_step`` sequences per optimizer step, ``max_length = trainer.max_seq_len``,
@@ -126,7 +128,9 @@ def compile_sft_config(config: RunConfig, run_dir: Path, *, device: torch.device
     return SFTConfig(**kwargs)
 
 
-def grpo_config_kwargs(config: RunConfig, run_dir: Path, *, device: torch.device | None = None) -> dict[str, Any]:
+def grpo_config_kwargs(
+    config: RunConfig, run_dir: Path, *, device: torch.device | None = None
+) -> dict[str, Any]:
     """Keyword arguments for ``GRPOConfig``; ``trainer.extra`` overrides any field last."""
     device = device or resolve_device(config)
     algo, tr, ro = config.algorithm, config.trainer, config.rollout
@@ -165,7 +169,9 @@ def grpo_config_kwargs(config: RunConfig, run_dir: Path, *, device: torch.device
     )
     if ro.backend == "vllm":
         extra = ro.extra
-        server = bool(extra.get("server_base_url") or extra.get("server_host") or extra.get("mode") == "server")
+        server = bool(
+            extra.get("server_base_url") or extra.get("server_host") or extra.get("mode") == "server"
+        )
         kwargs.update(
             {
                 "use_vllm": True,
@@ -181,7 +187,9 @@ def grpo_config_kwargs(config: RunConfig, run_dir: Path, *, device: torch.device
             kwargs["vllm_server_host"] = extra.get("server_host", "0.0.0.0")
             kwargs["vllm_server_port"] = int(extra.get("server_port", 8000))
     elif ro.backend != "hf":
-        raise ConfigError(f"trainer.backend='trl' generates with rollout.backend 'hf' or 'vllm', got {ro.backend!r}")
+        raise ConfigError(
+            f"trainer.backend='trl' generates with rollout.backend 'hf' or 'vllm', got {ro.backend!r}"
+        )
     kwargs.update(tr.extra)
     return kwargs
 

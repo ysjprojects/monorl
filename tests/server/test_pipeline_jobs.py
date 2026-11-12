@@ -32,7 +32,12 @@ def pipeline_dict(config_dict: dict[str, Any]) -> dict[str, Any]:
         "name": "srv-pipeline",
         "base": base,
         "stages": [
-            {"type": "train", "name": "sft", "init_from": "base", "overrides": {"algorithm": {"name": "sft"}}},
+            {
+                "type": "train",
+                "name": "sft",
+                "init_from": "base",
+                "overrides": {"algorithm": {"name": "sft"}},
+            },
             {"type": "train", "name": "grpo", "overrides": {"trainer": {"max_steps": 2}}},
             {"type": "rejection_sample", "name": "rs", "num_samples": 2},
             {"type": "eval", "name": "eval"},
@@ -66,7 +71,12 @@ def test_create_pipeline_job_lifecycle(
     assert r.status_code == 201, r.text
     job = r.json()
     assert job["kind"] == "pipeline" and job["name"] == "srv-pipeline" and job["state"] == "running"
-    assert job["config"]["name"] == "srv-pipeline" and [s["name"] for s in job["config"]["stages"]] == ["sft", "grpo", "rs", "eval"]
+    assert job["config"]["name"] == "srv-pipeline" and [s["name"] for s in job["config"]["stages"]] == [
+        "sft",
+        "grpo",
+        "rs",
+        "eval",
+    ]
     run_dir = Path(job["run_dir"])
     assert run_dir == tmp_path / "runs" / "srv-pipeline"
     assert job["command"][-4:] == ["--config", str(run_dir / "pipeline.yaml"), "--run-dir", str(run_dir)]
@@ -109,9 +119,14 @@ def test_create_pipeline_job_lifecycle(
     assert len(traj["rows"]) == 2 and traj["rows"][0]["response"] == "r"
 
     ckpt = client.get(f"/api/jobs/{job['id']}/stages/1/checkpoints").json()
-    assert ckpt["checkpoints"] == [{"step": 2, "path": str(Path(stages["stages"][1]["run_dir"]) / "checkpoints" / "step-2")}]
+    assert ckpt["checkpoints"] == [
+        {"step": 2, "path": str(Path(stages["stages"][1]["run_dir"]) / "checkpoints" / "step-2")}
+    ]
     assert ckpt["final"] == str(Path(stages["stages"][1]["run_dir"]) / "final")
-    assert client.get(f"/api/jobs/{job['id']}/stages/3/checkpoints").json() == {"checkpoints": [], "final": None}
+    assert client.get(f"/api/jobs/{job['id']}/stages/3/checkpoints").json() == {
+        "checkpoints": [],
+        "final": None,
+    }
 
     # job-level readers still work on the pipeline dir itself
     assert "fake pipeline stdout line" in "\n".join(client.get(f"/api/jobs/{job['id']}/logs").json()["lines"])
@@ -119,7 +134,9 @@ def test_create_pipeline_job_lifecycle(
     assert client.get("/api/jobs/nope/stages").status_code == 404
 
 
-def test_bare_pipeline_payload_and_run_kind(client: TestClient, pipeline_dict: dict[str, Any], config_dict: dict[str, Any], terminal) -> None:
+def test_bare_pipeline_payload_and_run_kind(
+    client: TestClient, pipeline_dict: dict[str, Any], config_dict: dict[str, Any], terminal
+) -> None:
     job = client.post("/api/jobs", json=pipeline_dict).json()
     assert job["kind"] == "pipeline"
     assert terminal(job["id"])["state"] == "succeeded"
@@ -179,8 +196,12 @@ def test_pipeline_schema_and_validate(client: TestClient, pipeline_dict: dict[st
     assert bad["ok"] is False and bad["errors"]
 
 
-def test_recipes_carry_kind(client: TestClient, recipes_dir: Path, pipeline_dict: dict[str, Any], config_dict: dict[str, Any]) -> None:
-    (recipes_dir / "loop.yaml").write_text("# A pipeline recipe.\n" + yaml.safe_dump(pipeline_dict, sort_keys=False))
+def test_recipes_carry_kind(
+    client: TestClient, recipes_dir: Path, pipeline_dict: dict[str, Any], config_dict: dict[str, Any]
+) -> None:
+    (recipes_dir / "loop.yaml").write_text(
+        "# A pipeline recipe.\n" + yaml.safe_dump(pipeline_dict, sort_keys=False)
+    )
     (recipes_dir / "run.yaml").write_text("# A run recipe.\n" + yaml.safe_dump(config_dict, sort_keys=False))
     recipes = {r["name"]: r for r in client.get("/api/recipes").json()}
     assert recipes["loop"]["kind"] == "pipeline" and recipes["loop"]["valid"] is True

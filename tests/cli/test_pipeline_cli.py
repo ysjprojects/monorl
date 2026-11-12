@@ -22,7 +22,12 @@ def pipeline_yaml(run_config_dict: dict[str, Any], tmp_path: Path) -> Path:
         "name": "cli-pipeline",
         "base": base,
         "stages": [
-            {"type": "train", "name": "sft", "init_from": "base", "overrides": {"algorithm": {"name": "sft"}}},
+            {
+                "type": "train",
+                "name": "sft",
+                "init_from": "base",
+                "overrides": {"algorithm": {"name": "sft"}},
+            },
             {"type": "rejection_sample", "name": "rs", "num_samples": 2},
             {"type": "train", "name": "sft2", "data_from": "previous"},
             {"type": "eval", "name": "eval"},
@@ -34,7 +39,9 @@ def pipeline_yaml(run_config_dict: dict[str, Any], tmp_path: Path) -> Path:
 
 
 @pytest.fixture
-def fake_run_pipeline(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> list[tuple[PipelineConfig, Path | None, bool]]:
+def fake_run_pipeline(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> list[tuple[PipelineConfig, Path | None, bool]]:
     import monorl.pipeline.runner as runner_mod
     from monorl.pipeline.runner import PipelineResult
 
@@ -43,11 +50,21 @@ def fake_run_pipeline(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> list[t
     def fake(config: PipelineConfig, run_dir: Path | None = None, *, resume: bool = False) -> PipelineResult:
         calls.append((config, run_dir, resume))
         stages = [
-            {"index": i, "name": s.name, "type": s.type, "state": "succeeded", "step": 3, "run_dir": str(tmp_path / s.name)}
+            {
+                "index": i,
+                "name": s.name,
+                "type": s.type,
+                "state": "succeeded",
+                "step": 3,
+                "run_dir": str(tmp_path / s.name),
+            }
             for i, s in enumerate(config.stages)
         ]
         return PipelineResult(
-            state="succeeded", run_dir=str(tmp_path / "pd"), stages=stages, final_model_path=str(tmp_path / "final")
+            state="succeeded",
+            run_dir=str(tmp_path / "pd"),
+            stages=stages,
+            final_model_path=str(tmp_path / "final"),
         )
 
     monkeypatch.setattr(runner_mod, "run_pipeline", fake)
@@ -63,7 +80,9 @@ def test_help_lists_pipeline(runner: CliRunner) -> None:
         assert flag in result.output
 
 
-def test_pipeline_command_with_overrides(runner: CliRunner, pipeline_yaml: Path, fake_run_pipeline, tmp_path: Path) -> None:
+def test_pipeline_command_with_overrides(
+    runner: CliRunner, pipeline_yaml: Path, fake_run_pipeline, tmp_path: Path
+) -> None:
     result = runner.invoke(
         app,
         [
@@ -91,7 +110,9 @@ def test_pipeline_command_with_overrides(runner: CliRunner, pipeline_yaml: Path,
     assert "final model:" in result.output
 
 
-def test_train_dispatches_pipeline_yaml(runner: CliRunner, pipeline_yaml: Path, fake_run_pipeline, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_train_dispatches_pipeline_yaml(
+    runner: CliRunner, pipeline_yaml: Path, fake_run_pipeline, monkeypatch: pytest.MonkeyPatch
+) -> None:
     import monorl.orchestrator
 
     def boom(*a: Any, **kw: Any) -> None:
@@ -121,14 +142,20 @@ def test_pipeline_exit_codes(
     assert "boom" in result.output
 
 
-def test_pipeline_rejects_run_config_and_invalid(runner: CliRunner, run_config_dict: dict[str, Any], tmp_path: Path) -> None:
+def test_pipeline_rejects_run_config_and_invalid(
+    runner: CliRunner, run_config_dict: dict[str, Any], tmp_path: Path
+) -> None:
     run_yaml = tmp_path / "run.yaml"
     run_yaml.write_text(yaml.safe_dump(run_config_dict))
     result = runner.invoke(app, ["pipeline", "--config", str(run_yaml)])
     assert result.exit_code == 1 and "not a pipeline config" in result.output
 
     bad = tmp_path / "bad.yaml"
-    bad.write_text(yaml.safe_dump({"base": run_config_dict, "stages": [{"type": "train", "name": "x", "data_from": "previous"}]}))
+    bad.write_text(
+        yaml.safe_dump(
+            {"base": run_config_dict, "stages": [{"type": "train", "name": "x", "data_from": "previous"}]}
+        )
+    )
     result = runner.invoke(app, ["pipeline", "--config", str(bad)])
     assert result.exit_code == 1 and "rejection_sample" in result.output
 

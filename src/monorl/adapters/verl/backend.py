@@ -165,14 +165,20 @@ class VerlBackend:
         reporter.set_status("pending", "compiling verl config")
         overrides = self.prepare(config, run_dir)
         cmd = self.build_command(overrides, sft=config.is_sft)
-        reporter.log("launching: " + " ".join(cmd[:3]) + f" (+{len(overrides)} overrides, see {OVERRIDES_FILE})")
+        reporter.log(
+            "launching: " + " ".join(cmd[:3]) + f" (+{len(overrides)} overrides, see {OVERRIDES_FILE})"
+        )
 
         installed = self._install_signal_handlers()
         tail: deque[str] = deque(maxlen=20)
         try:
             with open(run_dir / LOG_FILE, "ab") as log_file:
                 self._proc = subprocess.Popen(
-                    cmd, cwd=run_dir, env=self.build_env(config, run_dir), stdout=log_file, stderr=subprocess.STDOUT
+                    cmd,
+                    cwd=run_dir,
+                    env=self.build_env(config, run_dir),
+                    stdout=log_file,
+                    stderr=subprocess.STDOUT,
                 )
                 reporter.set_status("running", "verl started", step=0, child_pid=self._proc.pid)
                 self._reporter = reporter
@@ -197,7 +203,9 @@ class VerlBackend:
             state = "failed"
             error = f"verl exited with code {returncode}\n" + "\n".join(tail)
             reporter.set_status("failed", f"verl exited with code {returncode}", step=step)
-        metrics = {k: float(v) for k, v in last_metrics.items() if isinstance(v, (int, float)) and k != "step"}
+        metrics = {
+            k: float(v) for k, v in last_metrics.items() if isinstance(v, (int, float)) and k != "step"
+        }
         return RunResult(
             state=state,
             final_step=step,

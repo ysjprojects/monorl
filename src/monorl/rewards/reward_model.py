@@ -21,7 +21,14 @@ from typing import Any
 from monorl.core.types import Message, RewardResult, Trajectory, message_text
 from monorl.rewards.base import check_trajectories, conversation, reward_name
 
-_DTYPES = {"float32": "float32", "fp32": "float32", "bfloat16": "bfloat16", "bf16": "bfloat16", "float16": "float16", "fp16": "float16"}
+_DTYPES = {
+    "float32": "float32",
+    "fp32": "float32",
+    "bfloat16": "bfloat16",
+    "bf16": "bfloat16",
+    "float16": "float16",
+    "fp16": "float16",
+}
 
 
 def render_messages(tokenizer: Any, messages: list[Message]) -> str:
@@ -59,7 +66,9 @@ class RewardModelReward:
             if tokenizer is None:
                 tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=trust)
             if model is None:
-                model = AutoModelForSequenceClassification.from_pretrained(model_id, dtype=dtype, trust_remote_code=trust)
+                model = AutoModelForSequenceClassification.from_pretrained(
+                    model_id, dtype=dtype, trust_remote_code=trust
+                )
         if tokenizer.pad_token is None:
             tokenizer.pad_token = tokenizer.eos_token
         if getattr(model.config, "pad_token_id", None) is None:
@@ -82,7 +91,11 @@ class RewardModelReward:
                 )
                 enc = {k: v.to(self.device) for k, v in enc.items()}
                 logits = self.model(**enc).logits.float()
-                values = logits[:, self.label_index] if logits.ndim == 2 else logits.reshape(logits.shape[0], -1)[:, self.label_index]
+                values = (
+                    logits[:, self.label_index]
+                    if logits.ndim == 2
+                    else logits.reshape(logits.shape[0], -1)[:, self.label_index]
+                )
                 if self.normalize == "sigmoid":
                     values = torch.sigmoid(values)
                 scores.extend(values.cpu().tolist())
@@ -94,5 +107,7 @@ class RewardModelReward:
         return [RewardResult(score=s, breakdown={self.name: s}) for s in self.score_texts(texts)]
 
 
-def make_reward_model(params: dict[str, Any], *, model: Any = None, tokenizer: Any = None, **_: Any) -> RewardModelReward:
+def make_reward_model(
+    params: dict[str, Any], *, model: Any = None, tokenizer: Any = None, **_: Any
+) -> RewardModelReward:
     return RewardModelReward(params, model=model, tokenizer=tokenizer)

@@ -71,7 +71,12 @@ def test_logprob_floats_coerces_scalars():
         return list(zip(vals, idxs, [None] * len(vals), strict=True))
 
     patched = build_logprob_floats(original)
-    out = patched(None, [np.float32(-0.5), torch.tensor(-1.25), -2.0, None], [np.int64(3), torch.tensor(4), 5, None], False)
+    out = patched(
+        None,
+        [np.float32(-0.5), torch.tensor(-1.25), -2.0, None],
+        [np.int64(3), torch.tensor(4), 5, None],
+        False,
+    )
     assert seen["vals"] == [-0.5, -1.25, -2.0, None] and all(type(v) is float for v in seen["vals"][:3])
     assert seen["idxs"] == [3, 4, 5, None] and all(type(i) is int for i in seen["idxs"][:3])
     assert out[0] == (-0.5, 3, None)
@@ -84,7 +89,16 @@ class _Gen:
     def __init__(self):
         self.calls = []
 
-    def generate(self, prompt=None, sampling_params=None, input_ids=None, return_logprob=False, logprob_start_len=None, stream=False, rid=None):
+    def generate(
+        self,
+        prompt=None,
+        sampling_params=None,
+        input_ids=None,
+        return_logprob=False,
+        logprob_start_len=None,
+        stream=False,
+        rid=None,
+    ):
         self.calls.append(
             {
                 "prompt": prompt,
@@ -102,7 +116,15 @@ class _Gen:
 def test_seeded_parallel_sampling_fans_out_input_ids():
     g = _Gen()
     patched = build_seeded_parallel_sampling(_Gen.generate)
-    assert patched(g, input_ids=[[1, 2], [3]], sampling_params={"n": 2, "sampling_seed": 10, "temperature": 0.9}, return_logprob=True) == "ok"
+    assert (
+        patched(
+            g,
+            input_ids=[[1, 2], [3]],
+            sampling_params={"n": 2, "sampling_seed": 10, "temperature": 0.9},
+            return_logprob=True,
+        )
+        == "ok"
+    )
     call = g.calls[-1]
     assert call["input_ids"] == [[1, 2], [1, 2], [3], [3]] and call["prompt"] is None
     assert call["sampling_params"] == [
@@ -133,7 +155,9 @@ def test_seeded_parallel_sampling_leaves_other_calls_alone():
     patched(g, input_ids=[[1]], sampling_params={"n": 2})  # no seed
     patched(g, input_ids=[[1]], sampling_params={"n": 1, "sampling_seed": 3})  # n == 1
     patched(g, input_ids=[[1]], sampling_params={"n": 2, "sampling_seed": 3}, stream=True)  # streaming
-    patched(g, input_ids=[[1]], sampling_params={"n": 2, "sampling_seed": 3}, rid=["r"])  # per-request list arg
+    patched(
+        g, input_ids=[[1]], sampling_params={"n": 2, "sampling_seed": 3}, rid=["r"]
+    )  # per-request list arg
     patched(g, input_ids=[[1]], sampling_params=[{"n": 2, "sampling_seed": 3}, {"n": 1}])  # length mismatch
     patched(g, input_ids=[[1]], sampling_params=None)
     for call in g.calls:
@@ -219,7 +243,9 @@ def test_apply_and_revert_on_fake_sglang(fake_sglang, monkeypatch):
     tm = tm_mod.TokenizerManager()
     assert tm.detokenize_logprob_tokens([np.float32(-1.0)], [np.int64(2)], False) == [(-1.0, 2, None)]
     monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
-    assert eng.release_memory_occupation() is None and not any(c.method == "release_memory_occupation" for c in eng.calls)
+    assert eng.release_memory_occupation() is None and not any(
+        c.method == "release_memory_occupation" for c in eng.calls
+    )
     eng.update_weights_from_tensor({"w": torch.zeros(2)}, flush_cache=False)
     assert eng.calls[-1].kwargs["named_tensors"][0][0] == "w"
 

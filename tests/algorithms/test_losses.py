@@ -23,7 +23,15 @@ def _batch(seed: int = 0):
 
 def test_metric_keys_present_and_loss_differentiable():
     logprobs, old, ref, adv, mask = _batch()
-    out = policy_loss(logprobs, old, adv, mask, algorithm=AlgorithmConfig(kl_coef=0.1), ref_logprobs=ref, entropy=torch.ones(B, T))
+    out = policy_loss(
+        logprobs,
+        old,
+        adv,
+        mask,
+        algorithm=AlgorithmConfig(kl_coef=0.1),
+        ref_logprobs=ref,
+        entropy=torch.ones(B, T),
+    )
     assert set(out.metrics) == set(METRIC_KEYS)
     assert out.loss.requires_grad
     out.loss.backward()
@@ -130,9 +138,13 @@ def test_empty_mask_is_numerically_safe():
     zero_mask = torch.zeros(2, 3)
     for agg in ("token", "sequence"):
         out = policy_loss(
-            logprobs, torch.randn(2, 3), torch.randn(2, 3), zero_mask,
+            logprobs,
+            torch.randn(2, 3),
+            torch.randn(2, 3),
+            zero_mask,
             algorithm=AlgorithmConfig(loss_agg=agg, kl_coef=0.1, entropy_coef=0.1),
-            ref_logprobs=torch.randn(2, 3), entropy=torch.randn(2, 3),
+            ref_logprobs=torch.randn(2, 3),
+            entropy=torch.randn(2, 3),
         )
         assert out.loss.item() == 0.0
         assert all(v == 0.0 for v in out.metrics.values())

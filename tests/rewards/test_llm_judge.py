@@ -29,7 +29,9 @@ def test_llm_judge_scores_via_mock_endpoint(traj, monkeypatch):
         body = json.loads(request.content)
         content = body["messages"][-1]["content"]
         score = 10 if "correct answer" in content else 2
-        return httpx.Response(200, json={"choices": [{"message": {"content": f"Looks fine.\n<score>{score}</score>"}}]})
+        return httpx.Response(
+            200, json={"choices": [{"message": {"content": f"Looks fine.\n<score>{score}</score>"}}]}
+        )
 
     fn = registry.get("reward", "llm_judge")(
         {
@@ -62,7 +64,8 @@ def test_llm_judge_raw_scores_and_clamping(traj):
         return httpx.Response(200, json={"choices": [{"message": {"content": "<score>12</score>"}}]})
 
     fn = registry.get("reward", "llm_judge")(
-        {"base_url": "http://j", "model": "m", "normalize": False, "max_score": 5}, client=_mock_client(handler)
+        {"base_url": "http://j", "model": "m", "normalize": False, "max_score": 5},
+        client=_mock_client(handler),
     )
     assert fn([traj("x")])[0].score == 5.0
 
@@ -76,7 +79,9 @@ def test_llm_judge_error_handling(traj):
             return httpx.Response(500, text="boom")
         return httpx.Response(200, json={"choices": [{"message": {"content": "no tag here"}}]})
 
-    zero = registry.get("reward", "llm_judge")({"base_url": "http://j", "model": "m", "max_workers": 1}, client=_mock_client(handler))
+    zero = registry.get("reward", "llm_judge")(
+        {"base_url": "http://j", "model": "m", "max_workers": 1}, client=_mock_client(handler)
+    )
     results = zero([traj("a"), traj("b")])
     assert [r.score for r in results] == [0.0, 0.0]
     assert "HTTPStatusError" in results[0].info["error"]

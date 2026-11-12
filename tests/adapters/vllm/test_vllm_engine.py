@@ -84,8 +84,16 @@ def test_out_of_process_engine_core_opt_out(fake_vllm, vllm_config: RunConfig) -
 def test_sampling_param_mapping(fake_vllm, vllm_config: RunConfig) -> None:
     eng = _engine(vllm_config)
     params = SamplingParams(
-        n=3, max_new_tokens=17, temperature=0.7, top_p=0.9, top_k=-1, min_p=0.05,
-        repetition_penalty=1.1, stop=["</s>", "\n\n"], seed=5, logprobs=True,
+        n=3,
+        max_new_tokens=17,
+        temperature=0.7,
+        top_p=0.9,
+        top_k=-1,
+        min_p=0.05,
+        repetition_penalty=1.1,
+        stop=["</s>", "\n\n"],
+        seed=5,
+        logprobs=True,
     )
     eng.generate([[1, 2, 3]], params)
     sp = FakeLLM.instances[-1].calls[-1][1]["sampling_params"]
@@ -150,7 +158,11 @@ def test_generate_empty(fake_vllm, vllm_config: RunConfig) -> None:
 def test_update_weights_reaches_every_worker(fake_vllm, vllm_config: RunConfig) -> None:
     vllm_config.rollout.extra = {"chunk_bytes": 8 * 4}  # two fp32 2x2 tensors do not fit in one chunk
     eng = _engine(vllm_config)
-    weights = [("model.a", torch.full((2, 2), 1.0)), ("model.b", torch.full((2, 2), 2.0)), ("c", torch.tensor(3.0))]
+    weights = [
+        ("model.a", torch.full((2, 2), 1.0)),
+        ("model.b", torch.full((2, 2), 2.0)),
+        ("c", torch.tensor(3.0)),
+    ]
     eng.update_weights(iter(weights))
     llm = FakeLLM.instances[-1]
     rpcs = [c for c in llm.calls if c[0] == "collective_rpc"]
@@ -170,7 +182,9 @@ def test_load_weights_from_path_uses_upstream_reload(fake_vllm, vllm_config: Run
     rpc = [c for c in llm.calls if c[0] == "collective_rpc"][-1][1]
     assert rpc["method"] == "monorl_load_weights_from_path" and rpc["args"] == (str(tmp_path),)
     for worker in llm.workers:
-        assert worker.reload_calls == [{"args": (), "weights_path": str(tmp_path), "is_checkpoint_format": True}]
+        assert worker.reload_calls == [
+            {"args": (), "weights_path": str(tmp_path), "is_checkpoint_format": True}
+        ]
     assert llm.names()[-1] == "reset_prefix_cache"
 
 
@@ -227,7 +241,6 @@ def test_shutdown_releases_engine(fake_vllm, vllm_config: RunConfig) -> None:
 
 def test_sampled_logprob_missing_token_is_nan() -> None:
     from monorl.adapters.vllm.common import sampled_logprobs
-
 
     out = CompletionOutput(0, "", [1, 2], None, [{1: Logprob(-0.5)}, {9: Logprob(-0.1)}])
     lps = sampled_logprobs(out)

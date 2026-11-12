@@ -208,8 +208,12 @@ def build_train_config(
     run_config = RunConfig.from_dict(merged)
     if stage.data_from == PREVIOUS_DATASET:
         if previous_dataset is None:
-            raise ValueError(f"stage {stage.name!r}: data_from='previous' but no rejection_sample output exists")
-        run_config = run_config.model_copy(update={"data": previous_dataset_config(run_config.data, previous_dataset)})
+            raise ValueError(
+                f"stage {stage.name!r}: data_from='previous' but no rejection_sample output exists"
+            )
+        run_config = run_config.model_copy(
+            update={"data": previous_dataset_config(run_config.data, previous_dataset)}
+        )
     return run_config
 
 

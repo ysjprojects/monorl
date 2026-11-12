@@ -58,7 +58,10 @@ def config_validate(body: dict[str, Any]) -> dict[str, Any]:
         payload = body.get("config", body) if isinstance(body, dict) and "config" in body else body
         key = "pipeline" if is_pipeline_payload(payload) else "config"
     if not isinstance(payload, dict):
-        return {"ok": False, "errors": [{"loc": [key], "msg": f"{key} must be an object", "type": "type_error"}]}
+        return {
+            "ok": False,
+            "errors": [{"loc": [key], "msg": f"{key} must be an object", "type": "type_error"}],
+        }
     try:
         if key == "pipeline":
             return {"ok": True, "errors": [], "pipeline": PipelineConfig.from_dict(payload).to_dict()}
@@ -130,19 +133,27 @@ def connectors() -> dict[str, Any]:
     present = [v for v in S3_VARS if os.environ.get(v)]
     has_keys = bool(os.environ.get("AWS_ACCESS_KEY_ID") and os.environ.get("AWS_SECRET_ACCESS_KEY"))
     has_profile = bool(os.environ.get("AWS_PROFILE"))
-    shared_credentials = Path(os.environ.get("AWS_SHARED_CREDENTIALS_FILE") or "~/.aws/credentials").expanduser()
+    shared_credentials = Path(
+        os.environ.get("AWS_SHARED_CREDENTIALS_FILE") or "~/.aws/credentials"
+    ).expanduser()
     return {
         "s3": {
             "configured": has_keys or has_profile or shared_credentials.is_file(),
             "region": os.environ.get("AWS_DEFAULT_REGION") or os.environ.get("AWS_REGION"),
-            "endpoint_url": os.environ.get("AWS_ENDPOINT_URL_S3") or os.environ.get("AWS_ENDPOINT_URL") or os.environ.get("S3_ENDPOINT_URL"),
+            "endpoint_url": os.environ.get("AWS_ENDPOINT_URL_S3")
+            or os.environ.get("AWS_ENDPOINT_URL")
+            or os.environ.get("S3_ENDPOINT_URL"),
             "profile": os.environ.get("AWS_PROFILE"),
             "vars_present": present,
             "shared_credentials_file": str(shared_credentials) if shared_credentials.is_file() else None,
         },
         "hf": {
             "configured": bool(os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")),
-            "vars_present": [v for v in ("HF_TOKEN", "HUGGING_FACE_HUB_TOKEN", "HF_HOME", "HF_ENDPOINT") if os.environ.get(v)],
+            "vars_present": [
+                v
+                for v in ("HF_TOKEN", "HUGGING_FACE_HUB_TOKEN", "HF_HOME", "HF_ENDPOINT")
+                if os.environ.get(v)
+            ],
         },
     }
 

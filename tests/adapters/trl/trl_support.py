@@ -20,7 +20,11 @@ class VowelReward:
         out = []
         for t in trajectories:
             score = float(sum(c in "aeiou" for c in t.response_text.lower()))
-            out.append(RewardResult(score=score, breakdown={REWARD_NAME: score}, info={"chars": len(t.response_text)}))
+            out.append(
+                RewardResult(
+                    score=score, breakdown={REWARD_NAME: score}, info={"chars": len(t.response_text)}
+                )
+            )
         return out
 
 

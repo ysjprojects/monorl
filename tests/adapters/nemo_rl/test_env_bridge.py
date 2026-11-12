@@ -33,7 +33,10 @@ def _metadata(sample: Sample) -> dict[str, Any]:
 
 
 def _log(sample: Sample, response: str) -> list[dict[str, str]]:
-    return [*[{"role": m["role"], "content": m["content"]} for m in sample.messages], {"role": "assistant", "content": response}]
+    return [
+        *[{"role": m["role"], "content": m["content"]} for m in sample.messages],
+        {"role": "assistant", "content": response},
+    ]
 
 
 def test_single_turn_scores_with_monorl_rewards(nemo_config: RunConfig) -> None:
@@ -76,8 +79,14 @@ class _TwoTurnEnv:
     def step(self, action: Completion) -> StepResult:
         self.turns += 1
         if self.turns == 1:
-            return StepResult(messages=[{"role": "user", "content": f"you said {action.text!r}; say DONE"}], reward=0.0, done=False)
-        return StepResult(messages=[], reward=0.5 if "DONE" in action.text else -0.5, done=True, info={"turns": self.turns})
+            return StepResult(
+                messages=[{"role": "user", "content": f"you said {action.text!r}; say DONE"}],
+                reward=0.0,
+                done=False,
+            )
+        return StepResult(
+            messages=[], reward=0.5 if "DONE" in action.text else -0.5, done=True, info={"turns": self.turns}
+        )
 
     def close(self) -> None:
         self.closed = True
@@ -86,7 +95,9 @@ class _TwoTurnEnv:
 def test_multi_turn_keeps_env_state_across_steps(nemo_config: RunConfig) -> None:
     registry.register("env", "two_turn_test", lambda config, **kw: _TwoTurnEnv(), overwrite=True)
     _TwoTurnEnv.instances.clear()
-    config = RunConfig.from_dict({**nemo_config.to_dict(), "env": {"type": "two_turn_test", "max_turns": 2}, "rewards": []})
+    config = RunConfig.from_dict(
+        {**nemo_config.to_dict(), "env": {"type": "two_turn_test", "max_turns": 2}, "rewards": []}
+    )
     bridge = MonorlEnvironmentBridge(build_env_config(config))
     assert bridge.reward_fn is None
     sample = Sample(id="s", messages=[{"role": "user", "content": "hi"}], reference=None)
@@ -120,7 +131,9 @@ def test_global_post_process_and_shutdown(nemo_config: RunConfig) -> None:
     registry.register("env", "two_turn_test", lambda config, **kw: _TwoTurnEnv(), overwrite=True)
     _TwoTurnEnv.instances.clear()
     bridge = MonorlEnvironmentBridge(build_env_config(nemo_config))
-    batch, metrics = bridge.global_post_process_and_metrics({"total_reward": torch.tensor([1.0, 0.0, 1.0, 0.0])})
+    batch, metrics = bridge.global_post_process_and_metrics(
+        {"total_reward": torch.tensor([1.0, 0.0, 1.0, 0.0])}
+    )
     assert torch.equal(batch["total_reward"], torch.tensor([1.0, 0.0, 1.0, 0.0]))
 
     _, multi = bridge.global_post_process_and_metrics({"rewards": torch.tensor([[1.0, 2.0], [3.0, 4.0]])})

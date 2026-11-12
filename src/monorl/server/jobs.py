@@ -174,7 +174,13 @@ class JobManager:
             run_dir.mkdir(parents=True, exist_ok=False)
             config_path = run_dir / CONFIG_FILE
             config.to_yaml(config_path)
-            cmd = [*(self._train_cmd or train_command()), "--config", str(config_path), "--run-dir", str(run_dir)]
+            cmd = [
+                *(self._train_cmd or train_command()),
+                "--config",
+                str(config_path),
+                "--run-dir",
+                str(run_dir),
+            ]
             return self._spawn("run", name, run_dir, config.to_dict(), cmd)
 
     def _create_pipeline(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -185,10 +191,18 @@ class JobManager:
             run_dir.mkdir(parents=True, exist_ok=False)
             config_path = run_dir / PIPELINE_CONFIG_FILE
             config.to_yaml(config_path)
-            cmd = [*(self._pipeline_cmd or pipeline_command()), "--config", str(config_path), "--run-dir", str(run_dir)]
+            cmd = [
+                *(self._pipeline_cmd or pipeline_command()),
+                "--config",
+                str(config_path),
+                "--run-dir",
+                str(run_dir),
+            ]
             return self._spawn("pipeline", name, run_dir, config.to_dict(), cmd)
 
-    def _spawn(self, kind: str, name: str, run_dir: Path, config: dict[str, Any], cmd: list[str]) -> dict[str, Any]:
+    def _spawn(
+        self, kind: str, name: str, run_dir: Path, config: dict[str, Any], cmd: list[str]
+    ) -> dict[str, Any]:
         now = time.time()
         job: dict[str, Any] = {
             "id": uuid.uuid4().hex[:12],

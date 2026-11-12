@@ -47,7 +47,10 @@ _IMAGE_MAGIC: tuple[tuple[bytes, str], ...] = (
     (b"BM", "bmp"),
 )
 _BASE64_RE = re.compile(r"^[A-Za-z0-9+/\s]+={0,2}$")
-_DATA_URL_RE = re.compile(r"^data:(?P<mime>[\w.+-]+/[\w.+-]+)?(?P<params>(?:;[\w.+-]+=[^;,]*)*)(?P<b64>;base64)?,(?P<payload>.*)$", re.DOTALL)
+_DATA_URL_RE = re.compile(
+    r"^data:(?P<mime>[\w.+-]+/[\w.+-]+)?(?P<params>(?:;[\w.+-]+=[^;,]*)*)(?P<b64>;base64)?,(?P<payload>.*)$",
+    re.DOTALL,
+)
 _PART_TYPE_ALIASES = {
     "text": "text",
     "input_text": "text",
@@ -340,7 +343,9 @@ def normalize_content_parts(content: Any, resolver: MediaResolver, *, where: str
     return parts
 
 
-def place_images(text: str, images: list[ImagePart], existing: list[ContentPart] | None = None) -> list[ContentPart]:
+def place_images(
+    text: str, images: list[ImagePart], existing: list[ContentPart] | None = None
+) -> list[ContentPart]:
     """Build the user content: ``<image>`` placeholders in ``text`` are replaced in order by
     ``images``; images without a placeholder go first. ``existing`` media parts (from an
     already multimodal message) are kept ahead of everything."""

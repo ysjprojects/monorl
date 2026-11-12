@@ -40,7 +40,9 @@ def test_json_array_and_wrapped(tmp_path: Path) -> None:
     _check_qa(_open(p))
     p.write_text(json.dumps({"data": QA_ROWS}))
     _check_qa(_open(p))
-    p.write_text(json.dumps({"question": [r["question"] for r in QA_ROWS], "answer": [r["answer"] for r in QA_ROWS]}))
+    p.write_text(
+        json.dumps({"question": [r["question"] for r in QA_ROWS], "answer": [r["answer"] for r in QA_ROWS]})
+    )
     _check_qa(_open(p))
 
 
@@ -66,7 +68,10 @@ def test_parquet_chat_struct_column(tmp_path: Path) -> None:
     assert src.layout.format == "chat"
     s = next(iter(src))
     assert s.id == "chat-0"
-    assert s.messages == [{"role": "system", "content": "You are terse."}, {"role": "user", "content": "Say the number 0."}]
+    assert s.messages == [
+        {"role": "system", "content": "You are terse."},
+        {"role": "user", "content": "Say the number 0."},
+    ]
     assert s.reference == "0"
     assert "struct<role: string, content: string>" in src.schema()["messages"]
 

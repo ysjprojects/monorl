@@ -89,7 +89,9 @@ def final_prompt_messages(trajectory: Trajectory) -> list[Message]:
     """The chat the final turn was prompted with: every message before the last assistant turn
     (environment messages appended after the final step are excluded)."""
     messages = list(trajectory.messages)
-    last_assistant = max((i for i, m in enumerate(messages) if m.get("role") == "assistant"), default=len(messages))
+    last_assistant = max(
+        (i for i, m in enumerate(messages) if m.get("role") == "assistant"), default=len(messages)
+    )
     return messages[:last_assistant]
 
 

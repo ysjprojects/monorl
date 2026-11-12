@@ -31,7 +31,9 @@ def member_keys(specs: Sequence[RewardSpec]) -> list[str]:
 
 
 class CompositeReward:
-    def __init__(self, members: Sequence[tuple[str, float, RewardFunction]], *, name: str = "composite") -> None:
+    def __init__(
+        self, members: Sequence[tuple[str, float, RewardFunction]], *, name: str = "composite"
+    ) -> None:
         if not members:
             raise ValueError("composite reward needs at least one member")
         self.name = name
@@ -46,7 +48,9 @@ class CompositeReward:
             info: dict[str, Any] = {}
             for key, weight, results in per_member:
                 if len(results) != len(trajectories):
-                    raise ValueError(f"reward {key!r} returned {len(results)} results for {len(trajectories)} trajectories")
+                    raise ValueError(
+                        f"reward {key!r} returned {len(results)} results for {len(trajectories)} trajectories"
+                    )
                 r = results[i]
                 breakdown[key] = float(r.score)
                 total += weight * float(r.score)

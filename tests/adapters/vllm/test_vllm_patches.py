@@ -17,7 +17,12 @@ from monorl.adapters.vllm.patches import (
 )
 from monorl.patching import apply, is_registered, revert, status
 
-PATCH_IDS = {"vllm.llm.sleep_guard", "vllm.llm.wake_up_guard", "vllm.outputs.sampled_logprobs", "vllm.server.monorl_routes"}
+PATCH_IDS = {
+    "vllm.llm.sleep_guard",
+    "vllm.llm.wake_up_guard",
+    "vllm.outputs.sampled_logprobs",
+    "vllm.server.monorl_routes",
+}
 
 
 def test_patchset_declaration() -> None:
@@ -65,7 +70,10 @@ def test_sampled_logprobs_property_on_dataclass() -> None:
     prop = build_sampled_logprobs(None)
     assert isinstance(prop, property)
     Out.sampled_logprobs = prop
-    assert Out([3, 4], [{3: Logprob(-0.25), 9: Logprob(-3.0)}, {4: Logprob(-1.5)}]).sampled_logprobs == [-0.25, -1.5]
+    assert Out([3, 4], [{3: Logprob(-0.25), 9: Logprob(-3.0)}, {4: Logprob(-1.5)}]).sampled_logprobs == [
+        -0.25,
+        -1.5,
+    ]
     assert Out([3], None).sampled_logprobs is None
 
 

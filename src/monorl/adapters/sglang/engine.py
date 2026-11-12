@@ -69,7 +69,9 @@ def import_sglang() -> Any:
     if version is not None:
         try:
             if Version(version) not in SpecifierSet(SGLANG_VERSIONS, prereleases=True):
-                log.warning("sglang %s is outside the supported range %s; proceeding anyway", version, SGLANG_VERSIONS)
+                log.warning(
+                    "sglang %s is outside the supported range %s; proceeding anyway", version, SGLANG_VERSIONS
+                )
         except InvalidVersion:
             log.warning("could not parse sglang version %r", version)
     return sglang

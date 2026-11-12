@@ -68,4 +68,7 @@ def hooks_patch_applied() -> bool:
     """True when the installed ``GRPOTrainer`` carries the ``trl.grpo.monorl_hooks`` wrapper."""
     from trl.trainer.grpo_trainer import GRPOTrainer
 
-    return getattr(GRPOTrainer._generate_and_score_completions, "__monorl_patch__", None) == "trl.grpo.monorl_hooks"
+    return (
+        getattr(GRPOTrainer._generate_and_score_completions, "__monorl_patch__", None)
+        == "trl.grpo.monorl_hooks"
+    )

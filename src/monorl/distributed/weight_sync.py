@@ -121,7 +121,9 @@ class BroadcastWeightSync:
 
     name = "broadcast"
 
-    def __init__(self, spec: BroadcastGroupSpec, *, rank: int, device: str | torch.device | None = None) -> None:
+    def __init__(
+        self, spec: BroadcastGroupSpec, *, rank: int, device: str | torch.device | None = None
+    ) -> None:
         if not 0 <= rank < spec.world_size:
             raise WeightSyncError(f"rank {rank} outside world_size {spec.world_size}")
         if spec.backend == "nccl" and not torch.cuda.is_available():
@@ -129,7 +131,11 @@ class BroadcastWeightSync:
         self.spec = spec
         self.rank = rank
         if device is None:
-            device = torch.device("cuda", torch.cuda.current_device()) if spec.backend == "nccl" else torch.device("cpu")
+            device = (
+                torch.device("cuda", torch.cuda.current_device())
+                if spec.backend == "nccl"
+                else torch.device("cpu")
+            )
         self.device = torch.device(device)
         self._store: Any = None
         self._group: Any = None
@@ -156,7 +162,9 @@ class BroadcastWeightSync:
             opts.is_high_priority_stream = False
             opts._timeout = timeout
             self._group = dist.ProcessGroupNCCL(self._store, self.rank, self.spec.world_size, opts)
-        log.info("broadcast group ready: rank %d/%d via %s", self.rank, self.spec.world_size, self.spec.backend)
+        log.info(
+            "broadcast group ready: rank %d/%d via %s", self.rank, self.spec.world_size, self.spec.backend
+        )
         return self._group
 
     def close(self) -> None:
@@ -186,7 +194,10 @@ class BroadcastWeightSync:
             return []
         buf = torch.empty(size, dtype=torch.uint8, device=self.device)
         self._broadcast(buf)
-        return [_BucketEntry(name, tuple(shape), dtype) for name, shape, dtype in pickle.loads(buf.cpu().numpy().tobytes())]
+        return [
+            _BucketEntry(name, tuple(shape), dtype)
+            for name, shape, dtype in pickle.loads(buf.cpu().numpy().tobytes())
+        ]
 
     # -- sender -----------------------------------------------------------------------------
     def send(self, weights: Iterable[tuple[str, torch.Tensor]]) -> dict[str, float]:
@@ -213,7 +224,9 @@ class BroadcastWeightSync:
 
         for name, tensor in weights:
             t = tensor.detach().to(self.device, non_blocking=False).contiguous().reshape(-1)
-            if parts and (t.dtype != parts[0].dtype or pending_bytes + _tensor_bytes(t) > self.spec.bucket_bytes):
+            if parts and (
+                t.dtype != parts[0].dtype or pending_bytes + _tensor_bytes(t) > self.spec.bucket_bytes
+            ):
                 flush()
             entries.append(_BucketEntry(name, tuple(tensor.shape), str(tensor.dtype)))
             parts.append(t)
@@ -317,12 +330,18 @@ class CudaIpcWeightSync:
 
     def __init__(self, device: str | torch.device | None = None) -> None:
         if not torch.cuda.is_available():
-            raise WeightSyncError("weight_sync='cuda_ipc' needs CUDA; use 'inprocess', 'broadcast' or 'checkpoint'")
-        self.device = torch.device(device) if device is not None else torch.device("cuda", torch.cuda.current_device())
+            raise WeightSyncError(
+                "weight_sync='cuda_ipc' needs CUDA; use 'inprocess', 'broadcast' or 'checkpoint'"
+            )
+        self.device = (
+            torch.device(device) if device is not None else torch.device("cuda", torch.cuda.current_device())
+        )
         if self.device.type != "cuda":
             raise WeightSyncError(f"cuda_ipc device must be a CUDA device, got {self.device}")
 
-    def export_handles(self, weights: Iterable[tuple[str, torch.Tensor]]) -> tuple[list[IpcHandle], list[torch.Tensor]]:
+    def export_handles(
+        self, weights: Iterable[tuple[str, torch.Tensor]]
+    ) -> tuple[list[IpcHandle], list[torch.Tensor]]:
         """Pin every tensor on ``self.device`` and produce IPC handles.
 
         Returns ``(handles, keepalive)``; the caller must hold ``keepalive`` until consumers finished.

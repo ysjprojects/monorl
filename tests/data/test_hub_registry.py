@@ -55,7 +55,9 @@ def test_hf_streaming_open_source() -> None:
     assert first[0].messages[1]["role"] == "user" and first[0].messages[1]["content"].startswith("Natalia")
     assert first[0].reference == "72"
     assert "####" in first[0].metadata["answer_raw"]
-    shuffled = open_source(DataConfig(uri=GSM8K, hf_config_name="main", streaming=True, shuffle=True, limit=5))
+    shuffled = open_source(
+        DataConfig(uri=GSM8K, hf_config_name="main", streaming=True, shuffle=True, limit=5)
+    )
     assert len(shuffled) == 5, "known split size capped by limit"
     a = [s.id for s in shuffled]
     assert len(a) == 5 and a == [s.id for s in shuffled]

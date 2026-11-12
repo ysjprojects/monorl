@@ -38,7 +38,13 @@ def _base(tmp_path: Path) -> dict[str, Any]:
     data.write_text('{"prompt": "q", "answer": "a"}\n')
     return {
         "model": {"name_or_path": "org/base"},
-        "data": {"uri": str(data), "prompt_field": "prompt", "answer_field": "answer", "system_prompt": "sys", "limit": 10},
+        "data": {
+            "uri": str(data),
+            "prompt_field": "prompt",
+            "answer_field": "answer",
+            "system_prompt": "sys",
+            "limit": 10,
+        },
         "rollout": {"group_size": 2, "temperature": 1.0, "extra": {"k": 1}},
         "trainer": {"max_steps": 5},
         "rewards": [{"type": "exact_match"}],
@@ -60,7 +66,12 @@ def test_build_train_config_overrides_and_handoff(tmp_path: Path) -> None:
     cfg = _pipeline(
         tmp_path,
         [
-            {"type": "train", "name": "sft", "init_from": "base", "overrides": {"algorithm": {"name": "sft"}, "trainer": {"max_steps": 2}}},
+            {
+                "type": "train",
+                "name": "sft",
+                "init_from": "base",
+                "overrides": {"algorithm": {"name": "sft"}, "trainer": {"max_steps": 2}},
+            },
             {"type": "rejection_sample", "name": "rs"},
             {"type": "train", "name": "sft2", "data_from": "previous", "overrides": {"data": {"limit": 3}}},
             {"type": "train", "name": "explicit", "init_from": "/models/x"},
@@ -68,14 +79,28 @@ def test_build_train_config_overrides_and_handoff(tmp_path: Path) -> None:
     )
     root = tmp_path / "stages"
     first = build_train_config(cfg, 0, stages_root=root, previous_model=None, previous_dataset=None)
-    assert first.algorithm.name == "sft" and first.trainer.max_steps == 2 and first.model.name_or_path == "org/base"
+    assert (
+        first.algorithm.name == "sft"
+        and first.trainer.max_steps == 2
+        and first.model.name_or_path == "org/base"
+    )
     assert first.run_name == "00-sft" and first.logging.run_root == str(root)
     assert first.rollout.extra == {"k": 1}  # untouched base sections survive
 
-    third = build_train_config(cfg, 2, stages_root=root, previous_model="/prev/final", previous_dataset="/rs/dataset.jsonl")
+    third = build_train_config(
+        cfg, 2, stages_root=root, previous_model="/prev/final", previous_dataset="/rs/dataset.jsonl"
+    )
     assert third.model.name_or_path == "/prev/final"
-    assert third.data.uri == "/rs/dataset.jsonl" and third.data.format == "chat" and third.data.messages_field == "messages"
-    assert third.data.prompt_field is None and third.data.answer_field is None and third.data.response_field is None
+    assert (
+        third.data.uri == "/rs/dataset.jsonl"
+        and third.data.format == "chat"
+        and third.data.messages_field == "messages"
+    )
+    assert (
+        third.data.prompt_field is None
+        and third.data.answer_field is None
+        and third.data.response_field is None
+    )
     assert third.data.system_prompt == "sys" and third.data.limit == 3  # overrides apply before the swap
     assert third.trainer.max_steps == 5
 
@@ -88,7 +113,9 @@ def test_build_train_config_overrides_and_handoff(tmp_path: Path) -> None:
 
 
 def test_init_from_previous_without_previous_keeps_merged_model(tmp_path: Path) -> None:
-    cfg = _pipeline(tmp_path, [{"type": "train", "name": "a", "overrides": {"model": {"name_or_path": "org/other"}}}])
+    cfg = _pipeline(
+        tmp_path, [{"type": "train", "name": "a", "overrides": {"model": {"name_or_path": "org/other"}}}]
+    )
     built = build_train_config(cfg, 0, stages_root=tmp_path, previous_model=None, previous_dataset=None)
     assert built.model.name_or_path == "org/other"
 
@@ -122,13 +149,21 @@ def test_known_data_configs_and_mix_resolution(tmp_path: Path) -> None:
     cfg = _pipeline(
         tmp_path,
         [
-            {"type": "train", "name": "sft", "overrides": {"data": {"uri": "hf://x/y", "hf_config_name": "c", "response_field": "sol"}}},
+            {
+                "type": "train",
+                "name": "sft",
+                "overrides": {"data": {"uri": "hf://x/y", "hf_config_name": "c", "response_field": "sol"}},
+            },
             {"type": "rejection_sample", "name": "rs", "mix": ["hf://x/y", "hf://z/w"]},
         ],
     )
     known = known_data_configs(cfg)
     assert [d.uri for d in known] == [cfg.base.data.uri, "hf://x/y"]
-    assert known[1].response_field == "sol" and known[1].hf_config_name == "c" and known[1].prompt_field == "prompt"
+    assert (
+        known[1].response_field == "sol"
+        and known[1].hf_config_name == "c"
+        and known[1].prompt_field == "prompt"
+    )
     base = cfg.base.data
     same = mix_data_config(base, base.uri, known)
     assert same.prompt_field == "prompt" and same.shuffle is False and same.limit == 10
@@ -139,14 +174,24 @@ def test_known_data_configs_and_mix_resolution(tmp_path: Path) -> None:
 
 
 def test_previous_dataset_and_eval_data_config(tmp_path: Path) -> None:
-    data = DataConfig(uri="hf://a/b", hf_config_name="main", prompt_field="q", answer_field="a", prompt_template="{prompt}!", eval_uri="hf://a/b", eval_split="test")
+    data = DataConfig(
+        uri="hf://a/b",
+        hf_config_name="main",
+        prompt_field="q",
+        answer_field="a",
+        prompt_template="{prompt}!",
+        eval_uri="hf://a/b",
+        eval_split="test",
+    )
     prev = previous_dataset_config(data, "/x/dataset.jsonl")
     assert prev.uri == "/x/dataset.jsonl" and prev.format == "chat" and prev.hf_config_name is None
     assert prev.prompt_template is None and prev.eval_uri == "hf://a/b"
     from monorl.config.pipeline import EvalStage
     from monorl.config.schema import RunConfig
 
-    run = RunConfig.from_dict({"model": {"name_or_path": "m"}, "data": data.model_dump(), "rewards": [{"type": "exact_match"}]})
+    run = RunConfig.from_dict(
+        {"model": {"name_or_path": "m"}, "data": data.model_dump(), "rewards": [{"type": "exact_match"}]}
+    )
     ev = eval_data_config(EvalStage(name="e"), run)
     assert ev.uri == "hf://a/b" and ev.split == "test" and ev.shuffle is False and ev.eval_uri is None
     own = eval_data_config(EvalStage(name="e", data=DataConfig(uri="/own.jsonl")), run)
@@ -165,7 +210,11 @@ def test_manifest_round_trip(tmp_path: Path) -> None:
         str(tmp_path / "stages" / "01-b"),
     ]
     back = Manifest.from_dict(data)
-    assert back.stages[0].state == "succeeded" and back.stages[0].summary == {"x": 1.0} and back.stages[1].state == "pending"
+    assert (
+        back.stages[0].state == "succeeded"
+        and back.stages[0].summary == {"x": 1.0}
+        and back.stages[1].state == "pending"
+    )
     assert read_manifest(tmp_path / "nope") is None
     (tmp_path / "pipeline.json").write_text("{not json")
     assert read_manifest(tmp_path) is None
@@ -174,7 +223,9 @@ def test_manifest_round_trip(tmp_path: Path) -> None:
 # -- rejection filters ------------------------------------------------------------------------
 
 
-def _traj(sample_id: str, text: str, reward: float, *, finish: str = "stop", tokens: int = 3, reference: str = "A") -> Trajectory:
+def _traj(
+    sample_id: str, text: str, reward: float, *, finish: str = "stop", tokens: int = 3, reference: str = "A"
+) -> Trajectory:
     sample = Sample(id=sample_id, messages=[{"role": "user", "content": "q"}], reference=reference)
     completion = Completion(text=text, token_ids=list(range(tokens)), finish_reason=finish)  # type: ignore[arg-type]
     return Trajectory(
@@ -187,7 +238,9 @@ def _traj(sample_id: str, text: str, reward: float, *, finish: str = "stop", tok
 
 
 def test_select_accepted_filters() -> None:
-    stage = RejectionSampleStage(name="rs", min_reward=1.0, max_per_prompt=2, max_response_tokens=5, require_finish=True, dedupe=True)
+    stage = RejectionSampleStage(
+        name="rs", min_reward=1.0, max_per_prompt=2, max_response_tokens=5, require_finish=True, dedupe=True
+    )
     trajectories = [
         _traj("p1", "A", 1.0),
         _traj("p1", "A", 1.0),  # duplicate
@@ -201,17 +254,30 @@ def test_select_accepted_filters() -> None:
         _traj("p2", "H", 1.2),  # third best → capped out
     ]
     kept = select_accepted(stage, trajectories)
-    assert [(t.sample.id, t.response_text) for t in kept] == [("p1", "B"), ("p1", "A"), ("p2", "G"), ("p2", "H")]
+    assert [(t.sample.id, t.response_text) for t in kept] == [
+        ("p1", "B"),
+        ("p1", "A"),
+        ("p2", "G"),
+        ("p2", "H"),
+    ]
 
-    loose = RejectionSampleStage(name="rs", min_reward=0.0, max_per_prompt=10, require_finish=False, dedupe=False)
+    loose = RejectionSampleStage(
+        name="rs", min_reward=0.0, max_per_prompt=10, require_finish=False, dedupe=False
+    )
     assert len(select_accepted(loose, trajectories)) == len(trajectories)
 
 
 def test_prompt_messages_and_chat_row() -> None:
     t = _traj("p", "resp", 1.0, reference="42")
-    t.messages = [{"role": "system", "content": "s"}, {"role": "user", "content": "q"}, {"role": "assistant", "content": "resp"}]
+    t.messages = [
+        {"role": "system", "content": "s"},
+        {"role": "user", "content": "q"},
+        {"role": "assistant", "content": "resp"},
+    ]
     assert prompt_messages(t) == t.messages[:2]
-    row = chat_row(prompt_messages(t), t.response_text, reference=t.sample.reference, reward=t.reward, source="sampled")
+    row = chat_row(
+        prompt_messages(t), t.response_text, reference=t.sample.reference, reward=t.reward, source="sampled"
+    )
     assert row == {
         "messages": [*t.messages[:2], {"role": "assistant", "content": "resp"}],
         "reference": "42",
@@ -225,9 +291,19 @@ def test_sample_response_precedence() -> None:
     data = DataConfig(uri="x", response_field="sol", answer_field="ans")
     s = Sample(id="1", messages=[], reference="ref", metadata={"response": "from-response-field"})
     assert sample_response(s, data) == "from-response-field"
-    s = Sample(id="2", messages=[], reference="ref", metadata={"assistant_turn": {"role": "assistant", "content": "turn"}})
+    s = Sample(
+        id="2",
+        messages=[],
+        reference="ref",
+        metadata={"assistant_turn": {"role": "assistant", "content": "turn"}},
+    )
     assert sample_response(s, data) == "turn"
-    s = Sample(id="3", messages=[], reference="ref", metadata={"assistant_turn": {"role": "assistant", "content": [{"type": "text", "text": "parts"}]}})
+    s = Sample(
+        id="3",
+        messages=[],
+        reference="ref",
+        metadata={"assistant_turn": {"role": "assistant", "content": [{"type": "text", "text": "parts"}]}},
+    )
     assert sample_response(s, data) == "parts"
     s = Sample(id="4", messages=[], reference="ref", metadata={"row": {"sol": "solution", "ans": "answer"}})
     assert sample_response(s, data) == "solution"

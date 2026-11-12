@@ -50,14 +50,26 @@ def fake_processor(monkeypatch: pytest.MonkeyPatch) -> FakeProcessor:
 
 
 def _chat(image_path: Path) -> list[dict[str, Any]]:
-    return [{"role": "user", "content": [{"type": "text", "text": "what is this?"}, {"type": "image", "image": str(image_path)}]}]
+    return [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "what is this?"},
+                {"type": "image", "image": str(image_path)},
+            ],
+        }
+    ]
 
 
 def test_common_helpers(image_path: Path, fake_processor: FakeProcessor, tiny_model_dir: Path) -> None:
     from transformers import AutoTokenizer
 
     tok = AutoTokenizer.from_pretrained(tiny_model_dir)
-    assert is_media_prompt(_chat(image_path)) and not is_media_prompt([1, 2]) and not is_media_prompt([{"role": "user", "content": "x"}])
+    assert (
+        is_media_prompt(_chat(image_path))
+        and not is_media_prompt([1, 2])
+        and not is_media_prompt([{"role": "user", "content": "x"}])
+    )
     ids, images = encode_prompt(tok, fake_processor, _chat(image_path))
     assert ids == PLACEHOLDER_IDS and images is not None and images[0].size == (5, 3)
     with pytest.raises(ConfigError, match="AutoProcessor"):
@@ -74,10 +86,14 @@ def test_common_helpers(image_path: Path, fake_processor: FakeProcessor, tiny_mo
     assert image_data_urls(None) is None
 
 
-def test_engine_passes_image_data(fake_sglang, sglang_config, image_path: Path, fake_processor: FakeProcessor) -> None:
+def test_engine_passes_image_data(
+    fake_sglang, sglang_config, image_path: Path, fake_processor: FakeProcessor
+) -> None:
     eng = SGLangEngine(sglang_config)
     try:
-        out = eng.generate([_chat(image_path), [{"role": "user", "content": "text"}]], SamplingParams(n=2, logprobs=True))
+        out = eng.generate(
+            [_chat(image_path), [{"role": "user", "content": "text"}]], SamplingParams(n=2, logprobs=True)
+        )
         call = eng.engine.calls[-1].kwargs
         assert call["input_ids"][0] == PLACEHOLDER_IDS
         assert len(call["image_data"]) == 2 and call["image_data"][1] is None
@@ -91,7 +107,9 @@ def test_engine_passes_image_data(fake_sglang, sglang_config, image_path: Path, 
     assert isinstance(eng.engine, FakeEngine)
 
 
-def test_client_sends_image_data_urls(run_config_dict, image_path: Path, fake_processor: FakeProcessor) -> None:
+def test_client_sends_image_data_urls(
+    run_config_dict, image_path: Path, fake_processor: FakeProcessor
+) -> None:
     bodies: list[dict[str, Any]] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -100,13 +118,21 @@ def test_client_sends_image_data_urls(run_config_dict, image_path: Path, fake_pr
         outs = []
         for i in range(len(body["input_ids"])):
             for k in range(body["sampling_params"][i].get("n", 1)):
-                outs.append({"text": f"t{i}{k}", "output_ids": [i, k], "meta_info": {"finish_reason": {"type": "stop"}}})
+                outs.append(
+                    {
+                        "text": f"t{i}{k}",
+                        "output_ids": [i, k],
+                        "meta_info": {"finish_reason": {"type": "stop"}},
+                    }
+                )
         return httpx.Response(200, json=outs)
 
     cfg = make_config(run_config_dict, extra={"mode": "server", "url": "http://sgl.test:30000"})
     client = SGLangServerClient(cfg, transport=httpx.MockTransport(handler))
     try:
-        out = client.generate([_chat(image_path), [{"role": "user", "content": "plain"}]], SamplingParams(n=1))
+        out = client.generate(
+            [_chat(image_path), [{"role": "user", "content": "plain"}]], SamplingParams(n=1)
+        )
     finally:
         client.shutdown()
     body = bodies[-1]

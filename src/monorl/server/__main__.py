@@ -11,7 +11,9 @@ def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(prog="monorl.server", description="Run the monorl web server.")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
-    parser.add_argument("--open", action="store_true", help="Open the UI in a browser once the server starts.")
+    parser.add_argument(
+        "--open", action="store_true", help="Open the UI in a browser once the server starts."
+    )
     parser.add_argument("--log-level", default="info")
     args = parser.parse_args(argv)
 

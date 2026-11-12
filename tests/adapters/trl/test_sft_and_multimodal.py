@@ -94,7 +94,14 @@ def test_sft_kwargs_reject_rl_algorithms(trl_config: RunConfig, tmp_path: Path) 
 
 
 def test_sft_metric_names() -> None:
-    logs = {"loss": 2.0, "mean_token_accuracy": 0.25, "entropy": 1.5, "num_tokens": 40, "learning_rate": 1e-5, "epoch": 0.5}
+    logs = {
+        "loss": 2.0,
+        "mean_token_accuracy": 0.25,
+        "entropy": 1.5,
+        "num_tokens": 40,
+        "learning_rate": 1e-5,
+        "epoch": 0.5,
+    }
     out = map_metrics(logs, sft=True)
     assert out["loss/sft"] == 2.0 and out["sft/token_accuracy"] == 0.25 and out["loss/entropy"] == 1.5
     assert out["tokens/total"] == 40 and out["lr"] == 1e-5 and out["train/epoch"] == 0.5
@@ -107,9 +114,14 @@ def test_sft_metric_names() -> None:
 
 
 def test_sft_rows_use_prompt_completion_format() -> None:
-    sample = Sample(id="s1", messages=[{"role": "user", "content": "Q?"}], reference="A", metadata={"response": "A!"})
+    sample = Sample(
+        id="s1", messages=[{"role": "user", "content": "Q?"}], reference="A", metadata={"response": "A!"}
+    )
     row = sft_sample_to_row(sample, response_field=None)
-    assert row == {"prompt": [{"role": "user", "content": "Q?"}], "completion": [{"role": "assistant", "content": "A!"}]}
+    assert row == {
+        "prompt": [{"role": "user", "content": "Q?"}],
+        "completion": [{"role": "assistant", "content": "A!"}],
+    }
 
 
 def _image_sample(tmp_path: Path, sid: str = "img") -> tuple[Sample, Path]:
@@ -117,7 +129,12 @@ def _image_sample(tmp_path: Path, sid: str = "img") -> tuple[Sample, Path]:
     Image.new("RGB", (8, 6), (255, 0, 0)).save(path)
     sample = Sample(
         id=sid,
-        messages=[{"role": "user", "content": [{"type": "image", "image": str(path)}, {"type": "text", "text": "What colour?"}]}],
+        messages=[
+            {
+                "role": "user",
+                "content": [{"type": "image", "image": str(path)}, {"type": "text", "text": "What colour?"}],
+            }
+        ],
         reference="red",
         metadata={"response": "red"},
     )
@@ -127,7 +144,9 @@ def _image_sample(tmp_path: Path, sid: str = "img") -> tuple[Sample, Path]:
 def test_multimodal_rows_carry_images_and_placeholders(tmp_path: Path) -> None:
     sample, _ = _image_sample(tmp_path)
     row = sample_to_row(sample, multimodal=True)
-    assert row["prompt"] == [{"role": "user", "content": [{"type": "image"}, {"type": "text", "text": "What colour?"}]}]
+    assert row["prompt"] == [
+        {"role": "user", "content": [{"type": "image"}, {"type": "text", "text": "What colour?"}]}
+    ]
     assert len(row["images"]) == 1 and row["images"][0].size == (8, 6)
     assert json.loads(row["sample_json"])["messages"] == sample.messages
     sft = sft_sample_to_row(sample, response_field=None, multimodal=True)
@@ -145,7 +164,9 @@ def test_build_dataset_with_image_field(tmp_path: Path) -> None:
     data_file = tmp_path / "vqa.jsonl"
     rows = [{"question": "What colour?", "answer": "green", "picture": str(img)} for _ in range(2)]
     data_file.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
-    cfg = DataConfig(uri=str(data_file), prompt_field="question", answer_field="answer", image_field="picture")
+    cfg = DataConfig(
+        uri=str(data_file), prompt_field="question", answer_field="answer", image_field="picture"
+    )
     ds = build_dataset(cfg)
     assert "images" in ds.column_names
     assert isinstance(ds.features["images"].feature, ImageFeature)

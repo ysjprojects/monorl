@@ -20,7 +20,6 @@ class FakeLogger:
         type(self).calls.append((dict(metrics), step, prefix))
 
 
-
 FAKE_HOME_FILES: dict[str, str] = {
     "pyproject.toml": '[project]\nname = "nemo-rl"\nversion = "0.7.0"\n',
     "nemo_rl/__init__.py": f'__version__ = "{FAKE_VERSION}"\n',

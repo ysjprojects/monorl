@@ -89,8 +89,14 @@ class SamplingParams:
 class TokenizerManager:
     def detokenize_logprob_tokens(self, token_logprobs_val, token_logprobs_idx, decode_to_text):
         if not decode_to_text:
-            return [(logprob, token_id, None) for logprob, token_id in zip(token_logprobs_val, token_logprobs_idx, strict=True)]
-        return [(logprob, token_id, f"<{token_id}>") for logprob, token_id in zip(token_logprobs_val, token_logprobs_idx, strict=True)]
+            return [
+                (logprob, token_id, None)
+                for logprob, token_id in zip(token_logprobs_val, token_logprobs_idx, strict=True)
+            ]
+        return [
+            (logprob, token_id, f"<{token_id}>")
+            for logprob, token_id in zip(token_logprobs_val, token_logprobs_idx, strict=True)
+        ]
 
 
 # -- sglang.srt.entrypoints.engine ----------------------------------------------------------------
@@ -185,7 +191,9 @@ class Engine:
             batch = [batch]
         sps = sampling_params if isinstance(sampling_params, list) else [sampling_params or {}] * len(batch)
         outputs = [
-            self._output(i, k, sp, prompt_len=len(item) if isinstance(item, list) else 1, return_logprob=return_logprob)
+            self._output(
+                i, k, sp, prompt_len=len(item) if isinstance(item, list) else 1, return_logprob=return_logprob
+            )
             for i, (item, sp) in enumerate(zip(batch, sps, strict=True))
             for k in range(int(sp.get("n", 1) or 1))
         ]
@@ -193,7 +201,9 @@ class Engine:
             return outputs[0]
         return outputs
 
-    def _output(self, i: int, k: int, sp: dict[str, Any], *, prompt_len: int, return_logprob: bool) -> dict[str, Any]:
+    def _output(
+        self, i: int, k: int, sp: dict[str, Any], *, prompt_len: int, return_logprob: bool
+    ) -> dict[str, Any]:
         s = self.script
         seed = sp.get("sampling_seed")
         base = 1000 + (seed if seed is not None else i * 10 + k)
@@ -215,7 +225,9 @@ class Engine:
         }
         if return_logprob:
             meta["input_token_logprobs"] = [(None, 0, None)]
-            meta["output_token_logprobs"] = [(s.logprob_type(-0.5 * (t + 1)), tok, None) for t, tok in enumerate(token_ids)]
+            meta["output_token_logprobs"] = [
+                (s.logprob_type(-0.5 * (t + 1)), tok, None) for t, tok in enumerate(token_ids)
+            ]
             meta["output_token_logprobs_length"] = n_tokens
         out: dict[str, Any] = {"text": f"text-{i}-{k}-{base}", "meta_info": meta}
         if s.include_output_ids:
@@ -239,7 +251,9 @@ class Engine:
         return self.script.update_result
 
     def update_weights_from_disk(self, model_path, load_format=None):
-        self.calls.append(FakeCall("update_weights_from_disk", {"model_path": model_path, "load_format": load_format}))
+        self.calls.append(
+            FakeCall("update_weights_from_disk", {"model_path": model_path, "load_format": load_format})
+        )
         return self.script.disk_result
 
     def release_memory_occupation(self, tags=None):
@@ -252,7 +266,9 @@ class Engine:
 
     def flush_cache(self):
         self.calls.append(FakeCall("flush_cache", {}))
-        return types.SimpleNamespace(success=self.script.flush_success, message="" if self.script.flush_success else "busy")
+        return types.SimpleNamespace(
+            success=self.script.flush_success, message="" if self.script.flush_success else "busy"
+        )
 
     def shutdown(self):
         self.calls.append(FakeCall("shutdown", {}))

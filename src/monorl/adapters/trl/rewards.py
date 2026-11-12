@@ -89,7 +89,11 @@ class MonorlRewardFunc:
             if any(turn.reward != 0.0 for turn in traj.turns):
                 breakdown["env"] = env_return
             total += env_return
-            if algo.overlong_penalty > 0 and traj.turns and traj.turns[-1].completion.finish_reason == "length":
+            if (
+                algo.overlong_penalty > 0
+                and traj.turns
+                and traj.turns[-1].completion.finish_reason == "length"
+            ):
                 total -= algo.overlong_penalty
                 breakdown["overlong_penalty"] = -algo.overlong_penalty
             traj.reward = total
@@ -115,7 +119,11 @@ class MonorlRewardFunc:
         kwargs: dict[str, Any],
     ) -> list[Trajectory]:
         ready = kwargs.get(TRAJECTORY_FIELD)
-        if isinstance(ready, list) and len(ready) == len(prompts) and all(isinstance(t, Trajectory) for t in ready):
+        if (
+            isinstance(ready, list)
+            and len(ready) == len(prompts)
+            and all(isinstance(t, Trajectory) for t in ready)
+        ):
             return list(ready)
         step = getattr(kwargs.get("trainer_state"), "global_step", 0)
         rows = _rows_from_columns(kwargs, len(prompts))
@@ -125,8 +133,10 @@ class MonorlRewardFunc:
             ids = [int(t) for t in completion_ids[i]] if completion_ids is not None else []
             text = completion_text(completion)
             finished = bool(ids) and ids[-1] in self.eos_token_ids
-            prompt_ids = chat_prompt_ids(self.tokenizer, prompt) if _is_chat(prompt) else list(
-                self.tokenizer(str(prompt), add_special_tokens=False)["input_ids"]
+            prompt_ids = (
+                chat_prompt_ids(self.tokenizer, prompt)
+                if _is_chat(prompt)
+                else list(self.tokenizer(str(prompt), add_special_tokens=False)["input_ids"])
             )
             comp = Completion(
                 text=text,

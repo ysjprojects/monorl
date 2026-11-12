@@ -13,7 +13,10 @@ from monorl.rollout.hf_engine import HFRolloutEngine, _FinishRecorder, chat_prom
 
 CHATS = [
     [{"role": "user", "content": "Say hello."}],
-    [{"role": "system", "content": "You are terse."}, {"role": "user", "content": "What is 2+2? Explain briefly."}],
+    [
+        {"role": "system", "content": "You are terse."},
+        {"role": "user", "content": "What is 2+2? Explain briefly."},
+    ],
 ]
 
 
@@ -93,7 +96,9 @@ def test_raw_token_prompt_continues_exactly(engine: HFRolloutEngine) -> None:
     (first,) = engine.generate(CHATS[1:], greedy)[0]
     assert len(first.token_ids) >= 4
     prefix = first.prompt_token_ids + first.token_ids[:3]
-    (cont,) = engine.generate([prefix], SamplingParams(n=1, max_new_tokens=len(first.token_ids) - 3, temperature=0.0))[0]
+    (cont,) = engine.generate(
+        [prefix], SamplingParams(n=1, max_new_tokens=len(first.token_ids) - 3, temperature=0.0)
+    )[0]
     assert cont.prompt_token_ids == prefix
     assert cont.token_ids == first.token_ids[3:]
 
@@ -109,9 +114,7 @@ def test_stop_string_sets_finish_reason(engine: HFRolloutEngine) -> None:
     (full,) = engine.generate(CHATS[:1], sampled)[0]
     assert full.finish_reason == "length" and len(full.token_ids) == 8
     # Stop on the text of the first few generated tokens: the same seed must now end early with "stop".
-    stop_text = next(
-        t for k in range(1, 7) if (t := engine.tokenizer.decode(full.token_ids[:k])).strip()
-    )
+    stop_text = next(t for k in range(1, 7) if (t := engine.tokenizer.decode(full.token_ids[:k])).strip())
     (stopped,) = engine.generate(
         CHATS[:1], SamplingParams(n=1, max_new_tokens=8, temperature=1.0, seed=11, stop=[stop_text])
     )[0]
@@ -132,7 +135,16 @@ def test_finish_recorder_eos_and_length() -> None:
 
 
 def test_sampling_knobs_accepted(engine: HFRolloutEngine) -> None:
-    params = SamplingParams(n=2, max_new_tokens=4, temperature=0.8, top_p=0.9, top_k=50, min_p=0.05, repetition_penalty=1.2, seed=5)
+    params = SamplingParams(
+        n=2,
+        max_new_tokens=4,
+        temperature=0.8,
+        top_p=0.9,
+        top_k=50,
+        min_p=0.05,
+        repetition_penalty=1.2,
+        seed=5,
+    )
     out = engine.generate(CHATS, params)
     assert all(len(g) == 2 for g in out)
     assert all(len(c.logprobs) == len(c.token_ids) for g in out for c in g)
@@ -143,7 +155,9 @@ def _logits(engine: HFRolloutEngine, ids: list[int]) -> torch.Tensor:
         return engine.model(input_ids=torch.tensor([ids])).logits.float().clone()
 
 
-def test_update_weights_and_load_from_path(tiny_config: RunConfig, tiny_model_dir: Path, tmp_path: Path) -> None:
+def test_update_weights_and_load_from_path(
+    tiny_config: RunConfig, tiny_model_dir: Path, tmp_path: Path
+) -> None:
     eng = HFRolloutEngine(tiny_config)
     probe = chat_prompt_ids(eng.tokenizer, CHATS[0])
     before = _logits(eng, probe)
@@ -194,7 +208,9 @@ def test_smollm2_generates_sensible_text(smol_model_id: str) -> None:
 def test_top_k_minus_one_disables_truncation(engine: HFRolloutEngine) -> None:
     """transformers backfills ``top_k=None`` with 50; the engine must pass 0 so sampling is
     full-vocabulary and matches the full-softmax logprobs it returns."""
-    gc = engine._generation_config(SamplingParams(n=1, max_new_tokens=1, temperature=1.0, top_k=-1, min_p=0.0), 1)
+    gc = engine._generation_config(
+        SamplingParams(n=1, max_new_tokens=1, temperature=1.0, top_k=-1, min_p=0.0), 1
+    )
     effective, _ = engine.model._prepare_generation_config(gc)
     assert effective.top_k == 0
     assert effective.min_p == 0.0

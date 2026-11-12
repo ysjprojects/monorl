@@ -44,21 +44,30 @@ class FakeServer:
             for i, (ids, sp) in enumerate(zip(body["input_ids"], body["sampling_params"], strict=True)):
                 for k in range(sp.get("n", 1)):
                     toks = [500 + i * 10 + k, 501]
-                    meta: dict[str, Any] = {"id": f"r{i}{k}", "finish_reason": self.finish, "prompt_tokens": len(ids)}
+                    meta: dict[str, Any] = {
+                        "id": f"r{i}{k}",
+                        "finish_reason": self.finish,
+                        "prompt_tokens": len(ids),
+                    }
                     if body.get("return_logprob"):
                         meta["output_token_logprobs"] = [[-0.1, toks[0], None], [-0.2, toks[1], None]]
                     outs.append({"text": f"t{i}{k}", "output_ids": toks, "meta_info": meta})
             return httpx.Response(200, json=outs)
         if path == "/update_weights_from_tensor":
             ok = self.update_ok
-            return httpx.Response(200 if ok else 400, json={"success": ok, "message": "Success." if ok else "bad tensor"})
+            return httpx.Response(
+                200 if ok else 400, json={"success": ok, "message": "Success." if ok else "bad tensor"}
+            )
         if path == "/update_weights_from_disk":
             ok = self.disk_ok
             return httpx.Response(
-                200 if ok else 400, json={"success": ok, "message": "ok" if ok else "missing", "num_paused_requests": 0}
+                200 if ok else 400,
+                json={"success": ok, "message": "ok" if ok else "missing", "num_paused_requests": 0},
             )
         if path == "/flush_cache":
-            return httpx.Response(200 if self.flush_ok else 400, text="Cache flushed." if self.flush_ok else "busy")
+            return httpx.Response(
+                200 if self.flush_ok else 400, text="Cache flushed." if self.flush_ok else "busy"
+            )
         if path in ("/release_memory_occupation", "/resume_memory_occupation"):
             return httpx.Response(200, json=None)
         return httpx.Response(404, text=f"no route {path}")
@@ -94,24 +103,29 @@ def test_generate_request_body_chat_and_tokens(client, server):
     method, path, body = server.requests[-1]
     assert (method, path) == ("POST", "/generate")
     tok = client.tokenizer
-    chat_ids = tok(tok.apply_chat_template(messages, add_generation_prompt=True, tokenize=False), add_special_tokens=False)[
-        "input_ids"
-    ]
+    chat_ids = tok(
+        tok.apply_chat_template(messages, add_generation_prompt=True, tokenize=False),
+        add_special_tokens=False,
+    )["input_ids"]
     assert body["input_ids"] == [chat_ids, [1, 2, 3]]
     assert body["return_logprob"] is True and body["logprob_start_len"] == -1
-    assert body["sampling_params"] == [
-        {
-            "n": 2,
-            "max_new_tokens": 5,
-            "temperature": 0.5,
-            "top_p": 1.0,
-            "top_k": 10,
-            "min_p": 0.0,
-            "repetition_penalty": 1.0,
-            "skip_special_tokens": True,
-            "stop": ["x"],
-        }
-    ] * 2
+    assert (
+        body["sampling_params"]
+        == [
+            {
+                "n": 2,
+                "max_new_tokens": 5,
+                "temperature": 0.5,
+                "top_p": 1.0,
+                "top_k": 10,
+                "min_p": 0.0,
+                "repetition_penalty": 1.0,
+                "skip_special_tokens": True,
+                "stop": ["x"],
+            }
+        ]
+        * 2
+    )
     assert [len(g) for g in groups] == [2, 2]
     assert groups[0][0].prompt_token_ids == chat_ids and groups[1][1].prompt_token_ids == [1, 2, 3]
     assert groups[1][1].text == "t11" and groups[1][1].token_ids == [511, 501]

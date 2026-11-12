@@ -46,7 +46,14 @@ def _register(pkg: SyntheticPackage, *patches: Patch, distribution: str | None =
 
 def test_replace_module_function(synthetic_package: SyntheticPackage) -> None:
     pkg = synthetic_package
-    _register(pkg, Patch(id="p.greet", target=f"{pkg.name}.greet", build=lambda o: (lambda name, punctuation="!": "hi " + name)))
+    _register(
+        pkg,
+        Patch(
+            id="p.greet",
+            target=f"{pkg.name}.greet",
+            build=lambda o: lambda name, punctuation="!": "hi " + name,
+        ),
+    )
     report = apply(pkg.name)
     assert isinstance(report, ApplyReport)
     assert report.applied == ["p.greet"] and report.ok
@@ -65,7 +72,12 @@ def test_wrap_module_function_receives_original(synthetic_package: SyntheticPack
 
 def test_wrap_sets_wrapped_when_build_does_not(synthetic_package: SyntheticPackage) -> None:
     pkg = synthetic_package
-    _register(pkg, Patch(id="p.wrap", target=f"{pkg.name}.farewell", mode="wrap", build=lambda o: (lambda n: o(n).upper())))
+    _register(
+        pkg,
+        Patch(
+            id="p.wrap", target=f"{pkg.name}.farewell", mode="wrap", build=lambda o: lambda n: o(n).upper()
+        ),
+    )
     apply(pkg.name)
     assert pkg.module.farewell("x") == "BYE X"
     assert pkg.module.farewell.__wrapped__.__name__ == "farewell"
@@ -106,13 +118,24 @@ def test_add_refuses_existing_unless_overwrite(synthetic_package: SyntheticPacka
     pkg = synthetic_package
     _register(
         pkg,
-        Patch(id="p.add.clash", target=f"{pkg.name}.greet", mode="add", build=lambda o: (lambda n: "x")),
-        Patch(id="p.add.force", target=f"{pkg.name}.farewell", mode="add", overwrite=True, build=lambda o: (lambda n: "y")),
+        Patch(id="p.add.clash", target=f"{pkg.name}.greet", mode="add", build=lambda o: lambda n: "x"),
+        Patch(
+            id="p.add.force",
+            target=f"{pkg.name}.farewell",
+            mode="add",
+            overwrite=True,
+            build=lambda o: lambda n: "y",
+        ),
     )
     report = apply(pkg.name)
     assert report.applied == ["p.add.force"]
-    (pid, err), = report.failed
-    assert pid == "p.add.clash" and "already exists" in err and f"{pkg.name}.greet" in err and "p.add.clash" in err
+    ((pid, err),) = report.failed
+    assert (
+        pid == "p.add.clash"
+        and "already exists" in err
+        and f"{pkg.name}.greet" in err
+        and "p.add.clash" in err
+    )
     assert pkg.module.farewell("a") == "y"
     revert(pkg.name)
     assert pkg.module.farewell("a") == "bye a"
@@ -130,8 +153,18 @@ def test_replace_and_wrap_class_methods(synthetic_package: SyntheticPackage) -> 
     _register(
         pkg,
         Patch(id="p.run", target=f"{pkg.name}.Engine.run", mode="wrap", build=wrap_run),
-        Patch(id="p.stop", target=f"{pkg.name}.Engine.stop", mode="replace", build=lambda o: (lambda self: "halted")),
-        Patch(id="p.extra", target=f"{pkg.name}.Engine.extra", mode="add", build=lambda o: (lambda self: self.factor * 10)),
+        Patch(
+            id="p.stop",
+            target=f"{pkg.name}.Engine.stop",
+            mode="replace",
+            build=lambda o: lambda self: "halted",
+        ),
+        Patch(
+            id="p.extra",
+            target=f"{pkg.name}.Engine.extra",
+            mode="add",
+            build=lambda o: lambda self: self.factor * 10,
+        ),
     )
     report = apply(pkg.name)
     assert sorted(report.applied) == ["p.extra", "p.run", "p.stop"]
@@ -143,9 +176,13 @@ def test_replace_and_wrap_class_methods(synthetic_package: SyntheticPackage) -> 
     assert eng.run(2) == 6 and eng.stop() == "stopped" and not hasattr(eng, "extra")
 
 
-def test_replace_inherited_method_and_revert_restores_inheritance(synthetic_package: SyntheticPackage) -> None:
+def test_replace_inherited_method_and_revert_restores_inheritance(
+    synthetic_package: SyntheticPackage,
+) -> None:
     pkg = synthetic_package
-    _register(pkg, Patch(id="p.inh", target=f"{pkg.name}.Engine.inherited", build=lambda o: (lambda self: "override")))
+    _register(
+        pkg, Patch(id="p.inh", target=f"{pkg.name}.Engine.inherited", build=lambda o: lambda self: "override")
+    )
     apply(pkg.name)
     assert pkg.module.Engine().inherited() == "override"
     assert "inherited" in vars(pkg.module.Engine)
@@ -177,7 +214,10 @@ def test_classmethod_and_staticmethod_targets(synthetic_package: SyntheticPackag
 
 def test_submodule_target_resolution(synthetic_package: SyntheticPackage) -> None:
     pkg = synthetic_package
-    _register(pkg, Patch(id="p.helper", target=f"{pkg.name}.sub.helper", build=lambda o: (lambda a, b=1: o(a, b) * 100)))
+    _register(
+        pkg,
+        Patch(id="p.helper", target=f"{pkg.name}.sub.helper", build=lambda o: lambda a, b=1: o(a, b) * 100),
+    )
     assert apply(pkg.name).applied == ["p.helper"]
     sub = importlib.import_module(f"{pkg.name}.sub")
     assert sub.helper(1, 2) == 300
@@ -187,7 +227,9 @@ def test_submodule_target_resolution(synthetic_package: SyntheticPackage) -> Non
 
 def test_resolve_target_errors_name_patch_and_target(synthetic_package: SyntheticPackage) -> None:
     pkg = synthetic_package
-    with pytest.raises(PatchError, match=rf"patch 'x'.*{pkg.name}\.Engine\.nope\.deeper.*no attribute 'nope'"):
+    with pytest.raises(
+        PatchError, match=rf"patch 'x'.*{pkg.name}\.Engine\.nope\.deeper.*no attribute 'nope'"
+    ):
         resolve_target(f"{pkg.name}.Engine.nope.deeper", patch_id="x")
     with pytest.raises(PatchError, match="no importable module prefix"):
         resolve_target("definitely_not_a_module_xyz.attr")
@@ -199,7 +241,7 @@ def test_missing_target_is_failed_with_clear_message(synthetic_package: Syntheti
     pkg = synthetic_package
     _register(pkg, Patch(id="p.missing", target=f"{pkg.name}.Engine.nothing_here", build=lambda o: o))
     report = apply(pkg.name)
-    (pid, err), = report.failed
+    ((pid, err),) = report.failed
     assert pid == "p.missing"
     assert "p.missing" in err and f"{pkg.name}.Engine.nothing_here" in err and "does not exist" in err
 
@@ -212,7 +254,9 @@ def test_build_exception_is_failed_not_raised(synthetic_package: SyntheticPackag
 
     _register(pkg, Patch(id="p.boom", target=f"{pkg.name}.greet", build=boom))
     report = apply(pkg.name)
-    assert report.failed == [("p.boom", f"patch 'p.boom': build() raised for target {pkg.name}.greet: RuntimeError: kaboom")]
+    assert report.failed == [
+        ("p.boom", f"patch 'p.boom': build() raised for target {pkg.name}.greet: RuntimeError: kaboom")
+    ]
     assert pkg.module.greet("a") == "hello a!"
 
 
@@ -224,8 +268,8 @@ def test_version_gating(synthetic_package: SyntheticPackage) -> None:
     _register(
         pkg,
         Patch(id="p.old", target=f"{pkg.name}.greet", versions=">=2.0", build=lambda o: o),
-        Patch(id="p.ok", target=f"{pkg.name}.farewell", versions=">=1.0,<2", build=lambda o: (lambda n: "ok")),
-        Patch(id="p.any", target=f"{pkg.name}.Engine.stop", build=lambda o: (lambda self: "any")),
+        Patch(id="p.ok", target=f"{pkg.name}.farewell", versions=">=1.0,<2", build=lambda o: lambda n: "ok"),
+        Patch(id="p.any", target=f"{pkg.name}.Engine.stop", build=lambda o: lambda self: "any"),
     )
     report = apply(pkg.name)
     assert sorted(report.applied) == ["p.any", "p.ok"]
@@ -258,15 +302,24 @@ def test_verify_failure_skips(synthetic_package: SyntheticPackage) -> None:
     pkg = synthetic_package
     _register(
         pkg,
-        Patch(id="p.v.no", target=f"{pkg.name}.greet", verify=lambda o: False, build=lambda o: (lambda n: "x")),
-        Patch(id="p.v.yes", target=f"{pkg.name}.farewell", verify=lambda o: o("a") == "bye a", build=lambda o: (lambda n: "y")),
+        Patch(id="p.v.no", target=f"{pkg.name}.greet", verify=lambda o: False, build=lambda o: lambda n: "x"),
+        Patch(
+            id="p.v.yes",
+            target=f"{pkg.name}.farewell",
+            verify=lambda o: o("a") == "bye a",
+            build=lambda o: lambda n: "y",
+        ),
     )
     report = apply(pkg.name)
     assert report.applied == ["p.v.yes"]
     assert report.skipped == [("p.v.no", "verify() returned False")]
     assert pkg.module.greet("a") == "hello a!"
     s = {x.id: x for x in status(pkg.name)}
-    assert s["p.v.no"].applicable and s["p.v.no"].verified is False and s["p.v.no"].reason == "verify() returned False"
+    assert (
+        s["p.v.no"].applicable
+        and s["p.v.no"].verified is False
+        and s["p.v.no"].reason == "verify() returned False"
+    )
 
 
 def test_verify_raising_is_failed(synthetic_package: SyntheticPackage) -> None:
@@ -277,7 +330,7 @@ def test_verify_raising_is_failed(synthetic_package: SyntheticPackage) -> None:
 
     _register(pkg, Patch(id="p.v.raise", target=f"{pkg.name}.greet", verify=bad_verify, build=lambda o: o))
     report = apply(pkg.name)
-    (pid, err), = report.failed
+    ((pid, err),) = report.failed
     assert pid == "p.v.raise" and "verify() raised" in err and "inspect failed" in err
 
 
@@ -285,13 +338,28 @@ def test_expected_signature_gate(synthetic_package: SyntheticPackage) -> None:
     pkg = synthetic_package
     _register(
         pkg,
-        Patch(id="p.sig.ok", target=f"{pkg.name}.greet", expected_signature="(name, punctuation='!')", build=lambda o: (lambda *a: "ok")),
-        Patch(id="p.sig.bad", target=f"{pkg.name}.farewell", expected_signature="(name, extra)", build=lambda o: (lambda *a: "bad")),
-        Patch(id="p.sig.method", target=f"{pkg.name}.Engine.run", expected_signature="(self, x)", build=lambda o: (lambda self, x: 0)),
+        Patch(
+            id="p.sig.ok",
+            target=f"{pkg.name}.greet",
+            expected_signature="(name, punctuation='!')",
+            build=lambda o: lambda *a: "ok",
+        ),
+        Patch(
+            id="p.sig.bad",
+            target=f"{pkg.name}.farewell",
+            expected_signature="(name, extra)",
+            build=lambda o: lambda *a: "bad",
+        ),
+        Patch(
+            id="p.sig.method",
+            target=f"{pkg.name}.Engine.run",
+            expected_signature="(self, x)",
+            build=lambda o: lambda self, x: 0,
+        ),
     )
     report = apply(pkg.name)
     assert sorted(report.applied) == ["p.sig.method", "p.sig.ok"]
-    (pid, reason), = report.skipped
+    ((pid, reason),) = report.skipped
     assert pid == "p.sig.bad"
     assert reason == "signature mismatch: expected '(name, extra)', found '(name)'"
 
@@ -313,7 +381,10 @@ def test_apply_is_idempotent_and_force_reapplies(synthetic_package: SyntheticPac
 
     forced = apply(pkg.name, force=True)
     assert forced.applied == ["p.idem"]
-    assert calls == [original, original]  # force re-builds from the pristine original, never from the patched one
+    assert calls == [
+        original,
+        original,
+    ]  # force re-builds from the pristine original, never from the patched one
     assert pkg.module.greet("a") == "built2"
     assert revert(pkg.name) == ["p.idem"]
     assert pkg.module.greet is original
@@ -323,8 +394,13 @@ def test_force_bypasses_version_and_verify_gates(synthetic_package: SyntheticPac
     pkg = synthetic_package
     _register(
         pkg,
-        Patch(id="p.f.ver", target=f"{pkg.name}.greet", versions=">=9", build=lambda o: (lambda n: "forced")),
-        Patch(id="p.f.verify", target=f"{pkg.name}.farewell", verify=lambda o: False, build=lambda o: (lambda n: "forced")),
+        Patch(id="p.f.ver", target=f"{pkg.name}.greet", versions=">=9", build=lambda o: lambda n: "forced"),
+        Patch(
+            id="p.f.verify",
+            target=f"{pkg.name}.farewell",
+            verify=lambda o: False,
+            build=lambda o: lambda n: "forced",
+        ),
         Patch(id="p.f.missing", target=f"{pkg.name}.nothing", build=lambda o: o),
     )
     assert apply(pkg.name).applied == []
@@ -339,9 +415,9 @@ def test_revert_restores_originals_in_reverse_order(synthetic_package: Synthetic
     original_greet, original_run = pkg.module.greet, vars(pkg.module.Engine)["run"]
     _register(
         pkg,
-        Patch(id="p.a", target=f"{pkg.name}.greet", build=lambda o: (lambda n: "a")),
-        Patch(id="p.b", target=f"{pkg.name}.Engine.run", build=lambda o: (lambda self, x: "b")),
-        Patch(id="p.c", target=f"{pkg.name}.Engine.added", mode="add", build=lambda o: (lambda self: "c")),
+        Patch(id="p.a", target=f"{pkg.name}.greet", build=lambda o: lambda n: "a"),
+        Patch(id="p.b", target=f"{pkg.name}.Engine.run", build=lambda o: lambda self, x: "b"),
+        Patch(id="p.c", target=f"{pkg.name}.Engine.added", mode="add", build=lambda o: lambda self: "c"),
     )
     apply(pkg.name)
     assert is_applied("p.a") and is_applied("p.b", pkg.name)
@@ -356,7 +432,7 @@ def test_revert_restores_originals_in_reverse_order(synthetic_package: Synthetic
 def test_target_modified_after_apply_is_reported_and_reapplied(synthetic_package: SyntheticPackage) -> None:
     pkg = synthetic_package
     original = pkg.module.greet
-    _register(pkg, Patch(id="p.mod", target=f"{pkg.name}.greet", build=lambda o: (lambda n: "patched")))
+    _register(pkg, Patch(id="p.mod", target=f"{pkg.name}.greet", build=lambda o: lambda n: "patched"))
     apply(pkg.name)
     pkg.module.greet = lambda n: "someone else"  # third party clobbers our patch
     (s,) = status(pkg.name)
@@ -377,7 +453,12 @@ def test_status_for_unregistered_framework_is_empty_and_apply_raises() -> None:
 
 
 def test_status_not_installed_framework() -> None:
-    register_patchset(PatchSet(framework="fakefw_missing", patches=[Patch(id="p.x", target="fakefw_missing.f", build=lambda o: o)]))
+    register_patchset(
+        PatchSet(
+            framework="fakefw_missing",
+            patches=[Patch(id="p.x", target="fakefw_missing.f", build=lambda o: o)],
+        )
+    )
     (s,) = status("fakefw_missing")
     assert isinstance(s, PatchStatus)
     assert s.installed_version is None and s.applicable is False and s.verified is None
@@ -390,7 +471,14 @@ def test_status_fields_and_resolve_false(synthetic_package: SyntheticPackage) ->
     pkg = synthetic_package
     _register(
         pkg,
-        Patch(id="p.s1", target=f"{pkg.name}.greet", versions=">=1", mode="wrap", description="greeting", build=_wrap_build),
+        Patch(
+            id="p.s1",
+            target=f"{pkg.name}.greet",
+            versions=">=1",
+            mode="wrap",
+            description="greeting",
+            build=_wrap_build,
+        ),
         Patch(id="p.s2", target=f"{pkg.name}.Engine.missing", build=lambda o: o),
     )
     s1, s2 = status(pkg.name, resolve=False)
@@ -419,14 +507,24 @@ def test_status_fields_and_resolve_false(synthetic_package: SyntheticPackage) ->
 def test_status_all_and_manifest(synthetic_package: SyntheticPackage) -> None:
     pkg = synthetic_package
     _register(pkg, Patch(id="p.m", target=f"{pkg.name}.greet", description="d", build=lambda o: o))
-    register_patchset(PatchSet(framework="fakefw_other", patches=[Patch(id="p.o", target="fakefw_other.x", build=lambda o: o)], distribution="fake-fw-other"))
+    register_patchset(
+        PatchSet(
+            framework="fakefw_other",
+            patches=[Patch(id="p.o", target="fakefw_other.x", build=lambda o: o)],
+            distribution="fake-fw-other",
+        )
+    )
     assert {pkg.name, "fakefw_other"} <= set(registered_frameworks())
     everything = status_all()
     assert set(everything) >= {pkg.name, "fakefw_other"}
     apply(pkg.name)
     m = manifest()
     entry = m[pkg.name]
-    assert entry["installed_version"] == "1.2.0" and entry["imported"] is True and entry["distribution"] == pkg.name
+    assert (
+        entry["installed_version"] == "1.2.0"
+        and entry["imported"] is True
+        and entry["distribution"] == pkg.name
+    )
     assert entry["patches"] == [
         {
             "id": "p.m",
@@ -441,21 +539,33 @@ def test_status_all_and_manifest(synthetic_package: SyntheticPackage) -> None:
         }
     ]
     other = m["fakefw_other"]
-    assert other["installed_version"] is None and other["distribution"] == "fake-fw-other" and other["patches"][0]["applied"] is False
+    assert (
+        other["installed_version"] is None
+        and other["distribution"] == "fake-fw-other"
+        and other["patches"][0]["applied"] is False
+    )
     unregister_patchset("fakefw_other")
     assert "fakefw_other" not in registered_frameworks()
 
 
-def test_reregistration_replaces_overlapping_set_and_rejects_duplicate_ids(synthetic_package: SyntheticPackage) -> None:
+def test_reregistration_replaces_overlapping_set_and_rejects_duplicate_ids(
+    synthetic_package: SyntheticPackage,
+) -> None:
     pkg = synthetic_package
-    first = _register(pkg, Patch(id="p.one", target=f"{pkg.name}.greet", build=lambda o: (lambda n: "v1")))
-    again = _register(pkg, Patch(id="p.one", target=f"{pkg.name}.greet", build=lambda o: (lambda n: "v2")))
-    extra = _register(pkg, Patch(id="p.two", target=f"{pkg.name}.farewell", build=lambda o: (lambda n: "x")))
+    first = _register(pkg, Patch(id="p.one", target=f"{pkg.name}.greet", build=lambda o: lambda n: "v1"))
+    again = _register(pkg, Patch(id="p.one", target=f"{pkg.name}.greet", build=lambda o: lambda n: "v2"))
+    extra = _register(pkg, Patch(id="p.two", target=f"{pkg.name}.farewell", build=lambda o: lambda n: "x"))
     from monorl.patching import get_patchsets
 
     assert get_patchsets(pkg.name) == [again, extra] and first not in get_patchsets(pkg.name)
     with pytest.raises(PatchError, match="duplicate patch id"):
-        PatchSet(framework=pkg.name, patches=[Patch(id="d", target="a.b", build=lambda o: o), Patch(id="d", target="a.c", build=lambda o: o)])
+        PatchSet(
+            framework=pkg.name,
+            patches=[
+                Patch(id="d", target="a.b", build=lambda o: o),
+                Patch(id="d", target="a.c", build=lambda o: o),
+            ],
+        )
     with pytest.raises(PatchError, match="declares framework"):
         PatchSet(framework="x", patches=[Patch(id="d", target="a.b", framework="y", build=lambda o: o)])
     assert apply(pkg.name).applied == ["p.one", "p.two"]
@@ -486,7 +596,11 @@ def test_decorator_form(synthetic_package: SyntheticPackage) -> None:
 
 def test_distribution_fallback_to_dunder_version(synthetic_package: SyntheticPackage) -> None:
     pkg = synthetic_package
-    ps = _register(pkg, Patch(id="p.d", target=f"{pkg.name}.greet", build=lambda o: o), distribution="not-a-real-distribution-name")
+    ps = _register(
+        pkg,
+        Patch(id="p.d", target=f"{pkg.name}.greet", build=lambda o: o),
+        distribution="not-a-real-distribution-name",
+    )
     assert ps.installed_version() == "1.2.0"
     assert installed_version(pkg.name) == "1.2.0"
 
@@ -500,7 +614,7 @@ def test_detect_version_prefers_metadata_without_import() -> None:
 
 def test_disable_env_var(synthetic_package: SyntheticPackage, monkeypatch: pytest.MonkeyPatch) -> None:
     pkg = synthetic_package
-    _register(pkg, Patch(id="p.dis", target=f"{pkg.name}.greet", build=lambda o: (lambda n: "patched")))
+    _register(pkg, Patch(id="p.dis", target=f"{pkg.name}.greet", build=lambda o: lambda n: "patched"))
     monkeypatch.setenv("MONORL_DISABLE_PATCHES", "1")
     report = apply(pkg.name)
     assert report.applied == [] and report.skipped == [("p.dis", "disabled by MONORL_DISABLE_PATCHES")]

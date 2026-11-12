@@ -56,7 +56,9 @@ def _make_checkpoint(config: RunConfig, *, sync_dir: str | None = None, **kw: An
     return CheckpointWeightSync(checkpoint_sync_dir(config, sync_dir))
 
 
-def _make_broadcast(config: RunConfig, *, spec: Any = None, rank: int = 0, device: Any = None, **kw: Any) -> Any:
+def _make_broadcast(
+    config: RunConfig, *, spec: Any = None, rank: int = 0, device: Any = None, **kw: Any
+) -> Any:
     from monorl.core.errors import WeightSyncError
     from monorl.distributed.weight_sync import BroadcastWeightSync
 

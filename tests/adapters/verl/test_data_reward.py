@@ -30,7 +30,12 @@ def _load_module(path: Path):
 
 
 def test_sample_to_row_layout():
-    sample = Sample(id="s1", messages=[{"role": "system", "content": "sys"}, {"role": "user", "content": "q"}], reference={"a": 1}, metadata={"k": "v"})
+    sample = Sample(
+        id="s1",
+        messages=[{"role": "system", "content": "sys"}, {"role": "user", "content": "q"}],
+        reference={"a": 1},
+        metadata={"k": "v"},
+    )
     row = sample_to_row(sample, 3, agent_name="tool_agent")
     assert tuple(row) == PARQUET_COLUMNS
     assert row["prompt"] == [{"role": "system", "content": "sys"}, {"role": "user", "content": "q"}]
@@ -50,7 +55,13 @@ def test_reference_roundtrip(ref):
 
 def test_export_datasets_columns(make_config, tmp_path: Path, data_file: Path):
     cfg = make_config(
-        data={"uri": str(data_file), "prompt_field": "prompt", "answer_field": "answer", "eval_uri": str(data_file), "shuffle": False}
+        data={
+            "uri": str(data_file),
+            "prompt_field": "prompt",
+            "answer_field": "answer",
+            "eval_uri": str(data_file),
+            "shuffle": False,
+        }
     )
     paths = export_datasets(cfg, tmp_path)
     assert set(paths) == {"train", "val"}
@@ -70,7 +81,14 @@ def test_write_parquet_rejects_empty(tmp_path: Path):
 
 
 def test_trajectory_from_verl_rebuilds_sample():
-    extra = {"sample_id": "s9", "index": 2, "messages_json": json.dumps([{"role": "user", "content": "q"}]), "metadata_json": "{}", "reference_encoding": "text", "num_turns": 2}
+    extra = {
+        "sample_id": "s9",
+        "index": 2,
+        "messages_json": json.dumps([{"role": "user", "content": "q"}]),
+        "metadata_json": "{}",
+        "reference_encoding": "text",
+        "num_turns": 2,
+    }
     traj = trajectory_from_verl("resp", "4", extra)
     assert traj.sample.id == "s9"
     assert traj.sample.reference == "4"
@@ -81,14 +99,25 @@ def test_trajectory_from_verl_rebuilds_sample():
 
 
 def test_generated_reward_module(make_config, tmp_path: Path):
-    cfg = make_config(rewards=[{"type": "exact_match", "weight": 2.0}, {"type": "length", "weight": 0.0, "params": {"name": "len"}}])
+    cfg = make_config(
+        rewards=[
+            {"type": "exact_match", "weight": 2.0},
+            {"type": "length", "weight": 0.0, "params": {"name": "len"}},
+        ]
+    )
     path = write_reward_module(cfg, tmp_path, config_path=None)
     assert path == tmp_path / "monorl_reward.py"
     module = _load_module(path)
     assert module.REWARD_SPECS[0]["type"] == "exact_match"
-    extra = sample_to_row(Sample(id="a", messages=[{"role": "user", "content": "2+2?"}], reference="4"), 0)["extra_info"]
-    hit = module.compute_score(data_source="monorl", solution_str="The answer is 4", ground_truth="4", extra_info=extra)
-    miss = module.compute_score(data_source="monorl", solution_str="The answer is 5", ground_truth="4", extra_info=extra)
+    extra = sample_to_row(Sample(id="a", messages=[{"role": "user", "content": "2+2?"}], reference="4"), 0)[
+        "extra_info"
+    ]
+    hit = module.compute_score(
+        data_source="monorl", solution_str="The answer is 4", ground_truth="4", extra_info=extra
+    )
+    miss = module.compute_score(
+        data_source="monorl", solution_str="The answer is 5", ground_truth="4", extra_info=extra
+    )
     assert hit["score"] == pytest.approx(2.0)
     assert hit["reward/exact_match"] == pytest.approx(1.0)
     assert "reward/len" in hit

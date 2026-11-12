@@ -81,7 +81,9 @@ class StdioTransport:
         self.cwd = cwd
         self.env = dict(env) if env else None
         self.timeout_s = float(timeout_s)
-        self.start_timeout_s = float(start_timeout_s) if start_timeout_s is not None else max(self.timeout_s, 30.0)
+        self.start_timeout_s = (
+            float(start_timeout_s) if start_timeout_s is not None else max(self.timeout_s, 30.0)
+        )
         self._lock = threading.Lock()
         self._proc: subprocess.Popen[str] | None = None
         self._lines: queue.Queue[Any] = queue.Queue()
@@ -111,9 +113,16 @@ class StdioTransport:
         self._lines = queue.Queue()
         self.generation += 1
         proc = self._proc
-        threading.Thread(target=self._pump_stdout, args=(proc, self._lines), daemon=True, name="mep-stdout").start()
+        threading.Thread(
+            target=self._pump_stdout, args=(proc, self._lines), daemon=True, name="mep-stdout"
+        ).start()
         threading.Thread(target=self._pump_stderr, args=(proc,), daemon=True, name="mep-stderr").start()
-        log.info("started env process (pid %s, generation %d): %s", proc.pid, self.generation, " ".join(self.command))
+        log.info(
+            "started env process (pid %s, generation %d): %s",
+            proc.pid,
+            self.generation,
+            " ".join(self.command),
+        )
 
     @staticmethod
     def _pump_stdout(proc: subprocess.Popen[str], lines: queue.Queue[Any]) -> None:
@@ -163,7 +172,9 @@ class StdioTransport:
             self._start()
         except EnvironmentError_ as e:
             return EnvironmentError_(f"{reason}; restart failed: {e}")
-        return EnvironmentError_(f"env process {self.command[0]!r} failed: {reason} (exit code {code}); restarted")
+        return EnvironmentError_(
+            f"env process {self.command[0]!r} failed: {reason} (exit code {code}); restarted"
+        )
 
     @property
     def alive(self) -> bool:
@@ -228,7 +239,9 @@ class StdioTransport:
 class HttpTransport:
     """Shared client for one MEP/1 http server; safe to use from many threads."""
 
-    def __init__(self, url: str, *, timeout_s: float = 60.0, headers: Mapping[str, str] | None = None) -> None:
+    def __init__(
+        self, url: str, *, timeout_s: float = 60.0, headers: Mapping[str, str] | None = None
+    ) -> None:
         import httpx
 
         self.url = url.rstrip("/")
@@ -252,7 +265,9 @@ class HttpTransport:
         try:
             payload_out = resp.json()
         except ValueError as e:
-            raise ProtocolError("protocol", f"non-JSON response (HTTP {resp.status_code}): {resp.text[:200]!r}") from e
+            raise ProtocolError(
+                "protocol", f"non-JSON response (HTTP {resp.status_code}): {resp.text[:200]!r}"
+            ) from e
         if resp.status_code >= 400 and not (isinstance(payload_out, dict) and payload_out.get("error")):
             raise ProtocolError("http", f"HTTP {resp.status_code}: {resp.text[:200]}")
         return parse_response(payload_out)
@@ -408,7 +423,9 @@ def slot_source_for(params: Mapping[str, Any]) -> SlotSource:
         if source is None:
             timeout_s = float(params.get("timeout_s", 60.0))
             if transport == "http":
-                source = HttpSlotSource(HttpTransport(str(params["url"]), timeout_s=timeout_s, headers=params.get("headers")))
+                source = HttpSlotSource(
+                    HttpTransport(str(params["url"]), timeout_s=timeout_s, headers=params.get("headers"))
+                )
             else:
                 source = StdioPool(
                     [str(c) for c in params["command"]],
@@ -461,7 +478,9 @@ class RemoteEnv:
         self._episode: _Episode | None = None
 
     @classmethod
-    def from_params(cls, params: Mapping[str, Any], *, max_turns: int | None = None, seed: int | None = None) -> RemoteEnv:
+    def from_params(
+        cls, params: Mapping[str, Any], *, max_turns: int | None = None, seed: int | None = None
+    ) -> RemoteEnv:
         return cls(slot_source_for(params), max_turns=max_turns, seed=seed)
 
     @property
@@ -540,7 +559,9 @@ class RemoteEnv:
             self._drop(ep)
 
 
-def make_remote_env(params: Mapping[str, Any], *, max_turns: int | None = None, seed: int | None = None) -> RemoteEnv:
+def make_remote_env(
+    params: Mapping[str, Any], *, max_turns: int | None = None, seed: int | None = None
+) -> RemoteEnv:
     return RemoteEnv.from_params(params, max_turns=max_turns, seed=seed)
 
 

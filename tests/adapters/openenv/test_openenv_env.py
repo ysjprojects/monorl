@@ -34,7 +34,10 @@ def _sample(i: str = "s", **metadata) -> Sample:
 def test_observation_to_text():
     assert observation_to_text({"output": "hi"}) == "hi"
     assert observation_to_text({"a": "x", "b": 1}) == '{"a": "x", "b": 1}'
-    assert observation_to_text({"hint": "higher", "remaining": 2}, "Hint: {hint} ({remaining} left, {missing})") == "Hint: higher (2 left, )"
+    assert (
+        observation_to_text({"hint": "higher", "remaining": 2}, "Hint: {hint} ({remaining} left, {missing})")
+        == "Hint: higher (2 left, )"
+    )
 
 
 def test_parse_json_action():
@@ -69,7 +72,10 @@ def test_provider_registers_and_is_available():
 
 
 def test_in_process_text_episode():
-    env = make_openenv_env({"env_class": "sample_envs.ReverseEnv", "env_kwargs": {"word": "abc"}, "system_prompt": "sys"}, max_turns=3)
+    env = make_openenv_env(
+        {"env_class": "sample_envs.ReverseEnv", "env_kwargs": {"word": "abc"}, "system_prompt": "sys"},
+        max_turns=3,
+    )
     assert isinstance(env, Environment) and isinstance(env, OpenEnvEnv)
     assert env.tools == [] and env.max_turns == 3
     msgs = env.reset(_sample())
@@ -90,13 +96,17 @@ def test_in_process_text_episode():
 
 
 def test_in_process_reset_kwargs_from_params_and_sample():
-    env = make_openenv_env({"env_class": "sample_envs.ReverseEnv", "reset_kwargs": {"word": "xy"}}, max_turns=3)
+    env = make_openenv_env(
+        {"env_class": "sample_envs.ReverseEnv", "reset_kwargs": {"word": "xy"}}, max_turns=3
+    )
     assert env.reset(_sample())[-1]["content"] == "Reverse the word: xy"
     assert env.reset(_sample(reset_kwargs={"word": "pq"}))[-1]["content"] == "Reverse the word: pq"
 
 
 def test_in_process_truncates_at_max_turns():
-    env = make_openenv_env({"env_class": "sample_envs.ReverseEnv", "env_kwargs": {"word": "abc", "attempts": 10}}, max_turns=2)
+    env = make_openenv_env(
+        {"env_class": "sample_envs.ReverseEnv", "env_kwargs": {"word": "abc", "attempts": 10}}, max_turns=2
+    )
     env.reset(_sample())
     assert env.step(_c("no")).done is False
     r = env.step(_c("no"))
@@ -121,7 +131,9 @@ def test_in_process_json_actions_and_invalid_penalty():
     assert bad.messages[0]["role"] == "user" and "Invalid action" in bad.messages[0]["content"]
     assert env.backend.env.state.step_count == 0  # env untouched
     r = env.step(_c('```json\n{"guess": 3}\n```'))
-    assert r.messages == [{"role": "user", "content": "Hint: higher (4 left)"}] and r.reward == pytest.approx(-0.1)
+    assert r.messages == [{"role": "user", "content": "Hint: higher (4 left)"}] and r.reward == pytest.approx(
+        -0.1
+    )
     r = env.step(_c('{"guess": 7}'))
     assert r.done and r.reward == 1.0
 
@@ -142,7 +154,9 @@ def test_bad_action_mode():
 
 
 def test_http_client_episode(reverse_server_url):
-    env = make_openenv_env({"url": reverse_server_url, "reset_kwargs": {"word": "hello"}, "timeout_s": 20}, max_turns=3)
+    env = make_openenv_env(
+        {"url": reverse_server_url, "reset_kwargs": {"word": "hello"}, "timeout_s": 20}, max_turns=3
+    )
     assert isinstance(env.backend, ClientBackend)
     msgs = env.reset(_sample("remote"))
     assert msgs[-1] == {"role": "user", "content": "Reverse the word: hello"}
@@ -158,7 +172,9 @@ def test_http_client_episode(reverse_server_url):
 
 def test_http_concurrent_sessions(reverse_server_url):
     def run(i: int) -> float:
-        env = make_openenv_env({"url": reverse_server_url, "reset_kwargs": {"word": f"w{i}"}, "timeout_s": 20}, max_turns=2)
+        env = make_openenv_env(
+            {"url": reverse_server_url, "reset_kwargs": {"word": f"w{i}"}, "timeout_s": 20}, max_turns=2
+        )
         try:
             assert env.reset(_sample(f"c{i}"))[-1]["content"] == f"Reverse the word: w{i}"
             return env.step(_c(f"{i}w")).reward

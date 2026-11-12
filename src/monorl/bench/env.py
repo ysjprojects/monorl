@@ -105,9 +105,13 @@ class StdioClient:
             try:
                 line = self._lines.get(timeout=self.timeout_s)
             except queue.Empty as e:
-                raise EnvironmentError_(f"env process did not answer {payload.get('op')!r} within {self.timeout_s}s") from e
+                raise EnvironmentError_(
+                    f"env process did not answer {payload.get('op')!r} within {self.timeout_s}s"
+                ) from e
             if line is _EOF:
-                raise EnvironmentError_(f"env process exited (code {self.proc.poll()}) while answering {payload.get('op')!r}")
+                raise EnvironmentError_(
+                    f"env process exited (code {self.proc.poll()}) while answering {payload.get('op')!r}"
+                )
         return parse_response(line)
 
     def close(self) -> None:
@@ -136,13 +140,19 @@ class HttpClient:
         body = dict(payload)
         op = body.pop("op")
         try:
-            resp = self._client.get(f"/{op}") if op in ("spec", "health") else self._client.post(f"/{op}", json=body)
+            resp = (
+                self._client.get(f"/{op}")
+                if op in ("spec", "health")
+                else self._client.post(f"/{op}", json=body)
+            )
         except httpx.HTTPError as e:
             raise EnvironmentError_(f"MEP http request {op} to {self.url} failed: {e}") from e
         try:
             out = resp.json()
         except ValueError as e:
-            raise ProtocolError("protocol", f"non-JSON response (HTTP {resp.status_code}): {resp.text[:200]!r}") from e
+            raise ProtocolError(
+                "protocol", f"non-JSON response (HTTP {resp.status_code}): {resp.text[:200]!r}"
+            ) from e
         if resp.status_code >= 400 and not (isinstance(out, dict) and out.get("error")):
             raise ProtocolError("http", f"HTTP {resp.status_code}: {resp.text[:200]}")
         return parse_response(out)
@@ -243,7 +253,9 @@ class _Tally:
     lock: threading.Lock = field(default_factory=threading.Lock)
 
 
-def run_episode(client: MepClient, sample: Sample, *, turns: int, action: Completion = CANNED_ACTION) -> tuple[float, list[float]]:
+def run_episode(
+    client: MepClient, sample: Sample, *, turns: int, action: Completion = CANNED_ACTION
+) -> tuple[float, list[float]]:
     """reset → step×turns (stops early on ``done``) → close. Returns (reset latency, step latencies)."""
     episode_id = f"bench-{uuid.uuid4().hex[:12]}"
     t0 = time.perf_counter()
@@ -332,7 +344,9 @@ def measure_parallel(
     )
 
 
-def recommend(results: Sequence[EnvParallelResult], spec: EnvSpec, transport: str) -> tuple[int | None, list[str]]:
+def recommend(
+    results: Sequence[EnvParallelResult], spec: EnvSpec, transport: str
+) -> tuple[int | None, list[str]]:
     valid = [r for r in results if r.episodes > 0]
     if not valid:
         return None, ["no episode completed; check the server with `monorl env check`"]
@@ -348,7 +362,9 @@ def recommend(results: Sequence[EnvParallelResult], spec: EnvSpec, transport: st
             f"rollout.extra.max_parallel_episodes={best.parallel}"
         )
     else:
-        notes.append(f"http: set env.params.parallel={best.parallel} and rollout.extra.max_parallel_episodes>={best.parallel}")
+        notes.append(
+            f"http: set env.params.parallel={best.parallel} and rollout.extra.max_parallel_episodes>={best.parallel}"
+        )
     lowest = min(valid, key=lambda r: r.parallel)
     if best is not lowest:
         speedup = best.episodes_per_s / lowest.episodes_per_s if lowest.episodes_per_s else 0.0

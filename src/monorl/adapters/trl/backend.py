@@ -149,7 +149,9 @@ class TRLPipelineBackend:
             from monorl.adapters.unsloth.patches import reconcile_trl_patches
 
             report = reconcile_trl_patches()["trl"] or report
-        reporter.log(f"trl {report.installed_version}: patches applied={report.applied} skipped={report.skipped}")
+        reporter.log(
+            f"trl {report.installed_version}: patches applied={report.applied} skipped={report.skipped}"
+        )
         if report.failed:
             raise ConfigError(f"TRL patches failed: {report.failed}")
 
@@ -159,8 +161,14 @@ class TRLPipelineBackend:
 
             reward_fn = build_reward(config.rewards, config=config)
         eos_ids = model.generation_config.eos_token_id
-        eos_ids = [tokenizer.eos_token_id] if eos_ids is None else ([eos_ids] if isinstance(eos_ids, int) else list(eos_ids))
-        reward_func = MonorlRewardFunc(reward_fn, tokenizer=tokenizer, eos_token_ids=eos_ids, algorithm=config.algorithm)
+        eos_ids = (
+            [tokenizer.eos_token_id]
+            if eos_ids is None
+            else ([eos_ids] if isinstance(eos_ids, int) else list(eos_ids))
+        )
+        reward_func = MonorlRewardFunc(
+            reward_fn, tokenizer=tokenizer, eos_token_ids=eos_ids, algorithm=config.algorithm
+        )
 
         rollout = None
         if config.env.type != "single_turn":
@@ -191,7 +199,13 @@ class TRLPipelineBackend:
         return trainer
 
     def _train(
-        self, trainer: Any, args: Any, tokenizer: Any, callback: ReporterCallback, run_dir: Path, reporter: RunReporter
+        self,
+        trainer: Any,
+        args: Any,
+        tokenizer: Any,
+        callback: ReporterCallback,
+        run_dir: Path,
+        reporter: RunReporter,
     ) -> RunResult:
         from transformers import PrinterCallback
         from transformers.trainer_utils import get_last_checkpoint
@@ -217,7 +231,9 @@ class TRLPipelineBackend:
                 reporter.log(traceback.format_exc())
         step = int(trainer.state.global_step)
         link_checkpoint(Path(args.output_dir), step)
-        message = {"succeeded": f"finished {step} steps", "cancelled": f"cancelled after step {step}"}.get(state, error)
+        message = {"succeeded": f"finished {step} steps", "cancelled": f"cancelled after step {step}"}.get(
+            state, error
+        )
         reporter.set_status(state, message, step=step)
         return RunResult(
             state=state,
@@ -239,10 +255,14 @@ class TRLPipelineBackend:
             if reward_func.num_batches == seen["batches"]:
                 return
             seen["batches"] = reward_func.num_batches
-            trajectories = trajectories_with_advantages(reward_func.last_batch, list(trainer._logs["advantages"]))
+            trajectories = trajectories_with_advantages(
+                reward_func.last_batch, list(trainer._logs["advantages"])
+            )
             # Generation happens before the optimizer step that consumes it: align with that metrics row.
             reporter.log_trajectories(
-                int(trainer.state.global_step) + 1, trajectories, max_items=config.logging.trajectories_per_step
+                int(trainer.state.global_step) + 1,
+                trajectories,
+                max_items=config.logging.trajectories_per_step,
             )
 
         return on_scored

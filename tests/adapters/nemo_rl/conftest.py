@@ -44,7 +44,9 @@ def fake_nemo_rl(monkeypatch: pytest.MonkeyPatch) -> Iterator[dict[str, types.Mo
     envs = types.ModuleType("nemo_rl.environments")
     envs.__path__ = []
     env_utils = types.ModuleType("nemo_rl.environments.utils")
-    env_utils.ENV_REGISTRY = {"math": {"actor_class_fqn": "nemo_rl.environments.math_environment.MathEnvironment"}}
+    env_utils.ENV_REGISTRY = {
+        "math": {"actor_class_fqn": "nemo_rl.environments.math_environment.MathEnvironment"}
+    }
 
     def register_env(name: str, fqn: str) -> None:
         if name in env_utils.ENV_REGISTRY:

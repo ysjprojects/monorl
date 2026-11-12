@@ -133,7 +133,9 @@ def _dtype_bytes(config: RunConfig, total_gpus: int) -> int:
     return 2 if total_gpus > 0 else 4
 
 
-def estimate_model(config: RunConfig, *, total_gpus: int, allow_network: bool = False) -> ModelEstimate | None:
+def estimate_model(
+    config: RunConfig, *, total_gpus: int, allow_network: bool = False
+) -> ModelEstimate | None:
     """Approximate parameter count and memory footprints from the HF config (see module doc).
 
     Reads local paths / the HF cache first; the hub is contacted only with ``allow_network``
@@ -215,7 +217,12 @@ def _device_strings(kind: str, start: int, count: int) -> list[str]:
 
 
 def _auto_placement(
-    config: RunConfig, cluster: ClusterInfo, total_gpus: int, engine_gpus: int, est: ModelEstimate | None, notes: list[str]
+    config: RunConfig,
+    cluster: ClusterInfo,
+    total_gpus: int,
+    engine_gpus: int,
+    est: ModelEstimate | None,
+    notes: list[str],
 ) -> tuple[str, int, int]:
     c = config.cluster
     if total_gpus <= 1:
@@ -229,7 +236,9 @@ def _auto_placement(
     engine_per_gpu = est.weight_bytes / config.rollout.tensor_parallel_size + est.kv_bytes / engine_gpus
     trainer_per_gpu = est.trainer_bytes / total_gpus
     colocated_need = (
-        max(engine_per_gpu, trainer_per_gpu) if config.rollout.enable_sleep_mode else engine_per_gpu + trainer_per_gpu
+        max(engine_per_gpu, trainer_per_gpu)
+        if config.rollout.enable_sleep_mode
+        else engine_per_gpu + trainer_per_gpu
     )
     fits = _fits(colocated_need, budget)
     if fits is None:
@@ -266,10 +275,14 @@ def _resolve_weight_sync(name: str, mode: str, placement: str, total_gpus: int, 
     if name not in SYNC_NAMES:
         raise ConfigError(f"unknown cluster.weight_sync {name!r}; expected one of {('auto', *SYNC_NAMES)}")
     if name == "broadcast" and mode != "ray":
-        raise ConfigError("weight_sync='broadcast' needs cluster.mode='ray' (one process cannot hold two ranks)")
+        raise ConfigError(
+            "weight_sync='broadcast' needs cluster.mode='ray' (one process cannot hold two ranks)"
+        )
     if name == "cuda_ipc":
         if mode != "ray":
-            raise ConfigError("weight_sync='cuda_ipc' needs cluster.mode='ray' (engines in separate processes)")
+            raise ConfigError(
+                "weight_sync='cuda_ipc' needs cluster.mode='ray' (engines in separate processes)"
+            )
         if total_gpus == 0:
             raise ConfigError("weight_sync='cuda_ipc' needs CUDA GPUs")
         if placement != "colocated" or nodes != 1:
@@ -289,23 +302,33 @@ def plan_placement(config: RunConfig, cluster: ClusterInfo) -> PlacementPlan:
     if tp > 1 and total_gpus == 0:
         raise ConfigError(f"rollout.tensor_parallel_size={tp} needs GPUs; none configured or detected")
     if tp > gpus_per_node and total_gpus > 0:
-        raise ConfigError(f"rollout.tensor_parallel_size={tp} exceeds gpus_per_node={gpus_per_node}; TP cannot span nodes")
+        raise ConfigError(
+            f"rollout.tensor_parallel_size={tp} exceeds gpus_per_node={gpus_per_node}; TP cannot span nodes"
+        )
     engine_gpus = tp * dp if total_gpus > 0 else 0
     if total_gpus and engine_gpus > total_gpus:
         raise ConfigError(
             f"rollout needs tensor_parallel_size*data_parallel_size = {engine_gpus} GPUs but only {total_gpus} available"
         )
     if c.placement == "disaggregated" and total_gpus == 0 and mode == "local":
-        raise ConfigError("disaggregated placement without GPUs needs cluster.mode='ray' (separate CPU actors)")
+        raise ConfigError(
+            "disaggregated placement without GPUs needs cluster.mode='ray' (separate CPU actors)"
+        )
 
-    est = estimate_model(config, total_gpus=total_gpus, allow_network=c.placement == "auto" and total_gpus > 1)
+    est = estimate_model(
+        config, total_gpus=total_gpus, allow_network=c.placement == "auto" and total_gpus > 1
+    )
 
     if c.placement == "colocated":
         placement, rollout_gpus, trainer_gpus = "colocated", engine_gpus, total_gpus
         if c.rollout_gpus is not None and c.rollout_gpus != engine_gpus:
-            raise ConfigError(f"colocated placement: rollout_gpus={c.rollout_gpus} must equal tp*dp={engine_gpus}")
+            raise ConfigError(
+                f"colocated placement: rollout_gpus={c.rollout_gpus} must equal tp*dp={engine_gpus}"
+            )
         if c.trainer_gpus is not None and c.trainer_gpus != total_gpus:
-            raise ConfigError(f"colocated placement: trainer_gpus={c.trainer_gpus} must equal total GPUs={total_gpus}")
+            raise ConfigError(
+                f"colocated placement: trainer_gpus={c.trainer_gpus} must equal total GPUs={total_gpus}"
+            )
     elif c.placement == "disaggregated":
         if total_gpus == 0:
             placement, rollout_gpus, trainer_gpus = "disaggregated", 0, 0
@@ -314,15 +337,21 @@ def plan_placement(config: RunConfig, cluster: ClusterInfo) -> PlacementPlan:
                 raise ConfigError("disaggregated placement needs rollout_gpus and trainer_gpus")
             placement, rollout_gpus, trainer_gpus = "disaggregated", c.rollout_gpus, c.trainer_gpus
     else:
-        placement, rollout_gpus, trainer_gpus = _auto_placement(config, cluster, total_gpus, engine_gpus, est, notes)
+        placement, rollout_gpus, trainer_gpus = _auto_placement(
+            config, cluster, total_gpus, engine_gpus, est, notes
+        )
 
     if placement == "disaggregated" and total_gpus > 0:
         if rollout_gpus < engine_gpus:
-            raise ConfigError(f"rollout_gpus={rollout_gpus} < tensor_parallel_size*data_parallel_size={engine_gpus}")
+            raise ConfigError(
+                f"rollout_gpus={rollout_gpus} < tensor_parallel_size*data_parallel_size={engine_gpus}"
+            )
         if trainer_gpus < 1:
             raise ConfigError("disaggregated placement needs trainer_gpus >= 1")
         if rollout_gpus + trainer_gpus > total_gpus:
-            raise ConfigError(f"rollout_gpus + trainer_gpus = {rollout_gpus + trainer_gpus} exceeds {total_gpus} GPUs")
+            raise ConfigError(
+                f"rollout_gpus + trainer_gpus = {rollout_gpus + trainer_gpus} exceeds {total_gpus} GPUs"
+            )
         if rollout_gpus > engine_gpus:
             notes.append(f"{rollout_gpus - engine_gpus} rollout GPU(s) unused by tp={tp} x dp={dp}")
         if rollout_gpus + trainer_gpus < total_gpus:

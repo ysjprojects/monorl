@@ -34,10 +34,14 @@ def _hub_error(e: Exception) -> HTTPException:
 
 
 @router.get("/models/search")
-def models_search(q: str = Query("", alias="q"), limit: int = Query(20, ge=1, le=100)) -> list[dict[str, Any]]:
+def models_search(
+    q: str = Query("", alias="q"), limit: int = Query(20, ge=1, le=100)
+) -> list[dict[str, Any]]:
     api = _hf_api()
     try:
-        models = list(api.list_models(search=q or None, pipeline_tag="text-generation", sort="downloads", limit=limit))
+        models = list(
+            api.list_models(search=q or None, pipeline_tag="text-generation", sort="downloads", limit=limit)
+        )
     except Exception as e:  # noqa: BLE001 - any network/HTTP failure maps to a 5xx/4xx detail
         raise _hub_error(e) from e
     return [
@@ -78,9 +82,15 @@ def models_info(id: str = Query(..., min_length=1)) -> dict[str, Any]:
     params = None
     dtypes: dict[str, int] = {}
     if safetensors is not None:
-        total = safetensors.get("total") if isinstance(safetensors, dict) else getattr(safetensors, "total", None)
+        total = (
+            safetensors.get("total") if isinstance(safetensors, dict) else getattr(safetensors, "total", None)
+        )
         params = int(total) if total else None
-        raw = safetensors.get("parameters") if isinstance(safetensors, dict) else getattr(safetensors, "parameters", None)
+        raw = (
+            safetensors.get("parameters")
+            if isinstance(safetensors, dict)
+            else getattr(safetensors, "parameters", None)
+        )
         dtypes = {str(k): int(v) for k, v in (raw or {}).items()}
     card = getattr(info, "card_data", None)
     siblings = getattr(info, "siblings", None) or []
@@ -125,7 +135,9 @@ def _card_field(card: Any, key: str) -> Any:
 
 
 @router.get("/datasets/search")
-def datasets_search(q: str = Query("", alias="q"), limit: int = Query(20, ge=1, le=100)) -> list[dict[str, Any]]:
+def datasets_search(
+    q: str = Query("", alias="q"), limit: int = Query(20, ge=1, le=100)
+) -> list[dict[str, Any]]:
     api = _hf_api()
     try:
         datasets = list(api.list_datasets(search=q or None, sort="downloads", limit=limit))

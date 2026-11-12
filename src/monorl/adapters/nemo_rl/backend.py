@@ -84,7 +84,9 @@ def monorl_src_root() -> Path:
     return Path(monorl.__file__).resolve().parent.parent
 
 
-def build_env(config: RunConfig, home: Path, run_dir: Path, base: dict[str, str] | None = None) -> dict[str, str]:
+def build_env(
+    config: RunConfig, home: Path, run_dir: Path, base: dict[str, str] | None = None
+) -> dict[str, str]:
     """Child environment: ``RAY_ADDRESS`` (when ``cluster.ray_address``), ``MONORL_RUN_DIR``,
     ``MONORL_ALGORITHM`` (the logger patch names ``train/loss`` ``loss/sft`` for SFT), ``NEMO_RL_HOME``
     and a ``PYTHONPATH`` that resolves the run-dir shim module and ``monorl``."""

@@ -73,4 +73,6 @@ def value_loss(
         per_token = err
         clipfrac = values.new_zeros(())
     loss = 0.5 * (per_token * maskf).sum() / maskf.sum().clamp(min=1.0)
-    return ValueLossOutput(loss=loss, metrics={"loss/value": float(loss.item()), "value/clipfrac": float(clipfrac.item())})
+    return ValueLossOutput(
+        loss=loss, metrics={"loss/value": float(loss.item()), "value/clipfrac": float(clipfrac.item())}
+    )

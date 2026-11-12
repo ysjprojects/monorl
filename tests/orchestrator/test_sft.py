@@ -38,6 +38,7 @@ def tokenizer(tiny_model_dir: Path) -> Any:
 
     return AutoTokenizer.from_pretrained(tiny_model_dir)
 
+
 @pytest.fixture
 def sft_config_dict(run_config_dict: dict[str, Any]) -> dict[str, Any]:
     return {
@@ -93,7 +94,9 @@ def test_sft_run_trains_checkpoints_and_exports(
     assert [Path(p).name for p in list_checkpoints(run_dir)] == ["step-2", "step-4"]
     assert (run_dir / "checkpoints" / "step-2" / "trainer_state.pt").exists()
     assert (run_dir / "final" / "config.json").exists()
-    assert json.loads((run_dir / "final" / "config.json").read_text())["architectures"] == ["LlamaForCausalLM"]
+    assert json.loads((run_dir / "final" / "config.json").read_text())["architectures"] == [
+        "LlamaForCausalLM"
+    ]
     assert result.final_model_path == str(run_dir / "final")
 
     trajectories = [row for _, row in iter_trajectories(run_dir)]
@@ -113,13 +116,19 @@ def test_sft_run_trains_checkpoints_and_exports(
         assert sample_id and mask.sum() > 0 and (mask & ~attn).sum() == 0
         first_response = int(mask.nonzero()[0])
         assert mask[:first_response].sum() == 0  # prompt positions are not loss positions
-        assert mask[first_response : int(attn.sum())].all()  # the response span runs to the end of the sequence
+        assert mask[
+            first_response : int(attn.sum())
+        ].all()  # the response span runs to the end of the sequence
         prompt = tokenizer.decode(batch.input_ids[b, :first_response])
         assert "What is" in prompt and prompt.rstrip().endswith("assistant")
-        assert tokenizer.decode(batch.input_ids[b, first_response:][mask[first_response:]]).split("<|im_end|>")[0] in {"4", "8", "6", "21"}
+        assert tokenizer.decode(batch.input_ids[b, first_response:][mask[first_response:]]).split(
+            "<|im_end|>"
+        )[0] in {"4", "8", "6", "21"}
 
 
-def test_response_mask_excludes_prompt_and_train_on_prompt_covers_all(tiny_model_dir: Path, tokenizer) -> None:
+def test_response_mask_excludes_prompt_and_train_on_prompt_covers_all(
+    tiny_model_dir: Path, tokenizer
+) -> None:
     messages = [{"role": "user", "content": "What is 2+2?"}, {"role": "assistant", "content": "4"}]
     example = encode_sft_example(tokenizer, messages)
     assert not example.prefix_mismatch
@@ -128,7 +137,10 @@ def test_response_mask_excludes_prompt_and_train_on_prompt_covers_all(tiny_model
     assert example.response_mask[: example.prompt_len] == [0] * example.prompt_len
     assert all(example.response_mask[example.prompt_len :])
     assert tokenizer.decode(example.response_ids).startswith("4")
-    assert example.response_ids[-2:] == [tokenizer.eos_token_id, tokenizer("\n", add_special_tokens=False)["input_ids"][0]]
+    assert example.response_ids[-2:] == [
+        tokenizer.eos_token_id,
+        tokenizer("\n", add_special_tokens=False)["input_ids"][0],
+    ]
 
     everything = encode_sft_example(tokenizer, messages, train_on_prompt=True)
     assert everything.input_ids == example.input_ids
@@ -162,28 +174,44 @@ def test_prefix_mismatch_falls_back_to_response_tokens(tokenizer) -> None:
     assert example.prefix_mismatch
     prompt_ids = tokenizer("USER: hello ASSISTANT:", add_special_tokens=False)["input_ids"]
     assert example.input_ids[: example.prompt_len] == prompt_ids
-    assert example.response_ids == [*tokenizer("world", add_special_tokens=False)["input_ids"], tokenizer.eos_token_id]
+    assert example.response_ids == [
+        *tokenizer("world", add_special_tokens=False)["input_ids"],
+        tokenizer.eos_token_id,
+    ]
 
 
 def test_sft_response_lookup_order() -> None:
     base = [{"role": "user", "content": "q"}]
-    assert sft_response(Sample(id="a", messages=base, metadata={"response": "from-data-layer"})) == "from-data-layer"
+    assert (
+        sft_response(Sample(id="a", messages=base, metadata={"response": "from-data-layer"}))
+        == "from-data-layer"
+    )
     assert sft_response(Sample(id="b", messages=base, metadata={"row": {"out": "col"}}), "out") == "col"
     turn = {"role": "assistant", "content": [{"type": "text", "text": "turn"}]}
-    assert sft_response(Sample(id="c", messages=base, reference="ref", metadata={"assistant_turn": turn})) == "turn"
+    assert (
+        sft_response(Sample(id="c", messages=base, reference="ref", metadata={"assistant_turn": turn}))
+        == "turn"
+    )
     assert sft_response(Sample(id="d", messages=base, reference="ref", metadata={"response": None})) == "ref"
     with pytest.raises(DataError, match="no SFT target"):
         sft_response(Sample(id="e", messages=base, reference=["not", "text"]))
-    assert sft_messages(Sample(id="f", messages=base, reference="ref"))[-1] == {"role": "assistant", "content": "ref"}
+    assert sft_messages(Sample(id="f", messages=base, reference="ref"))[-1] == {
+        "role": "assistant",
+        "content": "ref",
+    }
 
 
 def test_sft_resume_continues_from_checkpoint(sft_config_dict: dict[str, Any]) -> None:
-    first_cfg = RunConfig.from_dict({**sft_config_dict, "trainer": {**sft_config_dict["trainer"], "max_steps": 2}})
+    first_cfg = RunConfig.from_dict(
+        {**sft_config_dict, "trainer": {**sft_config_dict["trainer"], "max_steps": 2}}
+    )
     first = run(first_cfg)
     assert first.state == "succeeded" and first.final_step == 2
     run_dir = Path(first.run_dir)
 
-    second_cfg = RunConfig.from_dict({**sft_config_dict, "trainer": {**sft_config_dict["trainer"], "max_steps": 4}})
+    second_cfg = RunConfig.from_dict(
+        {**sft_config_dict, "trainer": {**sft_config_dict["trainer"], "max_steps": 4}}
+    )
     resumed = run(second_cfg, resume=True)
     assert resumed.state == "succeeded" and resumed.final_step == 4
     assert [Path(p).name for p in list_checkpoints(run_dir)] == ["step-2", "step-4"]
@@ -209,8 +237,12 @@ def test_sft_eval_loss_logged(sft_config_dict: dict[str, Any]) -> None:
     assert eval_rows[1]["eval/loss"] < eval_rows[0]["eval/loss"]
 
 
-def test_sft_cancel_checkpoints_and_reports_cancelled(sft_config_dict: dict[str, Any], tmp_path: Path, monkeypatch) -> None:
-    config = RunConfig.from_dict({**sft_config_dict, "trainer": {**sft_config_dict["trainer"], "save_every": 10}})
+def test_sft_cancel_checkpoints_and_reports_cancelled(
+    sft_config_dict: dict[str, Any], tmp_path: Path, monkeypatch
+) -> None:
+    config = RunConfig.from_dict(
+        {**sft_config_dict, "trainer": {**sft_config_dict["trainer"], "save_every": 10}}
+    )
     reporter = RunReporter(tmp_path / "cancel-run")
     cancel = threading.Event()
     original = ReferenceTrainer.train_step

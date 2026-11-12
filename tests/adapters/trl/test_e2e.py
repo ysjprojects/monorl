@@ -37,7 +37,14 @@ def test_single_turn_grpo_end_to_end(trl_config: RunConfig, tmp_path: Path) -> N
     train_rows = [r for r in rows if "loss/policy" in r]
     assert len(train_rows) == 2
     for r in train_rows:
-        assert {"reward/mean", "reward/std", "loss/policy", "lr", "tokens/response_mean", "loss/entropy"} <= set(r)
+        assert {
+            "reward/mean",
+            "reward/std",
+            "loss/policy",
+            "lr",
+            "tokens/response_mean",
+            "loss/entropy",
+        } <= set(r)
         assert f"reward/{REWARD_NAME}" in r and r["phase"] == "train"
     assert [r["step"] for r in train_rows] == [1, 2]
 
@@ -71,7 +78,9 @@ def test_lora_and_resume_from_checkpoint(trl_config: RunConfig, tmp_path: Path) 
     first = _run(cfg, run_dir)
     assert first.state == "succeeded", first.error
     final_cfg = json.loads((run_dir / "final" / "config.json").read_text())
-    assert "peft_type" not in final_cfg and final_cfg["architectures"] == ["LlamaForCausalLM"]  # merged export
+    assert "peft_type" not in final_cfg and final_cfg["architectures"] == [
+        "LlamaForCausalLM"
+    ]  # merged export
     assert (run_dir / "checkpoints" / "step-1" / "adapter_config.json").exists()
 
     cfg.trainer.max_steps = 2
@@ -95,7 +104,9 @@ class _AlwaysStopEngine(TrainerPolicyEngine):
         return out
 
 
-def test_multi_turn_env_through_patch(trl_config: RunConfig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_multi_turn_env_through_patch(
+    trl_config: RunConfig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     cfg = trl_config.model_copy(deep=True)
     cfg.env.type = ENV_NAME
     cfg.env.max_turns = 2

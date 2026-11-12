@@ -56,7 +56,11 @@ def test_vllm_server_and_colocate(trl_config: RunConfig, tmp_path: Path) -> None
     assert kw["use_vllm"] is True and kw["vllm_mode"] == "colocate"
     cfg.rollout.extra = {"server_host": "10.0.0.5", "server_port": 8123}
     kw = grpo_config_kwargs(cfg, tmp_path, device=CPU)
-    assert kw["vllm_mode"] == "server" and kw["vllm_server_host"] == "10.0.0.5" and kw["vllm_server_port"] == 8123
+    assert (
+        kw["vllm_mode"] == "server"
+        and kw["vllm_server_host"] == "10.0.0.5"
+        and kw["vllm_server_port"] == 8123
+    )
 
 
 def test_extra_passthrough_and_unknown_keys(trl_config: RunConfig, tmp_path: Path) -> None:

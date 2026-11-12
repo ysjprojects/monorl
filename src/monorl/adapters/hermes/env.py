@@ -95,7 +95,9 @@ def _require_hermes() -> None:
     try:
         import run_agent  # noqa: F401
     except ImportError as e:  # pragma: no cover - exercised only without the extra
-        raise BackendUnavailable("env 'hermes' needs the 'hermes-agent' package (pip install monorl[hermes])") from e
+        raise BackendUnavailable(
+            "env 'hermes' needs the 'hermes-agent' package (pip install monorl[hermes])"
+        ) from e
 
 
 # -- params ------------------------------------------------------------------------------------
@@ -197,7 +199,9 @@ def sandbox_overrides(sandbox: Mapping[str, Any] | None) -> tuple[str, dict[str,
     sandbox = dict(sandbox or {})
     backend = str(sandbox.pop("backend", "local") or "local").lower()
     if backend not in SANDBOX_BACKENDS:
-        raise ValueError(f"env.params.sandbox.backend must be one of {sorted(SANDBOX_BACKENDS)}, got {backend!r}")
+        raise ValueError(
+            f"env.params.sandbox.backend must be one of {sorted(SANDBOX_BACKENDS)}, got {backend!r}"
+        )
     image = sandbox.pop("image", None)
     if sandbox:
         raise ValueError(f"env.params.sandbox: unknown keys {sorted(sandbox)}; expected backend, image")
@@ -224,7 +228,9 @@ def to_openai_message(text: str, calls: Sequence[ToolCall]) -> Any:
         ChatCompletionMessageToolCall(
             id=str(c["id"]),
             type="function",
-            function=Function(name=str(c["name"]), arguments=json.dumps(c.get("arguments") or {}, ensure_ascii=False)),
+            function=Function(
+                name=str(c["name"]), arguments=json.dumps(c.get("arguments") or {}, ensure_ascii=False)
+            ),
         )
         for c in calls
     ]
@@ -236,9 +242,7 @@ def project_tool_message(msg: Mapping[str, Any]) -> Message:
     content = msg.get("content", "")
     if not isinstance(content, str):  # multimodal envelope: keep the text parts
         parts = content if isinstance(content, list) else [content]
-        content = "\n".join(
-            str(p.get("text", "")) if isinstance(p, Mapping) else str(p) for p in parts
-        )
+        content = "\n".join(str(p.get("text", "")) if isinstance(p, Mapping) else str(p) for p in parts)
     out: Message = {"role": "tool", "content": content}
     if msg.get("name"):
         out["name"] = str(msg["name"])
@@ -289,7 +293,9 @@ class HermesEnv:
             os.environ["TERMINAL_ENV"] = self.sandbox_backend
 
         with self._hermes_home_scope():
-            self.tool_names = resolve_tool_names(list(tools) or list(DEFAULT_TOOLS), tool_modules=tool_modules)
+            self.tool_names = resolve_tool_names(
+                list(tools) or list(DEFAULT_TOOLS), tool_modules=tool_modules
+            )
             self.skill_prompts = load_skill_prompts(list(skills), skills_dir)
             self.agent = self._make_agent()
         self.tools: list[dict[str, Any]] = list(self.agent.tools)
@@ -468,7 +474,9 @@ class HermesEnv:
         reasons = list(parsed.errors)
         calls = parsed.calls[: self.max_calls_per_turn]
         if len(parsed.calls) > self.max_calls_per_turn:
-            reasons.append(f"too many tool calls ({len(parsed.calls)} > {self.max_calls_per_turn}); extra calls ignored")
+            reasons.append(
+                f"too many tool calls ({len(parsed.calls)} > {self.max_calls_per_turn}); extra calls ignored"
+            )
         calls, name_errors, name_reasons = self._validate_calls(calls)
         reasons.extend(name_reasons)
 
@@ -480,7 +488,9 @@ class HermesEnv:
             hermes_messages: list[dict[str, Any]] = list(self._messages)
             before = len(hermes_messages)
             with self._hermes_home_scope():
-                self.agent._execute_tool_calls(to_openai_message(action.text, calls), hermes_messages, self._task_id)
+                self.agent._execute_tool_calls(
+                    to_openai_message(action.text, calls), hermes_messages, self._task_id
+                )
             produced = [project_tool_message(m) for m in hermes_messages[before:] if m.get("role") == "tool"]
             results.extend(self._truncate(m) for m in produced)
             by_id = {m.get("tool_call_id"): m for m in produced}
@@ -529,7 +539,11 @@ class HermesEnv:
 
 
 def make_hermes_env(
-    params: Mapping[str, Any], *, max_turns: int, system_prompt: str | None = None, model_name: str | None = None
+    params: Mapping[str, Any],
+    *,
+    max_turns: int,
+    system_prompt: str | None = None,
+    model_name: str | None = None,
 ) -> HermesEnv:
     known = {
         "tools", "tool_modules", "skills", "skills_dir", "hermes_home", "workspace_dir", "sandbox",

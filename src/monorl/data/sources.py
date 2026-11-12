@@ -74,7 +74,10 @@ def normalize_messages(value: Any, *, where: str, resolver: MediaResolver | None
             if role not in ("system", "user", "assistant", "tool"):
                 raise DataError(f"{where}: message {i} has unsupported role {role!r}")
             content = m.get("content")
-        msg: Message = {"role": role, "content": normalize_content_parts(content, resolver, where=f"{where}.messages[{i}]")}
+        msg: Message = {
+            "role": role,
+            "content": normalize_content_parts(content, resolver, where=f"{where}.messages[{i}]"),
+        }
         if "role" in m:
             for key in _MESSAGE_KEYS[2:]:
                 if m.get(key) is not None:
@@ -133,7 +136,13 @@ class Layout:
             raise DataError(f"format={layout.format} needs prompt_field; columns: {sorted(columns)}")
         if layout.format == "prompt_answer" and not layout.answer_field:
             raise DataError(f"format=prompt_answer needs answer_field; columns: {sorted(columns)}")
-        for name in (layout.prompt_field, layout.answer_field, layout.messages_field, layout.response_field, *layout.image_fields):
+        for name in (
+            layout.prompt_field,
+            layout.answer_field,
+            layout.messages_field,
+            layout.response_field,
+            *layout.image_fields,
+        ):
             if name and columns and name not in columns:
                 raise DataError(f"column {name!r} not found; available: {sorted(columns)}")
         return layout
@@ -239,7 +248,9 @@ class SampleMapper:
         sample_id = str(row["id"]) if row.get("id") not in (None, "") else row_id
         return Sample(id=sample_id, messages=messages, reference=reference, metadata=metadata)
 
-    def _apply_user_turn(self, messages: list[Message], row: Mapping[str, Any], images: list, row_id: str) -> None:
+    def _apply_user_turn(
+        self, messages: list[Message], row: Mapping[str, Any], images: list, row_id: str
+    ) -> None:
         """Render ``prompt_template`` on the last user turn and attach ``images`` to it."""
         index = next((i for i in range(len(messages) - 1, -1, -1) if messages[i]["role"] == "user"), None)
         if index is None:
@@ -299,7 +310,9 @@ class SampleMapper:
 
 
 class _BaseSource:
-    def __init__(self, name: str, rows: RowSource, mapper: SampleMapper, *, seed: int, shuffle: bool, limit: int | None) -> None:
+    def __init__(
+        self, name: str, rows: RowSource, mapper: SampleMapper, *, seed: int, shuffle: bool, limit: int | None
+    ) -> None:
         self.name = name
         self.uri = rows.uri
         self.rows = rows
@@ -316,7 +329,9 @@ class _BaseSource:
         return dict(self.rows.columns())
 
     def _mapped(self) -> Iterator[Sample]:
-        return self.mapper.map_rows(self.rows.iter_rows(shuffle_seed=self.seed if self.shuffle else None), self.limit)
+        return self.mapper.map_rows(
+            self.rows.iter_rows(shuffle_seed=self.seed if self.shuffle else None), self.limit
+        )
 
     def __repr__(self) -> str:
         return f"{type(self).__name__}(name={self.name!r}, uri={self.uri!r}, format={self.layout.format!r})"
@@ -354,7 +369,9 @@ class StreamingSource(_BaseSource):
         if n is None:
             raise UnknownLengthError(f"{self.uri}: length unknown for a streaming source")
         if self.mapper.max_prompt_tokens is not None:
-            raise UnknownLengthError(f"{self.uri}: length unknown (streaming with max_prompt_tokens filtering)")
+            raise UnknownLengthError(
+                f"{self.uri}: length unknown (streaming with max_prompt_tokens filtering)"
+            )
         return min(n, self.limit) if self.limit is not None else n
 
     def __iter__(self) -> Iterator[Sample]:

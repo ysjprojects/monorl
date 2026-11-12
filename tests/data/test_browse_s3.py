@@ -60,7 +60,12 @@ def test_preview_directory_and_json_serialisable(jsonl_dir: Path, tmp_path: Path
 
 def test_parse_uri_shapes(tmp_path: Path) -> None:
     hf = parse_uri("hf://openai/gsm8k@v1/data/train.parquet")
-    assert (hf.kind, hf.repo_id, hf.revision, hf.subpath) == ("hf", "openai/gsm8k", "v1", "data/train.parquet")
+    assert (hf.kind, hf.repo_id, hf.revision, hf.subpath) == (
+        "hf",
+        "openai/gsm8k",
+        "v1",
+        "data/train.parquet",
+    )
     assert parse_uri("hf://datasets/org/name").repo_id == "org/name"
     s3 = parse_uri("s3://bucket/prefix/")
     assert (s3.kind, s3.scheme, s3.path) == ("remote", "s3", "bucket/prefix")
@@ -74,7 +79,14 @@ def test_parse_uri_shapes(tmp_path: Path) -> None:
 
 
 def test_s3_options_come_only_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    for var in ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN", "AWS_DEFAULT_REGION", "AWS_REGION", "AWS_ENDPOINT_URL"):
+    for var in (
+        "AWS_ACCESS_KEY_ID",
+        "AWS_SECRET_ACCESS_KEY",
+        "AWS_SESSION_TOKEN",
+        "AWS_DEFAULT_REGION",
+        "AWS_REGION",
+        "AWS_ENDPOINT_URL",
+    ):
         monkeypatch.delenv(var, raising=False)
     assert s3_storage_options() == {}
     assert s3_env_status() == {"configured": False, "region": None, "endpoint_url": None, "vars_present": []}
@@ -121,7 +133,9 @@ def test_s3_single_parquet_file_and_streaming(moto_s3: dict) -> None:
     assert [s.id for s in samples] == [r["id"] for r in CHAT_ROWS]
     assert samples[2].messages[-1] == {"role": "user", "content": "Say the number 2."}
     assert samples[2].reference == "2"
-    streamed_jsonl = open_source(DataConfig(uri=f"s3://{moto_s3['bucket']}/data/jsonl/*.jsonl", streaming=True, shuffle=True, limit=4))
+    streamed_jsonl = open_source(
+        DataConfig(uri=f"s3://{moto_s3['bucket']}/data/jsonl/*.jsonl", streaming=True, shuffle=True, limit=4)
+    )
     with pytest.raises(DataError):
         len(streamed_jsonl)
     assert len(list(streamed_jsonl)) == 4
@@ -132,14 +146,24 @@ def test_s3_browse_and_preview(moto_s3: dict) -> None:
     buckets = browse_uri("s3://")
     assert {"name": bucket, "uri": f"s3://{bucket}", "is_dir": True, "size": None} in buckets
     root = browse_uri(f"s3://{bucket}/data")
-    assert [(e["name"], e["is_dir"]) for e in root] == [("jsonl", True), ("parquet", True), ("notes.txt", False)]
+    assert [(e["name"], e["is_dir"]) for e in root] == [
+        ("jsonl", True),
+        ("parquet", True),
+        ("notes.txt", False),
+    ]
     assert root[2]["uri"] == f"s3://{bucket}/data/notes.txt" and root[2]["size"] == len(b"not data")
     with pytest.raises(FileNotFoundError):
         browse_uri(f"s3://{bucket}/nope")
 
     out = preview_uri(f"s3://{bucket}/data/jsonl", limit=4)
     assert out["rows"] == QA_ROWS[:4]
-    assert out["inferred"] == {"format": "prompt_answer", "prompt_field": "question", "answer_field": "answer", "messages_field": None, "image_fields": []}
+    assert out["inferred"] == {
+        "format": "prompt_answer",
+        "prompt_field": "question",
+        "answer_field": "answer",
+        "messages_field": None,
+        "image_fields": [],
+    }
     assert out["num_rows"] == len(QA_ROWS)
     pq_out = preview_uri(f"s3://{bucket}/data/parquet/chat.parquet", limit=2)
     assert pq_out["num_rows"] == len(CHAT_ROWS) and pq_out["inferred"]["format"] == "chat"
@@ -150,6 +174,8 @@ def test_s3_browse_and_preview(moto_s3: dict) -> None:
 def test_s3_sees_newly_written_objects(moto_s3: dict, tmp_path: Path) -> None:
     bucket = moto_s3["bucket"]
     assert browse_uri(f"s3://{bucket}/") and all(e["name"] != "late" for e in browse_uri(f"s3://{bucket}/"))
-    moto_s3["client"].upload_file(str(write_jsonl(tmp_path / "late.jsonl", QA_ROWS[:2])), bucket, "late/late.jsonl")
+    moto_s3["client"].upload_file(
+        str(write_jsonl(tmp_path / "late.jsonl", QA_ROWS[:2])), bucket, "late/late.jsonl"
+    )
     assert any(e["name"] == "late" for e in browse_uri(f"s3://{bucket}/"))
     assert len(open_source(DataConfig(uri=f"s3://{bucket}/late"))) == 2

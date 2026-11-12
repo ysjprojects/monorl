@@ -196,11 +196,15 @@ class ReferenceTrainer:
         self._dist = _Collective(self.rank, self.world_size, self.device) if self.world_size > 1 else None
 
         self.precision = config.trainer.precision if self.device.type != "cpu" else "fp32"
-        self.param_dtype = torch.float32 if config.model.dtype in ("auto", "float32") else getattr(torch, config.model.dtype)
+        self.param_dtype = (
+            torch.float32 if config.model.dtype in ("auto", "float32") else getattr(torch, config.model.dtype)
+        )
         if self.device.type == "cpu":
             self.param_dtype = torch.float32
         self.autocast_dtype = {"bf16": torch.bfloat16, "fp16": torch.float16}.get(self.precision)
-        self.scaler = torch.amp.GradScaler("cuda") if self.precision == "fp16" and self.device.type == "cuda" else None
+        self.scaler = (
+            torch.amp.GradScaler("cuda") if self.precision == "fp16" and self.device.type == "cuda" else None
+        )
 
         self.tokenizer = tokenizer if tokenizer is not None else load_tokenizer(config)
         self.lora_enabled = config.model.lora.enabled
@@ -214,8 +218,12 @@ class ReferenceTrainer:
         else:
             self.hf_model = model
             self.model = self._wrap_lora(self.hf_model) if self.lora_enabled else self.hf_model
-        if config.trainer.gradient_checkpointing and not getattr(self.hf_model, "is_gradient_checkpointing", False):
-            self.hf_model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
+        if config.trainer.gradient_checkpointing and not getattr(
+            self.hf_model, "is_gradient_checkpointing", False
+        ):
+            self.hf_model.gradient_checkpointing_enable(
+                gradient_checkpointing_kwargs={"use_reentrant": False}
+            )
             if self.lora_enabled:
                 self.model.enable_input_require_grads()
         self.model.train()
@@ -292,7 +300,9 @@ class ReferenceTrainer:
         # loss skips empty ones), so the micro-batch weights must use that count too.
         local_scored = int((batch.response_mask.sum(dim=1) > 0).sum().item())
         total_tokens, total_seqs, total_scored = local_tokens, local_seqs, local_scored
-        if self._dist is not None:  # weights use global counts so the summed gradient is the full-batch gradient
+        if (
+            self._dist is not None
+        ):  # weights use global counts so the summed gradient is the full-batch gradient
             counts = self._dist.all_gather_object((local_tokens, local_seqs, local_scored))
             total_tokens, total_seqs, total_scored = (sum(c[i] for c in counts) for i in range(3))
         total_tokens = max(total_tokens, 1)
@@ -313,7 +323,9 @@ class ReferenceTrainer:
                 continue
             with self._autocast():
                 logits = self._forward(self.model, micro)
-            logprobs, entropy = sequence_logprobs_and_entropy(logits, micro.input_ids, self.temperature, entropy=True)
+            logprobs, entropy = sequence_logprobs_and_entropy(
+                logits, micro.input_ids, self.temperature, entropy=True
+            )
             loss_kwargs: dict[str, Any] = {}
             if self.config.algorithm.name == "sft" and self.config.algorithm.sft_label_smoothing > 0:
                 from monorl.algorithms import mean_logprob_all_tokens
@@ -338,7 +350,9 @@ class ReferenceTrainer:
             else:
                 scaled.backward()
             metrics = dict(out.metrics)
-            metrics.setdefault("loss/entropy", float((entropy.detach() * mask).sum().item() / max(micro_tokens, 1)))
+            metrics.setdefault(
+                "loss/entropy", float((entropy.detach() * mask).sum().item() / max(micro_tokens, 1))
+            )
             metrics["loss/total"] = float(out.loss.detach().item())
             for k, v in metrics.items():
                 sums[k] = sums.get(k, 0.0) + float(v) * weight
@@ -383,7 +397,9 @@ class ReferenceTrainer:
                 micro = prepared.slice(start, start + mbs)
                 with self._autocast():
                     logits = self._forward(model, micro)
-                lp, _ = sequence_logprobs_and_entropy(logits, micro.input_ids, self.temperature, entropy=False)
+                lp, _ = sequence_logprobs_and_entropy(
+                    logits, micro.input_ids, self.temperature, entropy=False
+                )
                 out[start : start + len(micro)] = lp * micro.response_mask.float()
             model.train(was_training)
         return out.to(src_device)
@@ -502,12 +518,20 @@ class ReferenceTrainer:
                 advantages=batch.advantages[:, : self.max_seq_len],
                 rewards=batch.rewards,
                 group_ids=batch.group_ids,
-                old_logprobs=None if batch.old_logprobs is None else batch.old_logprobs[:, : self.max_seq_len],
-                ref_logprobs=None if batch.ref_logprobs is None else batch.ref_logprobs[:, : self.max_seq_len],
-                position_ids=None if batch.position_ids is None else batch.position_ids[:, : self.max_seq_len],
+                old_logprobs=None
+                if batch.old_logprobs is None
+                else batch.old_logprobs[:, : self.max_seq_len],
+                ref_logprobs=None
+                if batch.ref_logprobs is None
+                else batch.ref_logprobs[:, : self.max_seq_len],
+                position_ids=None
+                if batch.position_ids is None
+                else batch.position_ids[:, : self.max_seq_len],
                 meta=batch.meta,
                 extra={
-                    k: v[:, : self.max_seq_len] if isinstance(v, torch.Tensor) and v.ndim >= 2 and v.shape[1] == width else v
+                    k: v[:, : self.max_seq_len]
+                    if isinstance(v, torch.Tensor) and v.ndim >= 2 and v.shape[1] == width
+                    else v
                     for k, v in batch.extra.items()
                 },
             )
@@ -527,7 +551,12 @@ class ReferenceTrainer:
                 position_ids = None
             elif isinstance(v, torch.Tensor):
                 kwargs[k] = v
-        return model(input_ids=micro.input_ids, attention_mask=micro.attention_mask, position_ids=position_ids, **kwargs).logits
+        return model(
+            input_ids=micro.input_ids,
+            attention_mask=micro.attention_mask,
+            position_ids=position_ids,
+            **kwargs,
+        ).logits
 
     def _autocast(self) -> Any:
         if self.autocast_dtype is None:

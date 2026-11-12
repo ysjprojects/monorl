@@ -25,7 +25,9 @@ class ReverseEnv(Environment[ReverseAction, ReverseObservation, State]):
         self._state = State()
         self.closed = False
 
-    def reset(self, seed: int | None = None, episode_id: str | None = None, word: str | None = None, **kwargs) -> ReverseObservation:
+    def reset(
+        self, seed: int | None = None, episode_id: str | None = None, word: str | None = None, **kwargs
+    ) -> ReverseObservation:
         if word:
             self.word = word
         self._state = State(episode_id=episode_id, step_count=0)

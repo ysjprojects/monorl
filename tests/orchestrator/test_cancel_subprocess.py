@@ -50,7 +50,10 @@ def test_sigterm_cancels_run_after_finishing_current_step(tmp_path: Path) -> Non
     cfg_path.write_text(json.dumps(cfg))
     run_dir = tmp_path / "runs" / "cancel-me"
 
-    env = {**os.environ, "PYTHONPATH": os.pathsep.join(filter(None, [str(SRC_DIR), os.environ.get("PYTHONPATH")]))}
+    env = {
+        **os.environ,
+        "PYTHONPATH": os.pathsep.join(filter(None, [str(SRC_DIR), os.environ.get("PYTHONPATH")])),
+    }
     proc = subprocess.Popen(
         [sys.executable, "-c", SCRIPT, str(TESTS_DIR), str(cfg_path)],
         stdout=subprocess.PIPE,
@@ -60,8 +63,10 @@ def test_sigterm_cancels_run_after_finishing_current_step(tmp_path: Path) -> Non
     )
     try:
         _wait_for(
-            lambda: proc.poll() is not None
-            or ((s := read_status(run_dir)) is not None and s["state"] == "running" and s["step"] >= 2),
+            lambda: (
+                proc.poll() is not None
+                or ((s := read_status(run_dir)) is not None and s["state"] == "running" and s["step"] >= 2)
+            ),
             timeout=60,
             what="the run to reach step 2",
         )

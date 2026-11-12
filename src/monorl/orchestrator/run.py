@@ -25,7 +25,10 @@ from monorl.orchestrator.sft import SFTLoop
 
 
 def default_run_name(config: RunConfig) -> str:
-    model = re.sub(r"[^A-Za-z0-9_.-]+", "-", Path(config.model.name_or_path.rstrip("/")).name).strip("-") or "model"
+    model = (
+        re.sub(r"[^A-Za-z0-9_.-]+", "-", Path(config.model.name_or_path.rstrip("/")).name).strip("-")
+        or "model"
+    )
     return f"{model}-{config.algorithm.name}-{time.strftime('%Y%m%d-%H%M%S')}"
 
 

@@ -111,7 +111,9 @@ def encode_prompt(prompt: PromptInput, tokenizer: Any, processor: Any | None) ->
     if processor is not None and needs_processor(prompt):  # type: ignore[arg-type]
         enc = vlm_encode(processor, prompt)  # type: ignore[arg-type]
         aligned, media = split_processor_outputs(enc)
-        return _EncodedPrompt(ids=[int(t) for t in enc["input_ids"][0].tolist()], token_aligned=aligned, media=media)
+        return _EncodedPrompt(
+            ids=[int(t) for t in enc["input_ids"][0].tolist()], token_aligned=aligned, media=media
+        )
     return _EncodedPrompt(ids=chat_prompt_ids(tokenizer, prompt))
 
 
@@ -130,7 +132,9 @@ class _FinishRecorder(StoppingCriteria):
         self._step = 0
         self._eos_tensor: torch.Tensor | None = None
 
-    def __call__(self, input_ids: torch.LongTensor, scores: torch.FloatTensor, **kwargs: Any) -> torch.BoolTensor:
+    def __call__(
+        self, input_ids: torch.LongTensor, scores: torch.FloatTensor, **kwargs: Any
+    ) -> torch.BoolTensor:
         self._step += 1
         last = input_ids[:, -1]
         if self._eos_tensor is None or self._eos_tensor.device != last.device:
@@ -292,7 +296,9 @@ class HFRolloutEngine:
             mask[i, width - len(p) :] = 1
         return ids.to(self.device), mask.to(self.device)
 
-    def _multimodal_inputs(self, encoded: list[_EncodedPrompt], n: int, width: int) -> dict[str, torch.Tensor]:
+    def _multimodal_inputs(
+        self, encoded: list[_EncodedPrompt], n: int, width: int
+    ) -> dict[str, torch.Tensor]:
         """Processor tensors for ``len(encoded) * n`` rows (row ``i*n+j`` = prompt ``i``): token-aligned
         tensors left-padded with 0 to ``width``; media tensors concatenated in row order. Rows are
         expanded here rather than by ``num_return_sequences`` because ``generate`` would
@@ -309,7 +315,9 @@ class HFRolloutEngine:
         return {k: v.to(self.device) for k, v in (aligned | media).items()}
 
     @torch.no_grad()
-    def _generate_locked(self, encoded: list[_EncodedPrompt], params: SamplingParams) -> list[list[Completion]]:
+    def _generate_locked(
+        self, encoded: list[_EncodedPrompt], params: SamplingParams
+    ) -> list[list[Completion]]:
         greedy = params.temperature <= 0.0
         n = 1 if greedy else params.n
         prompt_ids = [e.ids for e in encoded]

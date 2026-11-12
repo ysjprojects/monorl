@@ -61,6 +61,9 @@ jobs:
       - name: ruff check
         run: .venv/bin/python -m ruff check src tests scripts
 
+      - name: ruff format --check
+        run: .venv/bin/python -m ruff format --check src tests scripts
+
       - name: pytest
         run: >
           .venv/bin/python -m pytest tests -q -p no:cacheprovider --timeout 600

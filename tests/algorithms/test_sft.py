@@ -88,14 +88,18 @@ def test_label_smoothing_matches_hf_definition() -> None:
     # ppl reports the unsmoothed NLL.
     assert smoothed.metrics["sft/ppl"] == pytest.approx(math.exp(plain), rel=1e-5)
     # The cheap [B, T] variant gives the same loss as passing full logits.
-    via_mean = sft_loss(logprobs, mask, label_smoothing=eps, mean_logprob_all_tokens=mean_logprob_all_tokens(logits.detach()))
+    via_mean = sft_loss(
+        logprobs, mask, label_smoothing=eps, mean_logprob_all_tokens=mean_logprob_all_tokens(logits.detach())
+    )
     assert via_mean.loss.item() == pytest.approx(smoothed.loss.item(), rel=1e-6)
 
 
 def test_mean_logprob_all_tokens_matches_log_softmax() -> None:
     logits, _, _ = _inputs()
     got = mean_logprob_all_tokens(logits.detach(), 2.0)
-    expected = torch.nn.functional.pad(torch.log_softmax(logits.detach()[:, :-1] / 2.0, dim=-1).mean(-1), (1, 0))
+    expected = torch.nn.functional.pad(
+        torch.log_softmax(logits.detach()[:, :-1] / 2.0, dim=-1).mean(-1), (1, 0)
+    )
     assert got.shape == (B, T)
     assert torch.allclose(got, expected, atol=1e-6)
     assert (got[:, 0] == 0).all()
@@ -141,7 +145,12 @@ def test_trainer_adapter_ignores_rl_inputs_and_dispatch() -> None:
 
     smooth_algo = AlgorithmConfig(name="sft", sft_label_smoothing=0.2)
     smooth = sft_policy_loss(
-        logprobs, None, None, mask, algorithm=smooth_algo, mean_logprob_all_tokens=mean_logprob_all_tokens(logits.detach())
+        logprobs,
+        None,
+        None,
+        mask,
+        algorithm=smooth_algo,
+        mean_logprob_all_tokens=mean_logprob_all_tokens(logits.detach()),
     )
     assert smooth.loss.item() == pytest.approx(
         sft_loss(logprobs, mask, label_smoothing=0.2, logits=logits.detach()).loss.item(), rel=1e-6

@@ -137,7 +137,9 @@ def test_reconcile_is_noop_without_unsloth(monkeypatch: pytest.MonkeyPatch) -> N
     assert reconcile_trl_patches() == {"unsloth": None, "trl": None}
 
 
-def test_reconcile_rehooks_regenerated_grpo_trainer(fake_trl: types.ModuleType, fake_unsloth: types.ModuleType) -> None:
+def test_reconcile_rehooks_regenerated_grpo_trainer(
+    fake_trl: types.ModuleType, fake_unsloth: types.ModuleType
+) -> None:
     from monorl.adapters.trl.patches import HOOKS_ATTR, hooks_patch_applied
     from monorl.adapters.unsloth.patches import reconcile_trl_patches, trl_trainer_rewritten
     from monorl.patching import apply
@@ -179,7 +181,9 @@ def test_reconcile_rehooks_regenerated_grpo_trainer(fake_trl: types.ModuleType, 
     assert hooks_patch_applied()
 
 
-def test_reconcile_without_prior_trl_apply(fake_trl: types.ModuleType, fake_unsloth: types.ModuleType) -> None:
+def test_reconcile_without_prior_trl_apply(
+    fake_trl: types.ModuleType, fake_unsloth: types.ModuleType
+) -> None:
     """``import unsloth`` happened first (the recommended order): one call wires everything."""
     from monorl.adapters.trl.patches import hooks_patch_applied
     from monorl.adapters.unsloth.patches import reconcile_trl_patches
@@ -191,7 +195,9 @@ def test_reconcile_without_prior_trl_apply(fake_trl: types.ModuleType, fake_unsl
     assert hooks_patch_applied()
 
 
-def test_signature_patch_skipped_on_pristine_trl(fake_trl: types.ModuleType, fake_unsloth: types.ModuleType) -> None:
+def test_signature_patch_skipped_on_pristine_trl(
+    fake_trl: types.ModuleType, fake_unsloth: types.ModuleType
+) -> None:
     """Unsloth imported but TRL trainers not rewritten (e.g. UNSLOTH_ALLOW_CPU=1): nothing to shim."""
     from monorl.adapters.unsloth.patches import reconcile_trl_patches
 

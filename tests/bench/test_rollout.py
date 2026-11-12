@@ -77,7 +77,14 @@ def test_run_rollout_benchmark_picks_best_and_serialises(chat_prompts, tmp_path:
     engine = FakeEngine(tokens_per_completion=4, seconds_per_call=0.01)
     params = SamplingParams(n=2, max_new_tokens=4)
     bench = run_rollout_benchmark(
-        engine, chat_prompts, params, batch_sizes=[1, 5, 5, 10], warmup=True, backend="fake", model="m", group_size=2
+        engine,
+        chat_prompts,
+        params,
+        batch_sizes=[1, 5, 5, 10],
+        warmup=True,
+        backend="fake",
+        model="m",
+        group_size=2,
     )
     assert isinstance(bench, RolloutBenchmark)
     assert [r.batch_size for r in bench.results] == [1, 5, 10]
@@ -110,7 +117,10 @@ def test_recommend_flags_saturation_and_empty() -> None:
     assert best == 16
     assert any("saturated" in n for n in notes)
     assert any("prompts_per_step=4" in n for n in notes)
-    assert recommend([], group_size=4, baseline_rss=0) == (None, ["no batches ran; increase --prompts or --seconds"])
+    assert recommend([], group_size=4, baseline_rss=0) == (
+        None,
+        ["no batches ran; increase --prompts or --seconds"],
+    )
 
 
 def test_run_rollout_benchmark_validates_inputs(chat_prompts) -> None:

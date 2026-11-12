@@ -24,7 +24,10 @@ def _make_batch(tokenizer: Any, *, batch_size: int = 4, response_len: int = 5) -
     from monorl.core.batch import TrainBatch
     from monorl.rollout.hf_engine import chat_prompt_ids
 
-    prompts = [chat_prompt_ids(tokenizer, [{"role": "user", "content": f"Q{i}: " + "pad " * (i % 3)}]) for i in range(batch_size)]
+    prompts = [
+        chat_prompt_ids(tokenizer, [{"role": "user", "content": f"Q{i}: " + "pad " * (i % 3)}])
+        for i in range(batch_size)
+    ]
     responses = [[1234] * (response_len - (i % 2)) + [tokenizer.eos_token_id] for i in range(batch_size)]
     width = max(len(p) + len(r) for p, r in zip(prompts, responses, strict=True))
     input_ids = torch.full((batch_size, width), tokenizer.pad_token_id, dtype=torch.long)
@@ -68,7 +71,9 @@ def test_backend_unavailable_without_cuda(tiny_model_dir: Path, fake_unsloth: ty
     assert fake_unsloth._fake_calls.from_pretrained == []
 
 
-def test_backend_unavailable_without_unsloth(tiny_model_dir: Path, fake_cuda: None, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_backend_unavailable_without_unsloth(
+    tiny_model_dir: Path, fake_cuda: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
     for name in [m for m in sys.modules if m == "unsloth" or m.startswith("unsloth.")]:
         monkeypatch.delitem(sys.modules, name)
     from monorl.adapters.unsloth.trainer import make_unsloth_trainer
@@ -96,7 +101,11 @@ class _LazyFakeFinder(importlib.abc.MetaPathFinder, importlib.abc.Loader):
 
 
 def test_import_order_warning_and_strict_mode(
-    tiny_model_dir: Path, fake_cuda: None, fake_unsloth: types.ModuleType, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    tiny_model_dir: Path,
+    fake_cuda: None,
+    fake_unsloth: types.ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     from monorl.adapters.unsloth.trainer import import_unsloth
 
@@ -124,7 +133,9 @@ def test_import_order_warning_and_strict_mode(
 # -- factory / argument forwarding ---------------------------------------------------------------
 
 
-def test_factory_builds_trainer_and_forwards_lora_args(tiny_model_dir: Path, fake_cuda: None, fake_unsloth: types.ModuleType, fake_calls: FakeCalls) -> None:
+def test_factory_builds_trainer_and_forwards_lora_args(
+    tiny_model_dir: Path, fake_cuda: None, fake_unsloth: types.ModuleType, fake_calls: FakeCalls
+) -> None:
     trainer = _build(unsloth_config(tiny_model_dir))
 
     assert isinstance(trainer, Trainer)
@@ -156,11 +167,17 @@ def test_factory_builds_trainer_and_forwards_lora_args(tiny_model_dir: Path, fak
     assert trainer.inner.model is trainer.model
 
 
-def test_gradient_checkpointing_4bit_and_passthrough_kwargs(tiny_model_dir: Path, fake_cuda: None, fake_unsloth: types.ModuleType, fake_calls: FakeCalls) -> None:
+def test_gradient_checkpointing_4bit_and_passthrough_kwargs(
+    tiny_model_dir: Path, fake_cuda: None, fake_unsloth: types.ModuleType, fake_calls: FakeCalls
+) -> None:
     config = unsloth_config(
         tiny_model_dir,
         gradient_checkpointing=True,
-        extra={"load_in_4bit": True, "unsloth_kwargs": {"token": "hf_x"}, "unsloth_lora_kwargs": {"use_rslora": True}},
+        extra={
+            "load_in_4bit": True,
+            "unsloth_kwargs": {"token": "hf_x"},
+            "unsloth_lora_kwargs": {"use_rslora": True},
+        },
     )
     config.model.dtype = "auto"
     trainer = _build(config)
@@ -173,10 +190,14 @@ def test_gradient_checkpointing_4bit_and_passthrough_kwargs(tiny_model_dir: Path
     (peft,) = fake_calls.get_peft_model
     assert peft["use_gradient_checkpointing"] == "unsloth"
     assert peft["use_rslora"] is True
-    assert trainer.hf_model.is_gradient_checkpointing  # enabled by Unsloth, not re-enabled by the reference loop
+    assert (
+        trainer.hf_model.is_gradient_checkpointing
+    )  # enabled by Unsloth, not re-enabled by the reference loop
 
 
-def test_full_finetuning_without_lora(tiny_model_dir: Path, fake_cuda: None, fake_unsloth: types.ModuleType, fake_calls: FakeCalls) -> None:
+def test_full_finetuning_without_lora(
+    tiny_model_dir: Path, fake_cuda: None, fake_unsloth: types.ModuleType, fake_calls: FakeCalls
+) -> None:
     trainer = _build(unsloth_config(tiny_model_dir, lora=False))
     (load,) = fake_calls.from_pretrained
     assert load["full_finetuning"] is True
@@ -193,12 +214,16 @@ def test_full_finetuning_without_lora(tiny_model_dir: Path, fake_cuda: None, fak
         ({"unsloth_kwargs": [1]}, "must be a mapping"),
     ],
 )
-def test_config_errors(tiny_model_dir: Path, fake_cuda: None, fake_unsloth: types.ModuleType, extra: dict[str, Any], message: str) -> None:
+def test_config_errors(
+    tiny_model_dir: Path, fake_cuda: None, fake_unsloth: types.ModuleType, extra: dict[str, Any], message: str
+) -> None:
     with pytest.raises(ConfigError, match=message):
         _build(unsloth_config(tiny_model_dir, extra=extra))
 
 
-def test_quantised_load_requires_lora(tiny_model_dir: Path, fake_cuda: None, fake_unsloth: types.ModuleType) -> None:
+def test_quantised_load_requires_lora(
+    tiny_model_dir: Path, fake_cuda: None, fake_unsloth: types.ModuleType
+) -> None:
     with pytest.raises(ConfigError, match="lora.enabled"):
         _build(unsloth_config(tiny_model_dir, lora=False, extra={"load_in_4bit": True}))
 
@@ -206,7 +231,13 @@ def test_quantised_load_requires_lora(tiny_model_dir: Path, fake_cuda: None, fak
 # -- training loop through the reference trainer ----------------------------------------------
 
 
-def test_train_step_and_logprobs(tiny_model_dir: Path, fake_cuda: None, fake_unsloth: types.ModuleType, fake_calls: FakeCalls, tokenizer: Any) -> None:
+def test_train_step_and_logprobs(
+    tiny_model_dir: Path,
+    fake_cuda: None,
+    fake_unsloth: types.ModuleType,
+    fake_calls: FakeCalls,
+    tokenizer: Any,
+) -> None:
     trainer = _build(unsloth_config(tiny_model_dir))
     batch = _make_batch(tokenizer)
     base_before = {n: p.detach().clone() for n, p in trainer.hf_model.named_parameters() if "lora_" not in n}
@@ -224,12 +255,26 @@ def test_train_step_and_logprobs(tiny_model_dir: Path, fake_cuda: None, fake_uns
     mask = batch.response_mask.bool()
     assert (after[mask] - before[mask]).abs().sum() > 0  # the policy moved
     assert torch.allclose(ref_before, ref_after)  # the reference (adapters disabled) did not
-    assert all(torch.equal(base_before[n], p.detach()) for n, p in trainer.hf_model.named_parameters() if "lora_" not in n)
-    assert any(not torch.equal(lora_before[n], p.detach()) for n, p in trainer.model.named_parameters() if "lora_" in n)
+    assert all(
+        torch.equal(base_before[n], p.detach())
+        for n, p in trainer.hf_model.named_parameters()
+        if "lora_" not in n
+    )
+    assert any(
+        not torch.equal(lora_before[n], p.detach())
+        for n, p in trainer.model.named_parameters()
+        if "lora_" in n
+    )
     assert len(fake_calls.for_training) == 1  # training mode set once, not per step
 
 
-def test_for_training_reapplied_after_inference_mode(tiny_model_dir: Path, fake_cuda: None, fake_unsloth: types.ModuleType, fake_calls: FakeCalls, tokenizer: Any) -> None:
+def test_for_training_reapplied_after_inference_mode(
+    tiny_model_dir: Path,
+    fake_cuda: None,
+    fake_unsloth: types.ModuleType,
+    fake_calls: FakeCalls,
+    tokenizer: Any,
+) -> None:
     trainer = _build(unsloth_config(tiny_model_dir))
     fake_unsloth.FastLanguageModel.for_inference(trainer.model)  # e.g. a rollout engine sharing the model
     assert trainer.model._flag_for_generation
@@ -246,7 +291,9 @@ def _lora_delta(layer: Any) -> torch.Tensor:
     return (layer.lora_B[adapter].weight @ layer.lora_A[adapter].weight) * layer.scaling[adapter]
 
 
-def test_export_weights_merges_lora_into_hf_names(tiny_model_dir: Path, fake_cuda: None, fake_unsloth: types.ModuleType) -> None:
+def test_export_weights_merges_lora_into_hf_names(
+    tiny_model_dir: Path, fake_cuda: None, fake_unsloth: types.ModuleType
+) -> None:
     from transformers import AutoModelForCausalLM
 
     trainer = _build(unsloth_config(tiny_model_dir))
@@ -258,7 +305,9 @@ def test_export_weights_merges_lora_into_hf_names(tiny_model_dir: Path, fake_cud
     q_proj = trainer.hf_model.model.layers[0].self_attn.q_proj
     expected = q_proj.base_layer.weight.detach() + _lora_delta(q_proj)
     assert torch.allclose(exported["model.layers.0.self_attn.q_proj.weight"], expected, atol=1e-6)
-    assert not torch.allclose(exported["model.layers.0.self_attn.q_proj.weight"], q_proj.base_layer.weight.detach())
+    assert not torch.allclose(
+        exported["model.layers.0.self_attn.q_proj.weight"], q_proj.base_layer.weight.detach()
+    )
     # untouched layers are exported as-is
     k_proj = trainer.hf_model.model.layers[0].self_attn.k_proj
     assert torch.equal(exported["model.layers.0.self_attn.k_proj.weight"], k_proj.weight.detach())
@@ -268,7 +317,9 @@ def test_export_weights_merges_lora_into_hf_names(tiny_model_dir: Path, fake_cud
     assert all(torch.allclose(reference[k], exported[k], atol=1e-6) for k in exported)
 
 
-def test_export_weights_dequantises_4bit(tiny_model_dir: Path, fake_cuda: None, fake_unsloth: types.ModuleType) -> None:
+def test_export_weights_dequantises_4bit(
+    tiny_model_dir: Path, fake_cuda: None, fake_unsloth: types.ModuleType
+) -> None:
     from transformers import AutoModelForCausalLM
 
     trainer = _build(unsloth_config(tiny_model_dir, extra={"load_in_4bit": True}))
@@ -278,7 +329,9 @@ def test_export_weights_dequantises_4bit(tiny_model_dir: Path, fake_cuda: None, 
 
     layer0 = trainer.hf_model.model.layers[0]
     gate = layer0.mlp.gate_proj  # 4-bit, not LoRA-targeted → dequantised verbatim
-    assert torch.allclose(exported["model.layers.0.mlp.gate_proj.weight"], gate.weight.quant_state.dequantized)
+    assert torch.allclose(
+        exported["model.layers.0.mlp.gate_proj.weight"], gate.weight.quant_state.dequantized
+    )
     assert not torch.allclose(exported["model.layers.0.mlp.gate_proj.weight"], gate.weight.detach())
 
     q_proj = layer0.self_attn.q_proj  # 4-bit *and* LoRA-targeted → dequantise, then merge
@@ -315,7 +368,9 @@ def test_merge_rejects_non_finite() -> None:
 
     from monorl.adapters.unsloth.trainer import merge_lora_layer
 
-    peft_model = get_peft_model(torch.nn.Sequential(torch.nn.Linear(2, 2)), LoraConfig(r=1, lora_alpha=1, target_modules=["0"]))
+    peft_model = get_peft_model(
+        torch.nn.Sequential(torch.nn.Linear(2, 2)), LoraConfig(r=1, lora_alpha=1, target_modules=["0"])
+    )
     layer = peft_model.base_model.model[0]
     with torch.no_grad():
         layer.lora_B["default"].weight.fill_(float("inf"))
@@ -327,7 +382,14 @@ def test_merge_rejects_non_finite() -> None:
 # -- persistence -------------------------------------------------------------------------------
 
 
-def test_save_pretrained_uses_merged_16bit(tiny_model_dir: Path, fake_cuda: None, fake_unsloth: types.ModuleType, fake_calls: FakeCalls, tmp_path: Path, tokenizer: Any) -> None:
+def test_save_pretrained_uses_merged_16bit(
+    tiny_model_dir: Path,
+    fake_cuda: None,
+    fake_unsloth: types.ModuleType,
+    fake_calls: FakeCalls,
+    tmp_path: Path,
+    tokenizer: Any,
+) -> None:
     trainer = _build(unsloth_config(tiny_model_dir))
     out = tmp_path / "export"
     trainer.save_pretrained(out)
@@ -344,7 +406,13 @@ def test_save_pretrained_uses_merged_16bit(tiny_model_dir: Path, fake_cuda: None
     assert len(fake_calls.for_training) == 2
 
 
-def test_save_pretrained_without_bound_method_uses_generic_saver(tiny_model_dir: Path, fake_cuda: None, fake_unsloth: types.ModuleType, fake_calls: FakeCalls, tmp_path: Path) -> None:
+def test_save_pretrained_without_bound_method_uses_generic_saver(
+    tiny_model_dir: Path,
+    fake_cuda: None,
+    fake_unsloth: types.ModuleType,
+    fake_calls: FakeCalls,
+    tmp_path: Path,
+) -> None:
     trainer = _build(unsloth_config(tiny_model_dir))
     del trainer.model.save_pretrained_merged
     trainer.save_pretrained(tmp_path / "generic")
@@ -352,7 +420,14 @@ def test_save_pretrained_without_bound_method_uses_generic_saver(tiny_model_dir:
     assert call["save_method"] == "merged_16bit" and (tmp_path / "generic" / "merged_16bit.marker").exists()
 
 
-def test_checkpoint_roundtrip(tiny_model_dir: Path, fake_cuda: None, fake_unsloth: types.ModuleType, fake_calls: FakeCalls, tmp_path: Path, tokenizer: Any) -> None:
+def test_checkpoint_roundtrip(
+    tiny_model_dir: Path,
+    fake_cuda: None,
+    fake_unsloth: types.ModuleType,
+    fake_calls: FakeCalls,
+    tmp_path: Path,
+    tokenizer: Any,
+) -> None:
     trainer = _build(unsloth_config(tiny_model_dir))
     batch = _make_batch(tokenizer)
     trainer.train_step(batch)
@@ -365,6 +440,8 @@ def test_checkpoint_roundtrip(tiny_model_dir: Path, fake_cuda: None, fake_unslot
     assert trainer.step == 2
     trainer.load_checkpoint(ckpt)
     assert trainer.step == 1
-    assert all(torch.equal(snapshot[n], p.detach()) for n, p in trainer.model.named_parameters() if "lora_" in n)
+    assert all(
+        torch.equal(snapshot[n], p.detach()) for n, p in trainer.model.named_parameters() if "lora_" in n
+    )
     trainer.train_step(batch)  # resumes training; for_training re-armed after the load
     assert trainer.step == 2 and len(fake_calls.for_training) == 2

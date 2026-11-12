@@ -28,7 +28,9 @@ SHUFFLE_BUFFER = 1000
 RowRef = tuple[str, dict[str, Any]]
 
 
-def buffered_shuffle(items: Iterator[RowRef], seed: int, buffer_size: int = SHUFFLE_BUFFER) -> Iterator[RowRef]:
+def buffered_shuffle(
+    items: Iterator[RowRef], seed: int, buffer_size: int = SHUFFLE_BUFFER
+) -> Iterator[RowRef]:
     """Reservoir-style approximate shuffle for streams (same idea as ``IterableDataset.shuffle``)."""
     rng = random.Random(seed)
     buffer: list[RowRef] = []
@@ -199,7 +201,9 @@ class HubRows(RowSource):
                 parsed.repo_id, name=config_name, split=split, streaming=streaming, **kwargs
             )
         except (ValueError, FileNotFoundError) as e:
-            raise DataError(f"cannot load {parsed.raw!r} (split={split!r}, config={config_name!r}): {e}") from e
+            raise DataError(
+                f"cannot load {parsed.raw!r} (split={split!r}, config={config_name!r}): {e}"
+            ) from e
         self._columns: dict[str, str] | None = None
 
     def _row_id(self, index: int) -> str:
@@ -221,7 +225,11 @@ class HubRows(RowSource):
 
     def iter_rows(self, *, shuffle_seed: int | None = None) -> Iterator[RowRef]:
         if self.streaming:
-            ds = self.dataset if shuffle_seed is None else self.dataset.shuffle(seed=shuffle_seed, buffer_size=SHUFFLE_BUFFER)
+            ds = (
+                self.dataset
+                if shuffle_seed is None
+                else self.dataset.shuffle(seed=shuffle_seed, buffer_size=SHUFFLE_BUFFER)
+            )
             return ((self._row_id(i), row) for i, row in enumerate(ds))
         n = len(self.dataset)
         order = list(range(n))
@@ -243,7 +251,14 @@ class HubRows(RowSource):
         return f"hf://datasets/{self.parsed.repo_id}{rev}"
 
 
-def open_rows(parsed: ParsedURI, *, split: str, config_name: str | None, streaming: bool, extra: dict[str, Any] | None = None) -> RowSource:
+def open_rows(
+    parsed: ParsedURI,
+    *,
+    split: str,
+    config_name: str | None,
+    streaming: bool,
+    extra: dict[str, Any] | None = None,
+) -> RowSource:
     if parsed.kind == "hf":
         return HubRows(parsed, split=split, config_name=config_name, streaming=streaming, load_kwargs=extra)
     return FileRows(parsed, streaming=streaming)

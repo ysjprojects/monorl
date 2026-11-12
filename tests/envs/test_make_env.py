@@ -38,23 +38,51 @@ def test_make_single_turn(run_config_dict):
 def test_make_tool_calling_respects_explicit_and_param_max_turns(run_config_dict):
     env = make_env(_config(run_config_dict, {"type": "tool_calling", "params": {"tools": ["calculator"]}}))
     assert isinstance(env, ToolCallingEnv) and env.max_turns == 4
-    env = make_env(_config(run_config_dict, {"type": "tool_calling", "params": {"tools": ["calculator"], "max_turns": 6}}))
+    env = make_env(
+        _config(
+            run_config_dict, {"type": "tool_calling", "params": {"tools": ["calculator"], "max_turns": 6}}
+        )
+    )
     assert env.max_turns == 6
-    env = make_env(_config(run_config_dict, {"type": "tool_calling", "max_turns": 2, "params": {"tools": ["calculator"], "max_turns": 6}}))
+    env = make_env(
+        _config(
+            run_config_dict,
+            {"type": "tool_calling", "max_turns": 2, "params": {"tools": ["calculator"], "max_turns": 6}},
+        )
+    )
     assert env.max_turns == 2
     assert make_env(_config(run_config_dict, {"type": "tool_calling"})) is not env  # fresh instance per call
 
 
 def test_make_remote_http_and_stdio(run_config_dict):
-    handle = start_http_server(MEPServer(lambda: make_tool_calling_env({"tools": ["calculator"]}, max_turns=5)), port=0)
+    handle = start_http_server(
+        MEPServer(lambda: make_tool_calling_env({"tools": ["calculator"]}, max_turns=5)), port=0
+    )
     try:
-        env = make_env(_config(run_config_dict, {"type": "remote", "params": {"transport": "http", "url": handle.url}}))
+        env = make_env(
+            _config(run_config_dict, {"type": "remote", "params": {"transport": "http", "url": handle.url}})
+        )
         assert isinstance(env, RemoteEnv) and env.max_turns == 5  # from spec
-        env = make_env(_config(run_config_dict, {"type": "remote", "max_turns": 2, "params": {"transport": "http", "url": handle.url}}))
+        env = make_env(
+            _config(
+                run_config_dict,
+                {"type": "remote", "max_turns": 2, "params": {"transport": "http", "url": handle.url}},
+            )
+        )
         assert env.max_turns == 2  # explicit override wins
         script = Path(__file__).with_name("mep_tool_server.py")
         env = make_env(
-            _config(run_config_dict, {"type": "remote", "params": {"transport": "stdio", "command": [sys.executable, str(script)], "timeout_s": 30}})
+            _config(
+                run_config_dict,
+                {
+                    "type": "remote",
+                    "params": {
+                        "transport": "stdio",
+                        "command": [sys.executable, str(script)],
+                        "timeout_s": 30,
+                    },
+                },
+            )
         )
         assert isinstance(env, Environment) and env.spec.name == "crashable_tools" and env.max_turns == 3
         env.reset(Sample(id="x", messages=[{"role": "user", "content": "q"}]))
@@ -69,7 +97,11 @@ def test_make_openenv(run_config_dict, monkeypatch):
     monkeypatch.syspath_prepend(str(OPENENV_TESTS))
     cfg = _config(
         run_config_dict,
-        {"type": "openenv", "max_turns": 2, "params": {"env_class": "sample_envs.ReverseEnv", "env_kwargs": {"word": "ab"}}},
+        {
+            "type": "openenv",
+            "max_turns": 2,
+            "params": {"env_class": "sample_envs.ReverseEnv", "env_kwargs": {"word": "ab"}},
+        },
     )
     env = make_env(cfg)
     assert type(env).__name__ == "OpenEnvEnv" and env.max_turns == 2

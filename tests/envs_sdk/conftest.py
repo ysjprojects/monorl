@@ -84,9 +84,14 @@ def example(request: pytest.FixtureRequest, built: dict[str, bool]) -> Example:
 
 
 def make_sample(
-    sid: str = "s1", question: str = "What is 2+2?", reference: Any = "4", metadata: dict[str, Any] | None = None
+    sid: str = "s1",
+    question: str = "What is 2+2?",
+    reference: Any = "4",
+    metadata: dict[str, Any] | None = None,
 ) -> Sample:
-    return Sample(id=sid, messages=[{"role": "user", "content": question}], reference=reference, metadata=metadata or {})
+    return Sample(
+        id=sid, messages=[{"role": "user", "content": question}], reference=reference, metadata=metadata or {}
+    )
 
 
 def completion(text: str) -> Completion:
@@ -129,10 +134,14 @@ class StdioClient:
         return self.request(protocol.health_request())
 
     def reset(self, episode_id: str, sample: Sample, seed: int | None = None):
-        return protocol.validate_reset_response(self.request(protocol.reset_request(episode_id, sample, seed)))
+        return protocol.validate_reset_response(
+            self.request(protocol.reset_request(episode_id, sample, seed))
+        )
 
     def step(self, episode_id: str, text: str):
-        return protocol.validate_step_response(self.request(protocol.step_request(episode_id, completion(text))))
+        return protocol.validate_step_response(
+            self.request(protocol.step_request(episode_id, completion(text)))
+        )
 
     def close(self, episode_id: str) -> dict[str, Any]:
         return self.request(protocol.close_request(episode_id))
@@ -172,7 +181,9 @@ class HttpClient:
         return protocol.validate_reset_response(self._post("reset", req))
 
     def step(self, episode_id: str, text: str):
-        return protocol.validate_step_response(self._post("step", protocol.step_request(episode_id, completion(text))))
+        return protocol.validate_step_response(
+            self._post("step", protocol.step_request(episode_id, completion(text)))
+        )
 
     def close(self, episode_id: str) -> dict[str, Any]:
         return self._post("close", protocol.close_request(episode_id))

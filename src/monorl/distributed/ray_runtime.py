@@ -398,7 +398,9 @@ class RayTrainer:
         per = math.ceil(n / self.world_size)
         shards = [batch.slice(r * per, min(n, (r + 1) * per)) for r in range(self.world_size)]
         if any(len(s) == 0 for s in shards):
-            raise ConfigError(f"batch of {n} sequences cannot be sharded across {self.world_size} trainer ranks")
+            raise ConfigError(
+                f"batch of {n} sequences cannot be sharded across {self.world_size} trainer ranks"
+            )
         return shards
 
     @property
@@ -413,13 +415,17 @@ class RayTrainer:
         shards = self._shards(batch)
         results = ray.get([a.train_step.remote(s) for a, s in zip(self.actors, shards, strict=True)])
         keys = {k for r in results for k in r}
-        return {k: sum(float(r[k]) for r in results if k in r) / sum(1 for r in results if k in r) for k in keys}
+        return {
+            k: sum(float(r[k]) for r in results if k in r) / sum(1 for r in results if k in r) for k in keys
+        }
 
     def compute_logprobs(self, batch: TrainBatch, *, reference: bool = False) -> torch.Tensor:
         import ray
 
         shards = self._shards(batch)
-        parts = ray.get([a.compute_logprobs.remote(s, reference) for a, s in zip(self.actors, shards, strict=True)])
+        parts = ray.get(
+            [a.compute_logprobs.remote(s, reference) for a, s in zip(self.actors, shards, strict=True)]
+        )
         return torch.cat(parts, dim=0)
 
     def export_weights(self) -> Iterator[tuple[str, torch.Tensor]]:
@@ -486,7 +492,9 @@ class RayTrainer:
 
 def _require(obj: Any, cls: type, role: str) -> None:
     if not isinstance(obj, cls):
-        raise WeightSyncError(f"{role} must be a {cls.__name__} proxy from build_ray_runtime, got {type(obj).__name__}")
+        raise WeightSyncError(
+            f"{role} must be a {cls.__name__} proxy from build_ray_runtime, got {type(obj).__name__}"
+        )
 
 
 class RayObjectStoreWeightSync:
@@ -521,7 +529,9 @@ class RayBroadcastWeightSync:
 
     name = "broadcast"
 
-    def __init__(self, plan: PlacementPlan, *, timeout_s: float = 600.0, bucket_bytes: int = 256 << 20) -> None:
+    def __init__(
+        self, plan: PlacementPlan, *, timeout_s: float = 600.0, bucket_bytes: int = 256 << 20
+    ) -> None:
         self.plan = plan
         self.timeout_s = timeout_s
         self.bucket_bytes = bucket_bytes
@@ -609,7 +619,11 @@ def build_ray_runtime(config: RunConfig) -> Runtime:
     from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 
     extra = config.cluster.extra
-    ray.init(address=config.cluster.ray_address or None, ignore_reinit_error=True, **dict(extra.get("ray_init", {})))
+    ray.init(
+        address=config.cluster.ray_address or None,
+        ignore_reinit_error=True,
+        **dict(extra.get("ray_init", {})),
+    )
     plan = plan_placement(config, detect_cluster())
     cpus_per_actor = float(extra.get("cpus_per_actor", 1))
     bundles, strategy = _bundles(plan, cpus_per_actor)
@@ -630,7 +644,9 @@ def build_ray_runtime(config: RunConfig) -> Runtime:
         return {
             **res,
             "scheduling_strategy": PlacementGroupSchedulingStrategy(
-                placement_group=pg, placement_group_bundle_index=bundle, placement_group_capture_child_tasks=True
+                placement_group=pg,
+                placement_group_bundle_index=bundle,
+                placement_group_capture_child_tasks=True,
             ),
         }
 
@@ -666,7 +682,8 @@ def build_ray_runtime(config: RunConfig) -> Runtime:
             builds += [a.build.remote(_group_env(addr, port, r, tp)) for r, a in enumerate(group)]
         addr, port = ray.get([trainer_actors[0].node_ip.remote(), trainer_actors[0].free_port.remote()])
         builds += [
-            a.build.remote(_group_env(addr, port, r, plan.trainer_world_size)) for r, a in enumerate(trainer_actors)
+            a.build.remote(_group_env(addr, port, r, plan.trainer_world_size))
+            for r, a in enumerate(trainer_actors)
         ]
         ray.get(builds)
     except Exception:

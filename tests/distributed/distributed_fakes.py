@@ -40,8 +40,14 @@ class FakeEngine:
     def generate(self, prompts: Sequence[PromptInput], params: SamplingParams) -> list[list[Completion]]:
         tag = f"w={weight_sum(self.weights):.6f}"
         return [
-            [Completion(text=f"{tag} p={i} n={k}", token_ids=[i, k], logprobs=[0.0, 0.0] if params.logprobs else None)
-             for k in range(params.n)]
+            [
+                Completion(
+                    text=f"{tag} p={i} n={k}",
+                    token_ids=[i, k],
+                    logprobs=[0.0, 0.0] if params.logprobs else None,
+                )
+                for k in range(params.n)
+            ]
             for i, _ in enumerate(prompts)
         ]
 

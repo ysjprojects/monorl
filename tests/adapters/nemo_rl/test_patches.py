@@ -62,13 +62,35 @@ def test_translate_metrics_maps_contract_names() -> None:
         "nemo/train/advantages/mean": 0.0,
     }
     assert translate_metrics({"mean_gen_tokens_per_sample": 64}, "train") == {"tokens/response_mean": 64.0}
-    timing = translate_metrics({"total_step_time": 10.0, "generation": 4.0, "policy_training": 5.0, "weight_sync": 1.0, "data_processing": 0.1}, "timing/train")
-    assert timing == {"time/step": 10.0, "time/rollout": 4.0, "time/train": 5.0, "time/sync": 1.0, "time/data": 0.1}
+    timing = translate_metrics(
+        {
+            "total_step_time": 10.0,
+            "generation": 4.0,
+            "policy_training": 5.0,
+            "weight_sync": 1.0,
+            "data_processing": 0.1,
+        },
+        "timing/train",
+    )
+    assert timing == {
+        "time/step": 10.0,
+        "time/rollout": 4.0,
+        "time/train": 5.0,
+        "time/sync": 1.0,
+        "time/data": 0.1,
+    }
     assert translate_metrics({"accuracy": 0.5}, "validation") == {"eval/accuracy": 0.5}
-    assert translate_metrics({"total_validation_time": 2.0}, "timing/validation") == {"time/eval/total_validation_time": 2.0}
+    assert translate_metrics({"total_validation_time": 2.0}, "timing/validation") == {
+        "time/eval/total_validation_time": 2.0
+    }
     assert translate_metrics({"tokens_per_sec": 3.0}, "performance") == {"perf/tokens_per_sec": 3.0}
     assert translate_metrics({"x": 1}, None) == {"nemo/x": 1.0}
-    assert (phase_for("train"), phase_for("validation"), phase_for("timing/validation"), phase_for("timing/setup")) == ("train", "eval", "eval", "setup")
+    assert (
+        phase_for("train"),
+        phase_for("validation"),
+        phase_for("timing/validation"),
+        phase_for("timing/setup"),
+    ) == ("train", "eval", "eval", "setup")
 
 
 def test_append_metrics_row(tmp_path: Path) -> None:
@@ -113,16 +135,26 @@ def test_apply_against_fake_nemo_rl(fake_nemo_rl, tmp_path: Path, monkeypatch: p
     logger = FakeLogger({"log_dir": str(tmp_path)})
     logger.log_metrics({"loss": 0.1, "reward": 0.9, "lr": 1e-6}, 5, prefix="train")
     logger.log_metrics({"total_step_time": 2.0}, 5, prefix="timing/train", step_finished=True)
-    assert FakeLogger.calls == [({"loss": 0.1, "reward": 0.9, "lr": 1e-6}, 5, "train"), ({"total_step_time": 2.0}, 5, "timing/train")]
+    assert FakeLogger.calls == [
+        ({"loss": 0.1, "reward": 0.9, "lr": 1e-6}, 5, "train"),
+        ({"total_step_time": 2.0}, 5, "timing/train"),
+    ]
     rows = [json.loads(line) for line in (tmp_path / "metrics.jsonl").read_text().splitlines()]
-    assert rows[0]["step"] == 5 and rows[0]["loss/policy"] == 0.1 and rows[0]["reward/mean"] == 0.9 and rows[0]["lr"] == 1e-6
+    assert (
+        rows[0]["step"] == 5
+        and rows[0]["loss/policy"] == 0.1
+        and rows[0]["reward/mean"] == 0.9
+        and rows[0]["lr"] == 1e-6
+    )
     assert rows[1]["time/step"] == 2.0
 
     assert apply("nemo_rl").skipped == [("nemo_rl.logger_metrics", "already applied")]
     revert("nemo_rl")
     assert not is_applied("nemo_rl.logger_metrics", "nemo_rl")
     FakeLogger({}).log_metrics({"loss": 0.2}, 6, prefix="train")
-    assert len((tmp_path / "metrics.jsonl").read_text().splitlines()) == 2  # original restored, nothing mirrored
+    assert (
+        len((tmp_path / "metrics.jsonl").read_text().splitlines()) == 2
+    )  # original restored, nothing mirrored
 
 
 def test_install_bridges_registers_env_and_actor(fake_nemo_rl) -> None:

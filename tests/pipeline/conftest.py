@@ -40,7 +40,9 @@ class ChatAwareSource:
         return {"messages": "list"}
 
 
-def chat_aware_open_source(data_config: DataConfig, *, split: str | None = None, tokenizer: Any = None, seed: int = 0) -> Any:
+def chat_aware_open_source(
+    data_config: DataConfig, *, split: str | None = None, tokenizer: Any = None, seed: int = 0
+) -> Any:
     prompt_field = data_config.prompt_field or "prompt"
     answer_field = data_config.answer_field or "answer"
     samples: list[Sample] = []
@@ -66,7 +68,9 @@ def chat_aware_open_source(data_config: DataConfig, *, split: str | None = None,
                     messages.append({"role": "system", "content": data_config.system_prompt})
                 messages.append({"role": "user", "content": str(row[prompt_field])})
                 reference = row.get(answer_field)
-            samples.append(Sample(id=str(row.get("id", i)), messages=messages, reference=reference, metadata=metadata))
+            samples.append(
+                Sample(id=str(row.get("id", i)), messages=messages, reference=reference, metadata=metadata)
+            )
     if data_config.limit:
         samples = samples[: data_config.limit]
     return ChatAwareSource(samples)
@@ -99,7 +103,12 @@ DEFAULT_STAGES: list[dict[str, Any]] = [
         "max_per_prompt": 1,
         "rollout_overrides": {"temperature": 0.7},
     },
-    {"type": "train", "name": "sft_like", "data_from": "previous", "overrides": {"trainer": {"max_steps": 1}}},
+    {
+        "type": "train",
+        "name": "sft_like",
+        "data_from": "previous",
+        "overrides": {"trainer": {"max_steps": 1}},
+    },
     {"type": "eval", "name": "eval", "max_prompts": 3},
 ]
 

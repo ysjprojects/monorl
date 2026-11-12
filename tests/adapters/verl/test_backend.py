@@ -22,7 +22,7 @@ from monorl.core.errors import BackendUnavailable
 from monorl.core.registry import registry
 from monorl.core.reporting import RunReporter, list_checkpoints, read_status
 
-_FAKE_ENTRY = '''
+_FAKE_ENTRY = """
 import json, os, signal, sys, time
 from pathlib import Path
 
@@ -46,7 +46,7 @@ if mode == "hang":
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))
     time.sleep(60)
 print("done", flush=True)
-'''
+"""
 
 
 @pytest.fixture
@@ -76,7 +76,10 @@ def test_registry_and_protocol(make_config):
 
 
 def test_command_and_env(make_config, tmp_path: Path):
-    cfg = make_config(cluster={"ray_address": "auto"}, trainer={"backend": "verl", "extra": {"verl_python": "/opt/verl/bin/python"}})
+    cfg = make_config(
+        cluster={"ray_address": "auto"},
+        trainer={"backend": "verl", "extra": {"verl_python": "/opt/verl/bin/python"}},
+    )
     backend = VerlBackend(cfg)
     cmd = backend.build_command(["a=1", "b.c=x"])
     assert cmd == ["/opt/verl/bin/python", "-m", "monorl.adapters.verl.entry", "a=1", "b.c=x"]
@@ -104,7 +107,9 @@ def test_run_requires_verl_unless_custom_python(make_config, tmp_path: Path):
     if backend_module.is_available():
         pytest.skip("verl importable")
     with pytest.raises(BackendUnavailable):
-        VerlBackend(make_config()).run(make_config(), tmp_path / "run", reporter=RunReporter(tmp_path / "run", echo=False))
+        VerlBackend(make_config()).run(
+            make_config(), tmp_path / "run", reporter=RunReporter(tmp_path / "run", echo=False)
+        )
 
 
 def test_run_succeeds_and_collects_checkpoints(make_config, tmp_path: Path, fake_entry: Path):
@@ -122,10 +127,14 @@ def test_run_succeeds_and_collects_checkpoints(make_config, tmp_path: Path, fake
     log = (run_dir / "run.log").read_text()
     assert "fake verl entry argv:" in log and "data.train_files=" in log and "done" in log
     assert list_checkpoints(run_dir) == [str(run_dir / "checkpoints" / "step-2")]
-    assert (run_dir / "checkpoints" / "step-2").resolve() == (run_dir / "checkpoints" / "global_step_2").resolve()
+    assert (run_dir / "checkpoints" / "step-2").resolve() == (
+        run_dir / "checkpoints" / "global_step_2"
+    ).resolve()
 
 
-def test_run_failure_reports_exit_code(make_config, tmp_path: Path, fake_entry: Path, monkeypatch: pytest.MonkeyPatch):
+def test_run_failure_reports_exit_code(
+    make_config, tmp_path: Path, fake_entry: Path, monkeypatch: pytest.MonkeyPatch
+):
     monkeypatch.setenv("FAKE_ENTRY_MODE", "fail")
     cfg = make_config()
     run_dir = tmp_path / "run"
@@ -136,7 +145,9 @@ def test_run_failure_reports_exit_code(make_config, tmp_path: Path, fake_entry: 
     assert read_status(run_dir)["state"] == "failed"
 
 
-def test_cancel_propagates_sigterm(make_config, tmp_path: Path, fake_entry: Path, monkeypatch: pytest.MonkeyPatch):
+def test_cancel_propagates_sigterm(
+    make_config, tmp_path: Path, fake_entry: Path, monkeypatch: pytest.MonkeyPatch
+):
     monkeypatch.setenv("FAKE_ENTRY_MODE", "hang")
     cfg = make_config()
     run_dir = tmp_path / "run"

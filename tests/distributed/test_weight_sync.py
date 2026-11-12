@@ -82,7 +82,12 @@ def _batch():
 def test_broadcast_between_two_spawned_cpu_processes(tmp_path: Path):
     seed = 11
     spec = BroadcastGroupSpec(
-        master_addr="127.0.0.1", master_port=_free_port(), world_size=2, backend="gloo", timeout_s=60, bucket_bytes=256
+        master_addr="127.0.0.1",
+        master_port=_free_port(),
+        world_size=2,
+        backend="gloo",
+        timeout_s=60,
+        bucket_bytes=256,
     )
     out = tmp_path / "received.pt"
     ctx = mp.get_context("spawn")
@@ -101,7 +106,9 @@ def test_broadcast_between_two_spawned_cpu_processes(tmp_path: Path):
         assert torch.equal(received[name], t), name
     sender = ast.literal_eval((tmp_path / "received.pt.rank0.json").read_text())
     receiver = ast.literal_eval((tmp_path / "received.pt.rank1.json").read_text())
-    assert sender["weight_sync/buckets"] == receiver["weight_sync/buckets"] >= 4  # 256-byte buckets, mixed dtypes
+    assert (
+        sender["weight_sync/buckets"] == receiver["weight_sync/buckets"] >= 4
+    )  # 256-byte buckets, mixed dtypes
     payload = sum(t.numel() * t.element_size() for t in expected.values())
     assert receiver["weight_sync/bytes"] == payload
 

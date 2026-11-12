@@ -13,7 +13,13 @@ def _sniff(rows):
 
 def test_chat_messages_column():
     rows = [{"messages": [{"role": "user", "content": "hi"}], "answer": "x"}]
-    assert _sniff(rows) == {"format": "chat", "messages_field": "messages", "prompt_field": None, "answer_field": "answer", "image_fields": []}
+    assert _sniff(rows) == {
+        "format": "chat",
+        "messages_field": "messages",
+        "prompt_field": None,
+        "answer_field": "answer",
+        "image_fields": [],
+    }
 
 
 @pytest.mark.parametrize("col", ["conversations", "conversation", "Messages"])
@@ -26,7 +32,13 @@ def test_chat_aliases_and_sharegpt(col):
 def test_messages_column_that_is_not_chat_falls_through():
     rows = [{"messages": "plain string", "prompt": "p", "completion": "c"}]
     out = _sniff(rows)
-    assert out == {"format": "prompt_answer", "prompt_field": "prompt", "answer_field": "completion", "messages_field": None, "image_fields": []}
+    assert out == {
+        "format": "prompt_answer",
+        "prompt_field": "prompt",
+        "answer_field": "completion",
+        "messages_field": None,
+        "image_fields": [],
+    }
 
 
 def test_trl_conversational_prompt_column_is_chat():
@@ -37,11 +49,23 @@ def test_trl_conversational_prompt_column_is_chat():
 
 @pytest.mark.parametrize(
     ("prompt", "answer"),
-    [("question", "answer"), ("instruction", "output"), ("problem", "solution"), ("query", "response"), ("input", "target")],
+    [
+        ("question", "answer"),
+        ("instruction", "output"),
+        ("problem", "solution"),
+        ("query", "response"),
+        ("input", "target"),
+    ],
 )
 def test_prompt_answer_pairs(prompt, answer):
     out = _sniff([{prompt: "q", answer: "a", "misc": 1}])
-    assert out == {"format": "prompt_answer", "prompt_field": prompt, "answer_field": answer, "messages_field": None, "image_fields": []}
+    assert out == {
+        "format": "prompt_answer",
+        "prompt_field": prompt,
+        "answer_field": answer,
+        "messages_field": None,
+        "image_fields": [],
+    }
 
 
 def test_prompt_without_answer_is_text():
@@ -67,5 +91,7 @@ def test_gsm8k_extraction():
 
 
 def test_infer_columns_merges_types():
-    cols = infer_columns([{"a": 1, "b": None, "c": [1, 2]}, {"a": 2.5, "b": "s", "c": ["x"]}, {"d": {"k": 1}}])
+    cols = infer_columns(
+        [{"a": 1, "b": None, "c": [1, 2]}, {"a": 2.5, "b": "s", "c": ["x"]}, {"d": {"k": 1}}]
+    )
     assert cols == {"a": "double", "b": "string", "c": "list", "d": "struct"}

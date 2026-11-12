@@ -151,7 +151,9 @@ def sample_to_row(
     return row
 
 
-def sft_sample_to_row(sample: Sample, *, response_field: str | None, multimodal: bool = False) -> dict[str, Any]:
+def sft_sample_to_row(
+    sample: Sample, *, response_field: str | None, multimodal: bool = False
+) -> dict[str, Any]:
     """``{messages: prompt + assistant response, images?}`` for ``MultiTurnSFTDataset``; the
     response comes from :func:`monorl.orchestrator.sft.sft_messages`."""
     from monorl.orchestrator.sft import sft_messages
@@ -199,7 +201,11 @@ def sft_rows_to_table(rows: list[dict[str, Any]], *, multimodal: bool = False) -
 
 
 def write_parquet(
-    samples: Iterable[Sample], path: str | Path, *, agent_name: str = SINGLE_TURN_AGENT, multimodal: bool | None = None
+    samples: Iterable[Sample],
+    path: str | Path,
+    *,
+    agent_name: str = SINGLE_TURN_AGENT,
+    multimodal: bool | None = None,
 ) -> int:
     """Write RL rows for ``samples`` to ``path``; returns the number of rows written. ``multimodal``
     defaults to whether any sample carries image parts."""
@@ -253,7 +259,9 @@ def export_datasets(config: RunConfig, run_dir: str | Path) -> dict[str, Path]:
     else:
         write_parquet(train, out["train"], agent_name=agent, multimodal=multimodal)
     if config.data.eval_uri:
-        eval_cfg = config.data.model_copy(update={"uri": config.data.eval_uri, "split": config.data.eval_split})
+        eval_cfg = config.data.model_copy(
+            update={"uri": config.data.eval_uri, "split": config.data.eval_split}
+        )
         out["val"] = sft_val_parquet_path(run_dir) if sft else val_parquet_path(run_dir)
         evaluation = list(open_source(eval_cfg, seed=config.seed))
         if sft:

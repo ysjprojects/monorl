@@ -125,7 +125,9 @@ def reset_request(episode_id: str, sample: Sample, seed: int | None = None) -> d
     return req
 
 
-def step_request(episode_id: str, completion: Completion, tool_calls: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+def step_request(
+    episode_id: str, completion: Completion, tool_calls: list[dict[str, Any]] | None = None
+) -> dict[str, Any]:
     return {"op": "step", "episode_id": episode_id, "action": encode_action(completion, tool_calls)}
 
 

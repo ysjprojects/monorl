@@ -20,7 +20,13 @@ from monorl.patching import apply, is_applied, register_patchset, revert, status
 
 
 def test_build_tool_config_schema(make_config):
-    cfg = make_config(env={"type": "tool_calling", "max_turns": 3, "params": {"tools": ["calculator", "lookup"], "corpus": {"a": "b"}}})
+    cfg = make_config(
+        env={
+            "type": "tool_calling",
+            "max_turns": 3,
+            "params": {"tools": ["calculator", "lookup"], "corpus": {"a": "b"}},
+        }
+    )
     tree = build_tool_config(cfg)
     names = [t["tool_schema"]["function"]["name"] for t in tree["tools"]]
     assert names == ["calculator", "lookup"]
@@ -54,13 +60,17 @@ def test_monorl_tool_executes(fake_verl, make_config):
     from verl.tools.base_tool import BaseTool
     from verl.tools.schemas import OpenAIFunctionToolSchema
 
-    tool = verl_tool.MonorlTool(config=spec["config"], tool_schema=OpenAIFunctionToolSchema.model_validate(spec["tool_schema"]))
+    tool = verl_tool.MonorlTool(
+        config=spec["config"], tool_schema=OpenAIFunctionToolSchema.model_validate(spec["tool_schema"])
+    )
     assert isinstance(tool, BaseTool)
     assert tool.name == "calculator"
 
     async def drive():
         instance_id, _ = await tool.create(create_kwargs={})
-        response, reward, metrics = await tool.execute(instance_id, {"expression": "2*(3+4)"}, agent_data=None)
+        response, reward, metrics = await tool.execute(
+            instance_id, {"expression": "2*(3+4)"}, agent_data=None
+        )
         await tool.release(instance_id)
         return response, reward, metrics
 
@@ -110,13 +120,21 @@ def test_tracking_patch_writes_metrics_jsonl(fake_verl, tmp_path: Path, monkeypa
     monkeypatch.setenv("MONORL_RUN_DIR", str(run_dir))
     report = apply("verl")
     assert report.installed_version == fake_verl.version
-    assert set(report.applied) == {"verl.tracking.run_dir", "verl.tracking.metrics_jsonl", "verl.ray_runtime_env.monorl"}, report
+    assert set(report.applied) == {
+        "verl.tracking.run_dir",
+        "verl.tracking.metrics_jsonl",
+        "verl.ray_runtime_env.monorl",
+    }, report
     assert all(s.applied and s.verified for s in status("verl"))
 
     from verl.utils.tracking import Tracking
 
-    tracking = Tracking("monorl", "exp", "console", config={"trainer": {"default_local_dir": str(run_dir / "checkpoints")}})
-    tracking.log({"critic/score/mean": 0.75, "actor/pg_loss": -0.02, "timing_s/gen": 1.5, "actor/lr": 1e-6}, step=3)
+    tracking = Tracking(
+        "monorl", "exp", "console", config={"trainer": {"default_local_dir": str(run_dir / "checkpoints")}}
+    )
+    tracking.log(
+        {"critic/score/mean": 0.75, "actor/pg_loss": -0.02, "timing_s/gen": 1.5, "actor/lr": 1e-6}, step=3
+    )
     tracking.log(data={"val-core/monorl/reward/mean@1": 0.9}, step=3)
     assert tracking.console_logger.rows[0][1] == 3  # original still runs
     rows = [row for _, row in iter_metrics(run_dir)]
@@ -134,14 +152,18 @@ def test_tracking_patch_writes_metrics_jsonl(fake_verl, tmp_path: Path, monkeypa
     assert len(list(iter_metrics(run_dir))) == 2
 
 
-def test_tracking_patch_falls_back_to_default_local_dir(fake_verl, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+def test_tracking_patch_falls_back_to_default_local_dir(
+    fake_verl, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
     register_patchset(PATCHES)
     monkeypatch.delenv("MONORL_RUN_DIR", raising=False)
     apply("verl")
     from verl.utils.tracking import Tracking
 
     run_dir = tmp_path / "fallback"
-    Tracking("p", "e", config={"trainer": {"default_local_dir": str(run_dir / "checkpoints")}}).log({"actor/entropy": 2.0}, 1)
+    Tracking("p", "e", config={"trainer": {"default_local_dir": str(run_dir / "checkpoints")}}).log(
+        {"actor/entropy": 2.0}, 1
+    )
     rows = [row for _, row in iter_metrics(run_dir)]
     assert rows and rows[0]["loss/entropy"] == 2.0
 
@@ -162,7 +184,9 @@ def test_runtime_env_patch_forwards_monorl_vars(fake_verl, monkeypatch: pytest.M
 def test_entry_wrapper_runs_patched_task_runner(fake_verl, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     run_dir = tmp_path / "run"
     monkeypatch.setenv("MONORL_RUN_DIR", str(run_dir))
-    monkeypatch.setattr(sys, "argv", ["entry", "trainer.total_training_steps=1", "algorithm.adv_estimator=grpo"])
+    monkeypatch.setattr(
+        sys, "argv", ["entry", "trainer.total_training_steps=1", "algorithm.adv_estimator=grpo"]
+    )
     entry = importlib.import_module("monorl.adapters.verl.entry")
     from verl.trainer import main_ppo
     from verl.utils import config as verl_config

@@ -45,7 +45,9 @@ class FakeQuantState:
     dtype: torch.dtype = torch.float32
 
 
-def fake_fast_dequantize(W: Any, quant_state: Any = None, out: Any = None, use_global_buffer: bool = False, dtype: Any = None) -> torch.Tensor:
+def fake_fast_dequantize(
+    W: Any, quant_state: Any = None, out: Any = None, use_global_buffer: bool = False, dtype: Any = None
+) -> torch.Tensor:
     assert quant_state is not None, "fast_dequantize needs the quant_state"
     return quant_state.dequantized.clone()
 
@@ -78,7 +80,9 @@ def _bind_save_pretrained_merged(model: Any, calls: FakeCalls) -> None:
         token: Any = None,
         **kwargs: Any,
     ) -> None:
-        calls.save_pretrained_merged.append({"save_directory": save_directory, "tokenizer": tokenizer, "save_method": save_method, **kwargs})
+        calls.save_pretrained_merged.append(
+            {"save_directory": save_directory, "tokenizer": tokenizer, "save_method": save_method, **kwargs}
+        )
         base = model.get_base_model() if hasattr(model, "get_base_model") else model
         Path(save_directory).mkdir(parents=True, exist_ok=True)
         base.config.save_pretrained(save_directory)
@@ -157,7 +161,15 @@ def make_fake_unsloth(calls: FakeCalls, *, load_dtype: torch.dtype = torch.float
         def get_peft_model(
             model: Any,
             r: int = 16,
-            target_modules: Any = ("q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"),
+            target_modules: Any = (
+                "q_proj",
+                "k_proj",
+                "v_proj",
+                "o_proj",
+                "gate_proj",
+                "up_proj",
+                "down_proj",
+            ),
             lora_alpha: int = 16,
             lora_dropout: float = 0.0,
             bias: str = "none",
@@ -188,14 +200,23 @@ def make_fake_unsloth(calls: FakeCalls, *, load_dtype: torch.dtype = torch.float
             targets = list(target_modules) if not isinstance(target_modules, str) else target_modules
             peft_model = get_peft_model(
                 model,
-                LoraConfig(task_type="CAUSAL_LM", r=r, lora_alpha=lora_alpha, lora_dropout=lora_dropout, target_modules=targets, bias=bias),
+                LoraConfig(
+                    task_type="CAUSAL_LM",
+                    r=r,
+                    lora_alpha=lora_alpha,
+                    lora_dropout=lora_dropout,
+                    target_modules=targets,
+                    bias=bias,
+                ),
             )
             with torch.no_grad():  # non-zero B so merging is observable
                 for name, p in peft_model.named_parameters():
                     if "lora_B" in name:
                         p.normal_(std=0.05)
             if use_gradient_checkpointing:
-                peft_model.get_base_model().gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
+                peft_model.get_base_model().gradient_checkpointing_enable(
+                    gradient_checkpointing_kwargs={"use_reentrant": False}
+                )
                 peft_model.enable_input_require_grads()
             _bind_save_pretrained_merged(peft_model, calls)
             return peft_model
@@ -219,11 +240,19 @@ def make_fake_unsloth(calls: FakeCalls, *, load_dtype: torch.dtype = torch.float
     kernels_utils = _module("unsloth.kernels.utils", fast_dequantize=fake_fast_dequantize)
     kernels = _module("unsloth.kernels", utils=kernels_utils, __path__=[])
 
-    def unsloth_generic_save_pretrained_merged(self: Any, save_directory: str, tokenizer: Any = None, save_method: str = "merged_16bit", **kwargs: Any) -> None:
+    def unsloth_generic_save_pretrained_merged(
+        self: Any,
+        save_directory: str,
+        tokenizer: Any = None,
+        save_method: str = "merged_16bit",
+        **kwargs: Any,
+    ) -> None:
         _bind_save_pretrained_merged(self, calls)
         self.save_pretrained_merged(save_directory, tokenizer, save_method=save_method, **kwargs)
 
-    save = _module("unsloth.save", unsloth_generic_save_pretrained_merged=unsloth_generic_save_pretrained_merged)
+    save = _module(
+        "unsloth.save", unsloth_generic_save_pretrained_merged=unsloth_generic_save_pretrained_merged
+    )
     rl = _module("unsloth.models.rl")
     models = _module("unsloth.models", rl=rl, __version__=FAKE_VERSION, __path__=[])
     root = _module(
@@ -269,7 +298,9 @@ def fake_cuda(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(trainer_mod, "cuda_available", lambda: True)
 
 
-def unsloth_config(tiny_model_dir: Path, *, lora: bool = True, extra: dict[str, Any] | None = None, **trainer: Any) -> RunConfig:
+def unsloth_config(
+    tiny_model_dir: Path, *, lora: bool = True, extra: dict[str, Any] | None = None, **trainer: Any
+) -> RunConfig:
     trainer_cfg: dict[str, Any] = {
         "backend": "unsloth",
         "device": "cpu",
@@ -287,7 +318,13 @@ def unsloth_config(tiny_model_dir: Path, *, lora: bool = True, extra: dict[str, 
             "model": {
                 "name_or_path": str(tiny_model_dir),
                 "dtype": "float32",
-                "lora": {"enabled": lora, "r": 4, "alpha": 8, "dropout": 0.0, "target_modules": ["q_proj", "v_proj"]},
+                "lora": {
+                    "enabled": lora,
+                    "r": 4,
+                    "alpha": 8,
+                    "dropout": 0.0,
+                    "target_modules": ["q_proj", "v_proj"],
+                },
             },
             "data": {"uri": "unused.jsonl"},
             "rollout": {"backend": "hf", "group_size": 2, "max_new_tokens": 8, "device": "cpu"},

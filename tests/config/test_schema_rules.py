@@ -13,7 +13,10 @@ def _base(**overrides):
 def test_ppo_requires_a_critic_backend() -> None:
     with pytest.raises(ConfigError, match="critic"):
         RunConfig.from_dict(_base(algorithm={"name": "ppo"}, trainer={"backend": "reference"}))
-    assert RunConfig.from_dict(_base(algorithm={"name": "ppo"}, trainer={"backend": "verl"})).algorithm.name == "ppo"
+    assert (
+        RunConfig.from_dict(_base(algorithm={"name": "ppo"}, trainer={"backend": "verl"})).algorithm.name
+        == "ppo"
+    )
 
 
 def test_group_algorithms_need_groups() -> None:

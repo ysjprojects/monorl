@@ -30,7 +30,9 @@ def _group_index(group_ids: Sequence[str], device: torch.device) -> tuple[torch.
     return torch.tensor(idx, dtype=torch.long, device=device), len(lookup)
 
 
-def _group_stats(values: torch.Tensor, group_ids: Sequence[str]) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+def _group_stats(
+    values: torch.Tensor, group_ids: Sequence[str]
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Per-element group ``(count, mean, unbiased std)`` broadcast back to ``[B]``."""
     idx, n_groups = _group_index(group_ids, values.device)
     ones = torch.ones_like(values)
@@ -43,7 +45,9 @@ def _group_stats(values: torch.Tensor, group_ids: Sequence[str]) -> tuple[torch.
     return count[idx], mean[idx], std[idx]
 
 
-def compute_advantages(rewards: torch.Tensor, group_ids: Sequence[str], *, algorithm: AlgorithmConfig) -> torch.Tensor:
+def compute_advantages(
+    rewards: torch.Tensor, group_ids: Sequence[str], *, algorithm: AlgorithmConfig
+) -> torch.Tensor:
     """Sequence-level advantages ``[B]`` from scalar rewards ``[B]`` (see module docstring)."""
     if rewards.ndim != 1:
         raise ValueError(f"rewards must be [B], got shape {tuple(rewards.shape)}")
@@ -58,7 +62,9 @@ def compute_advantages(rewards: torch.Tensor, group_ids: Sequence[str], *, algor
         return rewards.clone()
     if name == "rloo":
         count, mean, _ = _group_stats(rewards, group_ids)
-        baseline = torch.where(count > 1, (mean * count - rewards) / (count - 1).clamp(min=1), torch.zeros_like(rewards))
+        baseline = torch.where(
+            count > 1, (mean * count - rewards) / (count - 1).clamp(min=1), torch.zeros_like(rewards)
+        )
         return rewards - baseline
 
     # grpo / dapo
@@ -69,7 +75,9 @@ def compute_advantages(rewards: torch.Tensor, group_ids: Sequence[str], *, algor
         _, mean, std = _group_stats(rewards, group_ids)
     elif norm == "batch":
         mean = rewards.mean().expand_as(rewards)
-        std = (rewards.std(unbiased=True) if rewards.numel() > 1 else rewards.new_zeros(())).expand_as(rewards)
+        std = (rewards.std(unbiased=True) if rewards.numel() > 1 else rewards.new_zeros(())).expand_as(
+            rewards
+        )
     else:
         raise ValueError(f"unknown advantage_norm {norm!r}")
     adv = rewards - mean
@@ -87,8 +95,12 @@ def dynamic_sampling_mask(rewards: torch.Tensor, group_ids: Sequence[str]) -> to
         return torch.zeros(0, dtype=torch.bool, device=rewards.device)
     rewards = rewards.detach().to(torch.float32)
     idx, n_groups = _group_index(group_ids, rewards.device)
-    gmax = torch.full((n_groups,), float("-inf"), device=rewards.device).scatter_reduce(0, idx, rewards, "amax")
-    gmin = torch.full((n_groups,), float("inf"), device=rewards.device).scatter_reduce(0, idx, rewards, "amin")
+    gmax = torch.full((n_groups,), float("-inf"), device=rewards.device).scatter_reduce(
+        0, idx, rewards, "amax"
+    )
+    gmin = torch.full((n_groups,), float("inf"), device=rewards.device).scatter_reduce(
+        0, idx, rewards, "amin"
+    )
     return (gmax - gmin)[idx] > 0
 
 
@@ -101,7 +113,9 @@ def apply_overlong_penalty(
         raise ValueError(f"{len(finish_reasons)} finish_reasons for {rewards.shape[0]} rewards")
     if penalty == 0.0:
         return rewards.clone()
-    truncated = torch.tensor([fr == "length" for fr in finish_reasons], dtype=rewards.dtype, device=rewards.device)
+    truncated = torch.tensor(
+        [fr == "length" for fr in finish_reasons], dtype=rewards.dtype, device=rewards.device
+    )
     return rewards - penalty * truncated
 
 

@@ -154,7 +154,9 @@ class ExportedData:
 
 
 def _eval_config(data: DataConfig) -> DataConfig:
-    return data.model_copy(update={"uri": data.eval_uri, "split": data.eval_split, "eval_uri": None, "limit": None})
+    return data.model_copy(
+        update={"uri": data.eval_uri, "split": data.eval_split, "eval_uri": None, "limit": None}
+    )
 
 
 def export_dataset(config: RunConfig, run_dir: str | Path, *, tokenizer: Any = None) -> ExportedData:
