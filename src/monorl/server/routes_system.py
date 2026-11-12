@@ -11,6 +11,7 @@ import yaml
 from fastapi import APIRouter, Request
 
 from monorl.config.loader import load_yaml
+from monorl.config.pipeline import PipelineConfig, is_pipeline_payload
 from monorl.config.schema import RunConfig
 from monorl.core.errors import ConfigError, RegistryError
 from monorl.server.app import validation_errors
@@ -42,16 +43,28 @@ def config_schema() -> dict[str, Any]:
     return RunConfig.json_schema()
 
 
+@router.get("/config/pipeline_schema")
+def pipeline_schema() -> dict[str, Any]:
+    return PipelineConfig.json_schema()
+
+
 @router.post("/config/validate")
 def config_validate(body: dict[str, Any]) -> dict[str, Any]:
-    payload = body.get("config", body) if isinstance(body, dict) and "config" in body else body
+    """``{config: RunConfig}`` → ``{ok, errors, config}``; ``{pipeline: PipelineConfig}`` → ``{ok, errors, pipeline}``."""
+    if isinstance(body, dict) and "pipeline" in body:
+        payload: Any = body["pipeline"]
+        key = "pipeline"
+    else:
+        payload = body.get("config", body) if isinstance(body, dict) and "config" in body else body
+        key = "pipeline" if is_pipeline_payload(payload) else "config"
     if not isinstance(payload, dict):
-        return {"ok": False, "errors": [{"loc": ["config"], "msg": "config must be an object", "type": "type_error"}]}
+        return {"ok": False, "errors": [{"loc": [key], "msg": f"{key} must be an object", "type": "type_error"}]}
     try:
-        config = RunConfig.from_dict(payload)
+        if key == "pipeline":
+            return {"ok": True, "errors": [], "pipeline": PipelineConfig.from_dict(payload).to_dict()}
+        return {"ok": True, "errors": [], "config": RunConfig.from_dict(payload).to_dict()}
     except ConfigError as e:
         return {"ok": False, "errors": validation_errors(e)}
-    return {"ok": True, "errors": [], "config": config.to_dict()}
 
 
 def recipe_description(text: str) -> str:
@@ -84,14 +97,19 @@ def load_recipes(recipes_dir: Path) -> list[dict[str, Any]]:
                 continue
         if not isinstance(config, dict):
             continue
+        kind = "pipeline" if is_pipeline_payload(config) else "run"
         valid, errors = True, []
         try:
-            RunConfig.from_dict(config)
+            if kind == "pipeline":
+                PipelineConfig.from_dict(config)
+            else:
+                RunConfig.from_dict(config)
         except ConfigError as e:
             valid, errors = False, validation_errors(e)
         out.append(
             {
                 "name": path.stem,
+                "kind": kind,
                 "description": recipe_description(text),
                 "config": config,
                 "path": str(path),

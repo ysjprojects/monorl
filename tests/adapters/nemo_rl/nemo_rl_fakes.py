@@ -106,4 +106,48 @@ FAKE_HOME_FILES: dict[str, str] = {
             main()
         """
     ),
+    "examples/run_sft.py": textwrap.dedent(
+        """
+        import argparse
+        import json
+        import os
+        import sys
+
+        import yaml
+
+        from nemo_rl.utils.logger import Logger
+
+
+        def main():
+            parser = argparse.ArgumentParser()
+            parser.add_argument("--config", required=True)
+            args, overrides = parser.parse_known_args()
+            config = yaml.safe_load(open(args.config))
+            run_dir = os.environ["MONORL_RUN_DIR"]
+            rows = [json.loads(line) for line in open(config["data"]["train"]["data_path"])]
+            with open(os.path.join(run_dir, "child_env.json"), "w") as f:
+                json.dump(
+                    {
+                        "argv": sys.argv,
+                        "algorithm": os.environ.get("MONORL_ALGORITHM"),
+                        "sections": sorted(config),
+                        "processor": config["data"]["default"]["processor"],
+                        "dataset_name": config["data"]["train"]["dataset_name"],
+                        "rows": rows,
+                    },
+                    f,
+                )
+            logger = Logger(config["logger"])
+            for step in (1, 2):
+                logger.log_metrics({"loss": 1.0 / step, "lr": 1e-6, "global_valid_toks": 40}, step, prefix="train")
+            logger.log_metrics({"val_loss": 0.75}, 2, prefix="validation")
+            ckpt = os.path.join(config["checkpointing"]["checkpoint_dir"], "step_2", "policy", "weights")
+            os.makedirs(ckpt, exist_ok=True)
+            print("sft done", flush=True)
+
+
+        if __name__ == "__main__":
+            main()
+        """
+    ),
 }

@@ -243,3 +243,68 @@ or `{"transport": "http", "url": "http://host:port", "parallel": N}`. Go SDK: `e
 - Keep modules torch-free where the contract says so (`core/types`, `config`, `envs/protocol`,
   `server`, `cli`).
 - Final report: what exists, how it was verified (commands + observed output), known gaps.
+
+## Phase 2 contracts: multimodal data, SFT, multi-stage pipelines
+
+### Multimodal messages — `monorl.core.types`
+`Message.content` is `str | list[ContentPart]`; parts are `{"type":"text","text"}`,
+`{"type":"image","image": <path | file:// | s3:// | http(s):// | data:image/...;base64,...>}`,
+`audio`/`video` likewise. Helpers: `message_text(m)` (text only — every reward/format check/log
+uses it), `message_media(m, "image")`, `messages_have_media(messages)`. `DataConfig.image_field`
+(column or columns: HF `Image` feature, path/URI, bytes, base64) attaches images to the user
+message as parts; `'<image>'` in `prompt_template` positions them (default: before the text).
+Images materialised from bytes/PIL are written to `$MONORL_HOME/cache/media/<sha256>.png` and
+referenced by path so samples/trajectories/MEP/1 stay JSON. Engines and trainers load media
+through the model's `AutoProcessor`; `Completion.prompt_token_ids` includes media placeholder
+tokens; `TrainBatch.extra` carries processor tensors (`pixel_values`, `image_grid_thw`, ...)
+built per micro-batch. Raw-token prompts (`list[int]`) stay text-only; multi-turn VLM episodes
+re-encode the chat each turn.
+
+```python
+# monorl.rollout.media  (torch-free at import; shared by hf engine, trainer, batch builder, vllm/sglang/trl adapters)
+def load_image(ref) -> PIL.Image.Image            # path | file:// | data: | http(s):// | s3://,hf:// via monorl.data.media.MediaResolver
+def chat_images(messages) -> list[PIL.Image.Image]
+def hf_content_parts(messages, *, load_media=True) -> list[dict]   # monorl parts → HF template parts (image → PIL)
+def image_data_url(image, *, format="PNG") -> str
+def is_vlm_model(config) -> bool                  # AutoConfig: vision_config / image_token_id / known model_type
+def auto_model_class(config)                      # AutoModelForImageTextToText for VLMs, else AutoModelForCausalLM
+def load_processor(config) -> AutoProcessor | None   # None for text-only models (no second tokenizer load)
+def vlm_encode(processor, messages, *, add_generation_prompt=True) -> dict[str, Tensor]   # the one encoding recipe
+def vlm_prompt_ids(processor, messages) -> list[int]
+def split_processor_outputs(enc) -> (token_aligned, media); def collate_media(per_sequence) -> dict[str, Tensor]
+```
+`TrainBatch.extra` convention: tensors are ``[B, ...]`` (sliced on dim 0, e.g. ``mm_token_type_ids``),
+lists are per-sequence (``extra["per_sequence"][b]`` = that sequence's ``pixel_values``/``image_grid_thw``
+dict or ``None``); the trainer concatenates them per micro-batch and lets the model derive its own
+(M-RoPE) position ids. ``build_train_batch(..., processor=)`` re-encodes the final-turn chat and
+requires the ids to equal the engine's recorded ``prompt_token_ids``. The HF engine expands
+multimodal prompts to ``n`` rows itself (``generate``'s ``num_return_sequences`` would
+``repeat_interleave`` patch tensors). Multimodal episodes send the chat to the engine on every
+turn (one processor pass per turn, no prefix cache) and reject environment tool schemas.
+
+### SFT — `algorithm.name: sft`
+No rollouts, no rewards: the orchestrator's SFT loop iterates the dataset, encodes
+`messages + assistant response` (`data.response_field`, else `answer_field`, else the trailing
+assistant turn kept by the data layer in `metadata["assistant_turn"]`), masks the response span
+(token-exact prefix chaining like multi-turn; `sft_train_on_prompt` includes the prompt) and
+trains with `monorl.algorithms.sft_loss(logprobs, response_mask, *, label_smoothing, loss_agg)`
+→ `PolicyLossOutput` with metrics `loss/sft`, `sft/ppl`, `sft/tokens`. `trainer.prompts_per_step`
+= sequences per optimizer step; `max_steps`/`save_every`/`eval_every` as for RL (eval = held-out
+NLL `eval/loss`). Pipeline backends map it to TRL `SFTTrainer`, verl `fsdp_sft_trainer`,
+NeMo-RL `run_sft.py`.
+
+### Pipelines — `monorl.config.pipeline.PipelineConfig` → `monorl.pipeline.run_pipeline(config, run_dir=None, *, resume=False) -> PipelineResult`
+Run dir layout: `<run_dir>/pipeline.yaml`, `status.json` (same shape as a run; `step` = stages
+finished), `pipeline.json` manifest `{name, stages:[{index, name, type, state, run_dir, started_at,
+finished_at, step, summary:{...last metrics / accepted counts}}]}`, `stages/<02d>-<name>/` each a
+standard run dir (train stages) or `{dataset.jsonl, status.json, metrics.jsonl, trajectories.jsonl,
+run.log}` (rejection_sample/eval). Model hand-off = previous train stage's `final/`. Resume skips
+stages whose state is `succeeded`. Cancellation propagates to the active stage.
+
+CLI: `monorl pipeline --config PATH [--set ...] [--run-dir] [--resume]`; `monorl train` on a file
+with `stages:`+`base:` dispatches to the pipeline runner. Server: `POST /api/jobs` accepts
+`{config: RunConfig}` or `{pipeline: PipelineConfig}` → job `kind: "run" | "pipeline"`;
+`GET /api/jobs/{id}/stages` → manifest stages; `GET /api/jobs/{id}/stages/{index}/(metrics|logs|trajectories|checkpoints)`
+read that stage's run dir with the same query params/shapes as the job-level routes;
+`GET /api/config/pipeline_schema`. UI: pipeline jobs show a stage table and per-stage charts.
+

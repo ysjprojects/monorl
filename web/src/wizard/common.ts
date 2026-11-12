@@ -10,16 +10,25 @@ export interface StepProps {
   envs: EnvsResponse | null;
 }
 
-export const STEPS = [
+/** "run" = one RunConfig; "pipeline" = the same config as `base` plus an ordered list of stages. */
+export type WizardMode = "run" | "pipeline";
+
+export type StepId = "model" | "data" | "training" | "rewards" | "compute" | "stages" | "review";
+
+const RUN_STEPS: readonly { id: StepId; label: string }[] = [
   { id: "model", label: "Model" },
   { id: "data", label: "Data" },
   { id: "training", label: "Training" },
   { id: "rewards", label: "Rewards & Env" },
   { id: "compute", label: "Compute" },
   { id: "review", label: "Review" },
-] as const;
+];
 
-export type StepId = (typeof STEPS)[number]["id"];
+const PIPELINE_STEPS: readonly { id: StepId; label: string }[] = [...RUN_STEPS.slice(0, 5), { id: "stages", label: "Stages" }, RUN_STEPS[5]];
+
+export function stepsFor(mode: WizardMode): readonly { id: StepId; label: string }[] {
+  return mode === "pipeline" ? PIPELINE_STEPS : RUN_STEPS;
+}
 
 /** Availability of a backend on this machine, derived from the doctor report. */
 export function backendAvailability(system: SystemReport | null, backend: string): { ok: boolean; note: string } {

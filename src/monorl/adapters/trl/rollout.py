@@ -37,19 +37,26 @@ HOOKS_ATTR = "monorl_hooks"
 
 
 class TrainerPolicyEngine(HFRolloutEngine):
-    """:class:`HFRolloutEngine` sampling from an already-built (possibly PEFT-wrapped) model."""
+    """:class:`HFRolloutEngine` sampling from an already-built (possibly PEFT-wrapped) model.
 
-    def __init__(self, model: Any, tokenizer: Any, *, device: torch.device, eos_token_ids: Sequence[int]) -> None:  # noqa: D107
+    ``processing_class`` is TRL's tokenizer or, for VLM runs, the ``AutoProcessor`` — in which
+    case image prompts take the processor path of :class:`HFRolloutEngine`.
+    """
+
+    def __init__(self, model: Any, processing_class: Any, *, device: torch.device, eos_token_ids: Sequence[int]) -> None:  # noqa: D107
+        from monorl.rollout.media import is_vlm_processor
+
         self.config = None
         self.replica = 0
         self.model = model
         self.device = torch.device(device)
         self.dtype = next(model.parameters()).dtype
-        self._tokenizer = tokenizer
+        self._processor = processing_class if is_vlm_processor(processing_class) else None
+        self._tokenizer = processing_class.tokenizer if self._processor is not None else processing_class
         self._lock = threading.Lock()
         self._asleep = False
         self._eos_ids = [int(t) for t in eos_token_ids]
-        self._pad_id = int(tokenizer.pad_token_id)
+        self._pad_id = int(self._tokenizer.pad_token_id)
 
     def update_weights(self, weights: Any) -> None:  # the trainer owns the weights
         raise RuntimeError("TrainerPolicyEngine shares the trainer's parameters; nothing to update")
@@ -141,6 +148,12 @@ class EpisodeRollout:
             model, trainer.processing_class, device=trainer.accelerator.device, eos_token_ids=trainer.eos_token_ids
         )
 
+    @staticmethod
+    def engine_tokenizer(trainer: Any) -> Any:
+        """Plain tokenizer for the episode runner (``processing_class.tokenizer`` for VLM processors)."""
+        pc = trainer.processing_class
+        return pc.tokenizer if getattr(pc, "image_processor", None) is not None and hasattr(pc, "tokenizer") else pc
+
     # -- rollout_func --------------------------------------------------------------------------
     def __call__(self, prompts: list[Any], trainer: Any) -> dict[str, Any]:
         inputs = self._inputs
@@ -186,7 +199,7 @@ class EpisodeRollout:
                 return run_episodes(
                     specs,
                     env_factory=self.env_factory,
-                    tokenizer=trainer.processing_class,
+                    tokenizer=self.engine_tokenizer(trainer),
                     params=params,
                     max_parallel=parallel,
                 )

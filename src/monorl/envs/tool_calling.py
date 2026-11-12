@@ -40,7 +40,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
-from monorl.core.types import Completion, Message, Sample, StepResult, ToolCall
+from monorl.core.types import Completion, Message, Sample, StepResult, ToolCall, message_text
 
 ToolFn = Callable[..., Any]
 
@@ -397,7 +397,7 @@ class ToolCallingEnv:
         messages = list(sample.messages)
         system = self.render_system_prompt()
         if messages and messages[0].get("role") == "system":
-            messages[0] = {"role": "system", "content": f"{system}\n\n{messages[0].get('content', '')}".strip()}
+            messages[0] = {"role": "system", "content": f"{system}\n\n{message_text(messages[0])}".strip()}
         else:
             messages.insert(0, {"role": "system", "content": system})
         return messages

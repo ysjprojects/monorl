@@ -9,9 +9,11 @@ import type {
   JobDetail,
   JsonSchema,
   MetricRow,
+  PipelineConfig,
   PreviewResponse,
   Recipe,
   RunConfig,
+  StagesResponse,
   SystemReport,
   TrajectoryRow,
   ValidateResponse,
@@ -56,10 +58,15 @@ const q = (params: Record<string, string | number | undefined>) => {
   return s ? `?${s}` : "";
 };
 
+/** Base path of a job's run dir routes, or of one pipeline stage's run dir. */
+export const jobPath = (id: string, stage?: number | null) => (stage == null ? `/api/jobs/${id}` : `/api/jobs/${id}/stages/${stage}`);
+
 export const api = {
   system: () => get<SystemReport>("/api/system"),
   schema: () => get<JsonSchema>("/api/config/schema"),
+  pipelineSchema: () => get<JsonSchema>("/api/config/pipeline_schema"),
   validate: (config: unknown) => post<ValidateResponse>("/api/config/validate", { config }),
+  validatePipeline: (pipeline: unknown) => post<ValidateResponse>("/api/config/validate", { pipeline }),
   recipes: () => get<Recipe[]>("/api/recipes"),
   searchModels: (query: string, limit = 20) => get<HubModel[]>(`/api/models/search${q({ q: query, limit })}`),
   modelInfo: (id: string) => get<Record<string, unknown>>(`/api/models/info${q({ id })}`),
@@ -72,12 +79,14 @@ export const api = {
   jobs: () => get<Job[]>("/api/jobs"),
   job: (id: string) => get<JobDetail>(`/api/jobs/${id}`),
   createJob: (config: RunConfig) => post<Job>("/api/jobs", { config }),
+  createPipelineJob: (pipeline: PipelineConfig) => post<Job>("/api/jobs", { pipeline }),
   cancelJob: (id: string) => post<Job>(`/api/jobs/${id}/cancel`, {}),
-  metrics: (id: string, since = 0) => get<{ rows: MetricRow[]; next: number }>(`/api/jobs/${id}/metrics${q({ since })}`),
-  logs: (id: string, tail = 200) => get<{ lines: string[]; next: number }>(`/api/jobs/${id}/logs${q({ tail })}`),
-  trajectories: (id: string, since = 0) =>
-    get<{ rows: TrajectoryRow[]; next: number }>(`/api/jobs/${id}/trajectories${q({ since })}`),
-  checkpoints: (id: string) => get<{ checkpoints: Checkpoint[] }>(`/api/jobs/${id}/checkpoints`),
+  stages: (id: string) => get<StagesResponse>(`/api/jobs/${id}/stages`),
+  // Run-dir streams: `base` is `jobPath(id)` or `jobPath(id, stageIndex)`; shapes are identical.
+  metrics: (base: string, since = 0) => get<{ rows: MetricRow[]; next: number }>(`${base}/metrics${q({ since })}`),
+  logs: (base: string, tail = 200) => get<{ lines: string[]; next: number }>(`${base}/logs${q({ tail })}`),
+  trajectories: (base: string, since = 0) => get<{ rows: TrajectoryRow[]; next: number }>(`${base}/trajectories${q({ since })}`),
+  checkpoints: (base: string) => get<{ checkpoints: Checkpoint[] }>(`${base}/checkpoints`),
 };
 
 /**

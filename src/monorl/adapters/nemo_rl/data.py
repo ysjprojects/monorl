@@ -10,6 +10,10 @@ Targets NVIDIA-NeMo/RL **v0.7.0** (``81aa43dda4765b0429cf31dab44441e4e4383911``)
   row's ``task_name`` column and calls ``processor(row, task_spec, tokenizer, max_seq_length, idx)``
   which must return a ``DatumSpec`` (``nemo_rl/data/interfaces.py``).
 * Rows also carry ``input``/``output`` so the file loads with the stock ``ResponseDataset``.
+* SFT (``algorithm.name: sft``) exports ``nemo_rl/sft_train.jsonl`` (+ ``sft_eval.jsonl``) rows of
+  ``{"messages": [prompt..., assistant response]}`` for the stock ``ResponseDataset`` (keeps a
+  ``messages`` column as-is, ``response_dataset.py``) and ``examples/run_sft.py``'s
+  ``sft_processor`` (``nemo_rl/data/processors.py``: ``get_formatted_message_log`` per turn).
 
 The run directory gets ``nemo_rl/train.jsonl`` (+ ``eval.jsonl``) and an importable shim module
 ``monorl_nemo_rl_data.py`` re-exporting :class:`MonorlDataset`; the launcher puts the run dir on
@@ -25,7 +29,8 @@ from pathlib import Path
 from typing import Any
 
 from monorl.config.schema import DataConfig, RunConfig
-from monorl.core.types import Message, Sample
+from monorl.core.errors import ConfigError
+from monorl.core.types import Message, Sample, message_text, messages_have_media
 
 #: ``task_name`` of every exported row and of every ``DatumSpec`` the processor emits.
 TASK_NAME = "monorl"
@@ -52,6 +57,8 @@ class DataPaths:
     train_jsonl: Path
     eval_jsonl: Path
     module_path: Path
+    sft_train_jsonl: Path
+    sft_eval_jsonl: Path
     module_name: str = MODULE_NAME
 
 
@@ -63,6 +70,8 @@ def data_paths(run_dir: str | Path) -> DataPaths:
         train_jsonl=root / "train.jsonl",
         eval_jsonl=root / "eval.jsonl",
         module_path=run_dir / f"{MODULE_NAME}.py",
+        sft_train_jsonl=root / "sft_train.jsonl",
+        sft_eval_jsonl=root / "sft_eval.jsonl",
     )
 
 
@@ -111,6 +120,32 @@ def export_jsonl(samples: Iterable[Sample], path: str | Path) -> int:
     return count
 
 
+def sft_sample_to_row(sample: Sample, *, response_field: str | None) -> dict[str, Any]:
+    """``{"messages": prompt + assistant response}`` (text only: NeMo-RL's ``sft_processor`` renders
+    each turn through the tokenizer chat template)."""
+    from monorl.orchestrator.sft import sft_messages
+
+    messages = sft_messages(sample, response_field=response_field)
+    if messages_have_media(messages):
+        raise ConfigError(
+            "trainer.backend='nemo_rl' SFT takes text-only chats; NeMo-RL v0.7.0 trains VLMs through its own "
+            "datasets (examples/run_vlm_sft.py), not through monorl image parts"
+        )
+    return {"messages": [{"role": str(m.get("role", "user")), "content": message_text(m)} for m in messages]}
+
+
+def export_sft_jsonl(samples: Iterable[Sample], path: str | Path, *, response_field: str | None) -> int:
+    """Write SFT chat rows; returns the row count."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    count = 0
+    with open(path, "w") as f:
+        for sample in samples:
+            f.write(json.dumps(sft_sample_to_row(sample, response_field=response_field)) + "\n")
+            count += 1
+    return count
+
+
 @dataclass(frozen=True, slots=True)
 class ExportedData:
     paths: DataPaths
@@ -124,16 +159,24 @@ def _eval_config(data: DataConfig) -> DataConfig:
 
 def export_dataset(config: RunConfig, run_dir: str | Path, *, tokenizer: Any = None) -> ExportedData:
     """Materialise ``config.data`` (and ``eval_uri``) through :func:`monorl.data.open_source`
-    into ``<run_dir>/nemo_rl/{train,eval}.jsonl``."""
+    into ``<run_dir>/nemo_rl/{train,eval}.jsonl`` (``sft_{train,eval}.jsonl`` for SFT)."""
     from monorl.data import open_source
 
     paths = data_paths(run_dir)
+    sft = config.is_sft
+    response_field = config.data.response_field
     train = open_source(config.data, tokenizer=tokenizer, seed=config.seed)
-    num_train = export_jsonl(train, paths.train_jsonl)
+    if sft:
+        num_train = export_sft_jsonl(train, paths.sft_train_jsonl, response_field=response_field)
+    else:
+        num_train = export_jsonl(train, paths.train_jsonl)
     num_eval = None
     if config.data.eval_uri is not None:
         evaluation = open_source(_eval_config(config.data), tokenizer=tokenizer, seed=config.seed)
-        num_eval = export_jsonl(evaluation, paths.eval_jsonl)
+        if sft:
+            num_eval = export_sft_jsonl(evaluation, paths.sft_eval_jsonl, response_field=response_field)
+        else:
+            num_eval = export_jsonl(evaluation, paths.eval_jsonl)
     return ExportedData(paths=paths, num_train=num_train, num_eval=num_eval)
 
 

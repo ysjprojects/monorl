@@ -14,6 +14,7 @@ from collections.abc import Iterator
 from typing import Any
 
 from monorl.core.errors import DataError
+from monorl.data.media import is_pil_image
 
 Format = str  # "jsonl" | "json" | "csv" | "parquet" | "arrow"
 
@@ -47,6 +48,9 @@ ANSWER_COLUMNS: tuple[str, ...] = (
     "final_answer",
 )
 TEXT_COLUMNS: tuple[str, ...] = ("text",)
+IMAGE_COLUMNS: tuple[str, ...] = ("image", "images", "img", "picture")
+IMAGE_STRUCT_DTYPE = "struct<bytes: binary, path: string>"
+"""How ``datasets.Image`` renders in an arrow/parquet schema."""
 
 
 def format_of(path: str) -> Format | None:
@@ -234,6 +238,8 @@ def dtype_of(value: Any) -> str:
         return "null"
     if isinstance(value, bool):
         return "bool"
+    if is_pil_image(value):
+        return "image"
     if isinstance(value, int):
         return "int64"
     if isinstance(value, float):
@@ -269,15 +275,40 @@ def infer_columns(rows: list[dict[str, Any]]) -> dict[str, str]:
     return columns
 
 
+# -- sniffing ---------------------------------------------------------------------------------
+
+
 def features_to_columns(features) -> dict[str, str]:
-    """``datasets.Features`` -> ``{column: dtype}`` using the arrow rendering."""
+    """``datasets.Features`` -> ``{column: dtype}`` using the arrow rendering (``Image`` features
+    render as :data:`IMAGE_STRUCT_DTYPE`)."""
     try:
         return {f.name: str(f.type) for f in features.arrow_schema}
-    except Exception:  # exotic features (Audio/Image) may not render; fall back to repr
+    except Exception:  # exotic features (Audio/Video) may not render; fall back to repr
         return {k: getattr(v, "dtype", None) or type(v).__name__ for k, v in features.items()}
 
 
-# -- sniffing ---------------------------------------------------------------------------------
+def is_image_dtype(dtype: str) -> bool:
+    dt = dtype.lower()
+    return dt in ("image", IMAGE_STRUCT_DTYPE, f"list<{IMAGE_STRUCT_DTYPE}>", "list<image>") or dt.startswith("image(")
+
+
+def image_field_candidates(columns: dict[str, str], sample_rows: list[dict[str, Any]]) -> list[str]:
+    """Columns that hold images: HF ``Image`` features / PIL values, or image-like names."""
+    out: list[str] = []
+    for name, dtype in columns.items():
+        if is_image_dtype(dtype) or name.lower() in IMAGE_COLUMNS:
+            out.append(name)
+    for name in columns:
+        if name in out:
+            continue
+        values = [r[name] for r in sample_rows if r.get(name) is not None]
+        if values and all(is_pil_image(v) or _is_image_struct(v) for v in values):
+            out.append(name)
+    return out
+
+
+def _is_image_struct(value: Any) -> bool:
+    return isinstance(value, dict) and set(value) == {"bytes", "path"}
 
 
 def _find(columns: dict[str, str], candidates: tuple[str, ...]) -> str | None:
@@ -310,13 +341,23 @@ def sniff_format(columns: dict[str, str], sample_rows: list[dict]) -> dict:
     """Guess the dataset layout.
 
     Returns ``{"format": "chat"|"prompt_answer"|"text"|"unknown", "prompt_field", "answer_field",
-    "messages_field"}``. ``chat`` wins when a messages-like column holds role/content lists;
-    ``prompt_answer`` needs a prompt column plus an answer column; ``text`` is a lone prompt/text
-    column; ``unknown`` means no string column at all (preview only; ``open_source`` rejects it).
+    "messages_field", "image_fields": [...]}``. ``chat`` wins when a messages-like column holds
+    role/content lists; ``prompt_answer`` needs a prompt column plus an answer column; ``text`` is
+    a lone prompt/text column; ``unknown`` means no string column at all (preview only;
+    ``open_source`` rejects it). ``image_fields`` lists candidate image columns (HF ``Image``
+    features, PIL values, or columns named image/images/img/picture) for ``data.image_field``.
     """
-    result: dict[str, Any] = {"format": "unknown", "prompt_field": None, "answer_field": None, "messages_field": None}
+    result: dict[str, Any] = {
+        "format": "unknown",
+        "prompt_field": None,
+        "answer_field": None,
+        "messages_field": None,
+        "image_fields": [],
+    }
     if not columns:
         return result
+    images = image_field_candidates(columns, sample_rows)
+    result["image_fields"] = images
     answer = _find(columns, ANSWER_COLUMNS)
 
     messages = _find(columns, MESSAGES_COLUMNS)
@@ -333,7 +374,7 @@ def sniff_format(columns: dict[str, str], sample_rows: list[dict]) -> dict:
         return result
     text = _find(columns, TEXT_COLUMNS)
     if text is None:
-        text = next((c for c, dt in columns.items() if dt == "string" and c != answer), None)
+        text = next((c for c, dt in columns.items() if dt == "string" and c != answer and c not in images), None)
     if text is not None:
         result.update(prompt_field=text, answer_field=answer)
         result["format"] = "prompt_answer" if answer is not None else "text"

@@ -11,7 +11,7 @@ import re
 from collections.abc import Sequence
 from typing import Any
 
-from monorl.core.types import Message, Trajectory
+from monorl.core.types import Message, Trajectory, message_text
 
 ResponseScope = str  # "last" | "all"
 
@@ -45,7 +45,7 @@ def conversation(trajectory: Trajectory) -> list[Message]:
     msgs = list(trajectory.messages) if trajectory.messages else list(trajectory.sample.messages)
     if not trajectory.turns:
         return msgs
-    if msgs and msgs[-1].get("role") == "assistant" and msgs[-1].get("content") == trajectory.last_response_text:
+    if msgs and msgs[-1].get("role") == "assistant" and message_text(msgs[-1]) == trajectory.last_response_text:
         return msgs
     return [*msgs, {"role": "assistant", "content": trajectory.last_response_text}]
 
@@ -55,7 +55,7 @@ def prompt_text(trajectory: Trajectory) -> str:
     parts = []
     for m in trajectory.sample.messages:
         if m.get("role") in ("user", "system"):
-            parts.append(str(m.get("content", "")))
+            parts.append(message_text(m))
     return "\n\n".join(parts)
 
 

@@ -1,8 +1,17 @@
 import { Link } from "react-router-dom";
 import { api } from "../api";
-import { ErrorBox, Spinner, StateBadge } from "../components/ui";
+import { ErrorBox, Pill, Spinner, StateBadge } from "../components/ui";
 import { fmtAgo, fmtDuration } from "../format";
 import { useAsync } from "../hooks";
+import { effectiveAlgorithm } from "../pipeline";
+import { isPipelineJob, jobRunConfig, type Job } from "../types";
+
+/** "sft → grpo → rs → sft → grpo" for pipelines, the objective for runs. */
+function algoSummary(j: Job): string {
+  const c = jobRunConfig(j);
+  if (!isPipelineJob(j)) return c?.algorithm?.name ?? "–";
+  return j.config.stages.map((s) => (s.type === "train" ? effectiveAlgorithm(c, s) : s.type === "rejection_sample" ? "rs" : "eval")).join(" → ");
+}
 
 export default function Runs() {
   const jobs = useAsync(() => api.jobs(), [], 3000);
@@ -34,6 +43,7 @@ export default function Runs() {
             <thead className="bg-slate-900 text-left text-xs uppercase tracking-wide text-slate-500">
               <tr>
                 <th className="px-3 py-2">Name</th>
+                <th className="px-3 py-2">Kind</th>
                 <th className="px-3 py-2">State</th>
                 <th className="px-3 py-2">Model</th>
                 <th className="px-3 py-2">Algo</th>
@@ -44,30 +54,37 @@ export default function Runs() {
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-800">
-              {jobs.data.map((j) => (
-                <tr key={j.id} className="hover:bg-slate-900/60">
-                  <td className="px-3 py-2">
-                    <Link to={`/runs/${j.id}`} className="font-medium text-sky-300 hover:underline">
-                      {j.name}
-                    </Link>
-                    {j.message && j.state !== "running" && <div className="truncate text-xs text-slate-500">{j.message}</div>}
-                  </td>
-                  <td className="px-3 py-2">
-                    <StateBadge state={j.state} />
-                  </td>
-                  <td className="max-w-[16rem] truncate px-3 py-2 font-mono text-xs text-slate-300">{j.config?.model?.name_or_path}</td>
-                  <td className="px-3 py-2 text-slate-300">{j.config?.algorithm?.name}</td>
-                  <td className="px-3 py-2 text-xs text-slate-400">
-                    {j.config?.rollout?.backend} / {j.config?.trainer?.backend}
-                  </td>
-                  <td className="px-3 py-2 text-right font-mono text-xs">
-                    {j.step}
-                    <span className="text-slate-600">/{j.config?.trainer?.max_steps}</span>
-                  </td>
-                  <td className="px-3 py-2 text-right font-mono text-xs text-slate-400">{fmtDuration(j.started_at, j.finished_at)}</td>
-                  <td className="px-3 py-2 text-right text-xs text-slate-400">{fmtAgo(j.created_at)}</td>
-                </tr>
-              ))}
+              {jobs.data.map((j) => {
+                const c = jobRunConfig(j);
+                const pipeline = isPipelineJob(j);
+                return (
+                  <tr key={j.id} className="hover:bg-slate-900/60">
+                    <td className="px-3 py-2">
+                      <Link to={`/runs/${j.id}`} className="font-medium text-sky-300 hover:underline">
+                        {j.name}
+                      </Link>
+                      {j.message && j.state !== "running" && <div className="truncate text-xs text-slate-500">{j.message}</div>}
+                    </td>
+                    <td className="px-3 py-2">{pipeline ? <Pill tone="amber">pipeline</Pill> : <Pill>run</Pill>}</td>
+                    <td className="px-3 py-2">
+                      <StateBadge state={j.state} />
+                    </td>
+                    <td className="max-w-[16rem] truncate px-3 py-2 font-mono text-xs text-slate-300">{c?.model?.name_or_path}</td>
+                    <td className="max-w-[14rem] truncate px-3 py-2 text-xs text-slate-300" title={algoSummary(j)}>
+                      {algoSummary(j)}
+                    </td>
+                    <td className="px-3 py-2 text-xs text-slate-400">
+                      {c?.rollout?.backend} / {c?.trainer?.backend}
+                    </td>
+                    <td className="px-3 py-2 text-right font-mono text-xs">
+                      {j.step}
+                      <span className="text-slate-600">/{pipeline ? `${j.config.stages.length} stages` : c?.trainer?.max_steps}</span>
+                    </td>
+                    <td className="px-3 py-2 text-right font-mono text-xs text-slate-400">{fmtDuration(j.started_at, j.finished_at)}</td>
+                    <td className="px-3 py-2 text-right text-xs text-slate-400">{fmtAgo(j.created_at)}</td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         </div>

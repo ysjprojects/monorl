@@ -21,6 +21,7 @@ from rich.markup import escape
 from rich.table import Table
 
 from monorl.config.loader import apply_overrides, load_yaml
+from monorl.config.pipeline import PipelineConfig, is_pipeline_payload
 from monorl.config.schema import RunConfig
 from monorl.core.errors import ConfigError, MonorlError
 
@@ -73,9 +74,18 @@ def train(
     ),
     resume: bool = typer.Option(False, "--resume", help="Resume from the latest checkpoint in the run dir."),
 ) -> None:
-    """Run a training job from a RunConfig YAML."""
+    """Run a training job from a RunConfig YAML (a pipeline YAML with `base:` + `stages:` is
+    dispatched to the pipeline runner)."""
     try:
-        cfg = RunConfig.from_dict(apply_overrides(load_yaml(config), set_))
+        data = apply_overrides(load_yaml(config), set_)
+    except ConfigError as e:
+        _fail(str(e))
+        return
+    if is_pipeline_payload(data):
+        _run_pipeline(data, run_dir, resume)
+        return
+    try:
+        cfg = RunConfig.from_dict(data)
     except ConfigError as e:
         _fail(str(e))
         return
@@ -97,6 +107,65 @@ def train(
         for key in sorted(result.metrics):
             table.add_row(key, f"{result.metrics[key]:.6g}")
         console.print(table)
+    if result.final_model_path:
+        console.print(f"final model: {result.final_model_path}")
+    raise typer.Exit(EXIT_BY_STATE.get(result.state, 1))
+
+
+# -- pipeline --------------------------------------------------------------------------------
+
+
+@app.command()
+def pipeline(
+    config: Path = typer.Option(..., "--config", "-c", help="PipelineConfig YAML (`base:` + `stages:`)."),
+    set_: list[str] | None = typer.Option(
+        None, "--set", "-s", help="Override: key.path=value (YAML-coerced), e.g. base.trainer.device=cpu."
+    ),
+    run_dir: Path | None = typer.Option(
+        None, "--run-dir", help="Pipeline directory (default <base.logging.run_root>/<name>)."
+    ),
+    resume: bool = typer.Option(False, "--resume", help="Skip stages that already succeeded in the run dir."),
+) -> None:
+    """Run a multi-stage pipeline (SFT → RL → rejection sampling → SFT → RL → eval)."""
+    try:
+        data = apply_overrides(load_yaml(config), set_)
+    except ConfigError as e:
+        _fail(str(e))
+        return
+    if not is_pipeline_payload(data):
+        _fail(f"{config} is not a pipeline config (needs top-level `base:` and `stages:`)")
+        return
+    _run_pipeline(data, run_dir, resume)
+
+
+def _run_pipeline(data: dict[str, Any], run_dir: Path | None, resume: bool) -> None:
+    try:
+        cfg = PipelineConfig.from_dict(data)
+    except ConfigError as e:
+        _fail(str(e))
+        return
+    from monorl.pipeline import run_pipeline
+
+    try:
+        result = run_pipeline(cfg, run_dir, resume=resume)
+    except MonorlError as e:
+        _fail(str(e))
+        return
+    console.print(f"pipeline dir: {result.run_dir}")
+    table = Table(title="stages", show_lines=False)
+    table.add_column("#", justify="right")
+    table.add_column("name")
+    table.add_column("type")
+    table.add_column("state")
+    table.add_column("step", justify="right")
+    for stage in result.stages:
+        table.add_row(
+            str(stage["index"] + 1), stage["name"], stage["type"], stage["state"], str(stage.get("step", 0))
+        )
+    console.print(table)
+    console.print(f"state: {result.state}")
+    if result.error:
+        err_console.print(f"[red]{result.error}[/red]")
     if result.final_model_path:
         console.print(f"final model: {result.final_model_path}")
     raise typer.Exit(EXIT_BY_STATE.get(result.state, 1))
@@ -481,7 +550,9 @@ def recipes_list(as_json: bool = typer.Option(False, "--json")) -> None:
     recipes = list_recipes()
     if as_json:
         typer.echo(
-            json.dumps([{"name": r.name, "path": str(r.path), "description": r.description} for r in recipes])
+            json.dumps(
+                [{"name": r.name, "kind": r.kind, "path": str(r.path), "description": r.description} for r in recipes]
+            )
         )
         return
     if not recipes:
@@ -489,9 +560,10 @@ def recipes_list(as_json: bool = typer.Option(False, "--json")) -> None:
         return
     table = Table(title=f"recipes ({recipes_dir()})")
     table.add_column("name")
+    table.add_column("kind")
     table.add_column("description", overflow="fold")
     for r in recipes:
-        table.add_row(r.name, r.description)
+        table.add_row(r.name, r.kind, r.description)
     console.print(table)
 
 
@@ -500,19 +572,22 @@ def recipes_show(
     name: str = typer.Argument(..., help="Recipe name (file stem)."),
     as_json: bool = typer.Option(False, "--json", help="Print the validated config as JSON."),
 ) -> None:
-    """Print a recipe (validated against RunConfig)."""
+    """Print a recipe (validated against RunConfig, or PipelineConfig for `base:` + `stages:` files)."""
     from monorl.cli.recipes import get_recipe
 
     try:
         recipe = get_recipe(name)
-        cfg = RunConfig.from_dict(recipe.load())
+        data = recipe.load()
+        kind = "pipeline" if is_pipeline_payload(data) else "run"
+        cfg = PipelineConfig.from_dict(data) if kind == "pipeline" else RunConfig.from_dict(data)
     except ConfigError as e:
         _fail(str(e))
         return
     if as_json:
         typer.echo(
             json.dumps(
-                {"name": recipe.name, "description": recipe.description, "config": cfg.to_dict()}, indent=2
+                {"name": recipe.name, "description": recipe.description, "kind": kind, "config": cfg.to_dict()},
+                indent=2,
             )
         )
         return

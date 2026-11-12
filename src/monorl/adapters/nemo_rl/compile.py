@@ -1,4 +1,4 @@
-"""Compile a :class:`~monorl.config.RunConfig` into the NeMo-RL GRPO yaml tree.
+"""Compile a :class:`~monorl.config.RunConfig` into the NeMo-RL GRPO (or SFT) yaml tree.
 
 The tree mirrors ``examples/configs/grpo_math_1B.yaml`` of NVIDIA-NeMo/RL at tag **v0.7.0**
 (commit ``81aa43dda4765b0429cf31dab44441e4e4383911``) and is validated upstream by
@@ -7,6 +7,18 @@ The tree mirrors ``examples/configs/grpo_math_1B.yaml`` of NVIDIA-NeMo/RL at tag
 ``grpo``: ``GRPOConfig``; ``checkpointing``: ``nemo_rl/utils/checkpoint.py``; ``logger``:
 ``nemo_rl/utils/logger.py`` ``LoggerConfig``; ``cluster``: ``nemo_rl/distributed/virtual_cluster.py``;
 generation: ``nemo_rl/models/generation/interfaces.py`` + ``vllm/config.py``).
+
+``algorithm.name: sft`` compiles ``examples/configs/sft.yaml`` instead (``nemo_rl.algorithms.sft``
+``MasterConfig``/``SFTConfig``: ``sft.{max_num_epochs,max_num_steps,val_period,...}``, the same
+``policy``/``checkpointing``/``logger``/``cluster`` sections and a ``data`` section pointing the stock
+``ResponseDataset`` + ``sft_processor`` at the exported chat jsonl) and is launched through
+``examples/run_sft.py``.
+
+Images: NeMo-RL v0.7.0 trains VLMs only through its own datasets/processors
+(``examples/run_vlm_grpo.py`` / ``run_vlm_sft.py`` with ``vlm_hf_data_processor`` building
+``message_log`` entries that carry processor tensors). The monorl bridge feeds tokenised text
+``message_log`` entries (:mod:`monorl.adapters.nemo_rl.data`), so ``data.image_field`` is rejected
+with a :class:`~monorl.core.errors.ConfigError`.
 
 ``compile_config`` is a pure function of the config and the run directory; ``trainer.extra["nemo_rl"]``
 is deep-merged last so any upstream knob can be overridden.
@@ -41,7 +53,12 @@ ACTOR_FQN = "monorl.adapters.nemo_rl.env_actor.MonorlEnvironment"
 #: Name of the yaml written next to the data export.
 CONFIG_FILENAME = "nemo_rl.yaml"
 
-SUPPORTED_ALGORITHMS: frozenset[str] = frozenset({"grpo", "dapo", "rloo", "reinforce"})
+SUPPORTED_ALGORITHMS: frozenset[str] = frozenset({"grpo", "dapo", "rloo", "reinforce", "sft"})
+
+#: ``examples/run_sft.py`` data processor name (``nemo_rl/data/processors.py`` ``sft_processor``).
+SFT_PROCESSOR = "sft_processor"
+#: Built-in dataset class that keeps a ``messages`` column as-is (``response_datasets/response_dataset.py``).
+SFT_DATASET = "ResponseDataset"
 
 
 def deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
@@ -66,6 +83,15 @@ def _check_supported(config: RunConfig) -> None:
             f"trainer.backend='nemo_rl' supports algorithm.name in {sorted(SUPPORTED_ALGORITHMS)}, "
             f"got {algo.name!r} (NeMo-RL GRPO has no critic; ppo needs trainer.backend='verl')"
         )
+    if config.data.image_field is not None:
+        raise ConfigError(
+            "data.image_field is not supported with trainer.backend='nemo_rl': NeMo-RL v0.7.0 trains "
+            "vision-language models only through its own datasets (examples/run_vlm_grpo.py, "
+            "run_vlm_sft.py, nemo_rl/data/processors.py vlm_hf_data_processor), which the monorl text "
+            "message_log bridge does not produce; use trainer.backend='trl', 'verl' or 'reference'"
+        )
+    if algo.name == "sft":
+        return
     if algo.num_epochs != 1:
         raise ConfigError("algorithm.num_epochs > 1 has no NeMo-RL equivalent (one optimizer pass per rollout batch)")
     if algo.entropy_coef > 0:
@@ -313,33 +339,17 @@ def _generation(config: RunConfig, precision: str, async_rollouts: bool) -> dict
     }
 
 
-def compile_config(config: RunConfig, run_dir: str | Path) -> dict[str, Any]:
-    """The NeMo-RL master config (plain dict, yaml-serialisable) for ``config``.
-
-    Paths inside point at the data export of :func:`monorl.adapters.nemo_rl.data.export_dataset`
-    (``<run_dir>/nemo_rl/``), the checkpoint dir ``<run_dir>/checkpoints`` and the metrics file
-    ``<run_dir>/metrics.jsonl`` written by the logger patch.
-    """
-    _check_supported(config)
-    run_dir = Path(run_dir).expanduser().resolve()
-    paths = data_paths(run_dir)
-    algo, ro, tr, cl, lg, dt = config.algorithm, config.rollout, config.trainer, config.cluster, config.logging, config.data
-    precision = PRECISION[tr.precision]
-    async_rollouts = ro.async_steps_ahead > 0
-    group_normalise = algo.advantage_norm != "none" and algo.advantage_std_norm
-    eval_enabled = dt.eval_uri is not None and tr.eval_every is not None
-
-    policy: dict[str, Any] = {
+def _policy(config: RunConfig, precision: str, *, sequences_per_step: int) -> dict[str, Any]:
+    """``policy`` section shared by GRPO and SFT (``nemo_rl/models/policy/__init__.py`` ``PolicyConfig``)."""
+    tr = config.trainer
+    return {
         "model_name": config.model.name_or_path,
         "tokenizer": {"name": config.model.tokenizer_name_or_path or config.model.name_or_path, "chat_template_kwargs": None},
         "hf_config_overrides": {},
-        "train_global_batch_size": config.sequences_per_step(),
+        "train_global_batch_size": sequences_per_step,
         "train_micro_batch_size": tr.micro_batch_size,
-        "generation_batch_size": config.sequences_per_step(),
-        "logprob_batch_size": tr.micro_batch_size,
         "max_total_sequence_length": tr.max_seq_len,
         "precision": precision,
-        "logprob_chunk_size": None,
         "offload_optimizer_for_logprob": False,
         "dtensor_cfg": _dtensor_cfg(config),
         "megatron_cfg": _megatron_cfg(config, precision),
@@ -350,8 +360,144 @@ def compile_config(config: RunConfig, run_dir: str | Path) -> dict[str, Any]:
         "max_grad_norm": tr.max_grad_norm,
         "optimizer": _optimizer(config),
         "scheduler": _scheduler(config),
-        "generation": _generation(config, precision, async_rollouts),
     }
+
+
+def _checkpointing(config: RunConfig, run_dir: Path) -> dict[str, Any]:
+    return {
+        "enabled": True,
+        "checkpoint_dir": str(run_dir / CHECKPOINT_DIR),
+        "metric_name": None,
+        "higher_is_better": True,
+        "keep_top_k": None,
+        "save_period": config.trainer.save_every,
+        "checkpoint_must_save_by": None,
+        "model_save_format": "safetensors",
+        "save_consolidated": True,
+        "save_optimizer": True,
+        "is_peft": config.model.lora.enabled,
+    }
+
+
+def _logger(config: RunConfig, run_dir: Path, paths: Any) -> dict[str, Any]:
+    lg = config.logging
+    run_name = config.run_name or run_dir.name
+    return {
+        "log_dir": str(paths.root / "logs"),
+        "num_val_samples_to_print": 0,
+        "wandb_enabled": lg.wandb_project is not None,
+        "tensorboard_enabled": lg.tensorboard,
+        "mlflow_enabled": False,
+        "swanlab_enabled": False,
+        "monitor_gpus": False,
+        "wandb": {"project": lg.wandb_project or "monorl", "name": run_name},
+        "swanlab": {"project": "monorl", "name": run_name},
+        "tensorboard": {},
+        "mlflow": {"experiment_name": "monorl", "run_name": run_name, "tracking_uri": "http://localhost:5000"},
+        "gpu_monitoring": {"collection_interval": 10, "flush_interval": 10},
+        "monorl": {"enabled": True, "metrics_file": str(run_dir / METRICS_FILE), "run_dir": str(run_dir)},
+    }
+
+
+def _cluster(config: RunConfig) -> dict[str, Any]:
+    cl = config.cluster
+    return {
+        "gpus_per_node": cl.gpus_per_node,
+        "num_nodes": cl.num_nodes,
+        "master_port_range_low": 25000,
+        "master_port_range_high": 28000,
+        "segment_size": None,
+    }
+
+
+def _override(config: RunConfig, compiled: dict[str, Any]) -> dict[str, Any]:
+    override = config.trainer.extra.get("nemo_rl") or {}
+    if not isinstance(override, dict):
+        raise ConfigError("trainer.extra['nemo_rl'] must be a mapping of NeMo-RL config overrides")
+    return deep_merge(compiled, override)
+
+
+def compile_sft_config(config: RunConfig, run_dir: str | Path) -> dict[str, Any]:
+    """The NeMo-RL SFT master config (``examples/configs/sft.yaml`` shape) for ``config``.
+
+    ``trainer.prompts_per_step`` sequences per optimizer step; ``sft.max_num_steps = max_steps`` with
+    ``max_num_epochs = max_steps`` so the step bound always governs (upstream trains
+    ``min(max_num_epochs * len(dataloader), max_num_steps)`` steps); validation every
+    ``trainer.eval_every`` steps on ``data.eval_uri`` (``val_loss`` → ``eval/loss``).
+    """
+    _check_supported(config)
+    run_dir = Path(run_dir).expanduser().resolve()
+    paths = data_paths(run_dir)
+    tr, dt = config.trainer, config.data
+    precision = PRECISION[tr.precision]
+    eval_enabled = dt.eval_uri is not None and tr.eval_every is not None
+
+    policy = _policy(config, precision, sequences_per_step=tr.prompts_per_step)
+    if policy["megatron_cfg"]["enabled"]:
+        policy["dtensor_cfg"] = {"enabled": False}
+        policy["optimizer"] = None
+        policy["scheduler"] = None
+
+    sft: dict[str, Any] = {
+        "max_num_epochs": tr.max_steps,
+        "max_num_steps": tr.max_steps,
+        "val_period": tr.eval_every if eval_enabled else 0,
+        "val_batches": 8,
+        "val_global_batch_size": tr.prompts_per_step,
+        "val_micro_batch_size": tr.micro_batch_size,
+        "val_at_start": False,
+        "val_at_end": eval_enabled,
+        "seed": config.seed,
+        "only_unmask_final": False,
+    }
+    data: dict[str, Any] = {
+        "max_input_seq_length": tr.max_seq_len,
+        "add_bos": True,
+        "add_eos": True,
+        "add_generation_prompt": False,
+        "shuffle": dt.shuffle,
+        "num_workers": 1,
+        "train": {"dataset_name": SFT_DATASET, "data_path": str(paths.sft_train_jsonl), "split_validation_size": 0, "seed": config.seed},
+        "validation": {"dataset_name": SFT_DATASET, "data_path": str(paths.sft_eval_jsonl)} if dt.eval_uri is not None else None,
+        "default": {"prompt_file": None, "system_prompt_file": None, "processor": SFT_PROCESSOR},
+    }
+    checkpointing = _checkpointing(config, run_dir)
+    if eval_enabled:
+        checkpointing.update({"metric_name": "val:val_loss", "higher_is_better": False})
+    compiled: dict[str, Any] = {
+        "sft": sft,
+        "checkpointing": checkpointing,
+        "policy": policy,
+        "data": data,
+        "logger": _logger(config, run_dir, paths),
+        "cluster": _cluster(config),
+    }
+    return _override(config, compiled)
+
+
+def compile_config(config: RunConfig, run_dir: str | Path) -> dict[str, Any]:
+    """The NeMo-RL master config (plain dict, yaml-serialisable) for ``config``.
+
+    Paths inside point at the data export of :func:`monorl.adapters.nemo_rl.data.export_dataset`
+    (``<run_dir>/nemo_rl/``), the checkpoint dir ``<run_dir>/checkpoints`` and the metrics file
+    ``<run_dir>/metrics.jsonl`` written by the logger patch.
+    """
+    _check_supported(config)
+    if config.is_sft:
+        return compile_sft_config(config, run_dir)
+    run_dir = Path(run_dir).expanduser().resolve()
+    paths = data_paths(run_dir)
+    algo, ro, tr, dt = config.algorithm, config.rollout, config.trainer, config.data
+    precision = PRECISION[tr.precision]
+    async_rollouts = ro.async_steps_ahead > 0
+    group_normalise = algo.advantage_norm != "none" and algo.advantage_std_norm
+    eval_enabled = dt.eval_uri is not None and tr.eval_every is not None
+
+    policy = _policy(config, precision, sequences_per_step=config.sequences_per_step())
+    policy["generation_batch_size"] = config.sequences_per_step()
+    policy["logprob_batch_size"] = tr.micro_batch_size
+    policy["logprob_chunk_size"] = None
+    policy["generation"] = _generation(config, precision, async_rollouts)
     if policy["megatron_cfg"]["enabled"]:
         policy["dtensor_cfg"] = {"enabled": False}
         policy["optimizer"] = None
@@ -455,61 +601,19 @@ def compile_config(config: RunConfig, run_dir: str | Path) -> dict[str, Any]:
 
     env: dict[str, Any] = {ENV_NAME: build_env_config(config, str(run_dir))}
 
-    checkpointing: dict[str, Any] = {
-        "enabled": True,
-        "checkpoint_dir": str(run_dir / CHECKPOINT_DIR),
-        "metric_name": None,
-        "higher_is_better": True,
-        "keep_top_k": None,
-        "save_period": tr.save_every,
-        "checkpoint_must_save_by": None,
-        "model_save_format": "safetensors",
-        "save_consolidated": True,
-        "save_optimizer": True,
-        "is_peft": config.model.lora.enabled,
-    }
-
-    run_name = config.run_name or run_dir.name
-    logger: dict[str, Any] = {
-        "log_dir": str(paths.root / "logs"),
-        "num_val_samples_to_print": 0,
-        "wandb_enabled": lg.wandb_project is not None,
-        "tensorboard_enabled": lg.tensorboard,
-        "mlflow_enabled": False,
-        "swanlab_enabled": False,
-        "monitor_gpus": False,
-        "wandb": {"project": lg.wandb_project or "monorl", "name": run_name},
-        "swanlab": {"project": "monorl", "name": run_name},
-        "tensorboard": {},
-        "mlflow": {"experiment_name": "monorl", "run_name": run_name, "tracking_uri": "http://localhost:5000"},
-        "gpu_monitoring": {"collection_interval": 10, "flush_interval": 10},
-        "monorl": {"enabled": True, "metrics_file": str(run_dir / METRICS_FILE), "run_dir": str(run_dir)},
-    }
-
-    cluster: dict[str, Any] = {
-        "gpus_per_node": cl.gpus_per_node,
-        "num_nodes": cl.num_nodes,
-        "master_port_range_low": 25000,
-        "master_port_range_high": 28000,
-        "segment_size": None,
-    }
-
     compiled: dict[str, Any] = {
         "grpo": grpo,
         "loss_fn": loss_fn,
-        "checkpointing": checkpointing,
+        "checkpointing": _checkpointing(config, run_dir),
         "policy": policy,
         "data": data,
         "env": env,
-        "logger": logger,
-        "cluster": cluster,
+        "logger": _logger(config, run_dir, paths),
+        "cluster": _cluster(config),
         "data_plane": None,
         "on_policy_distillation": None,
     }
-    override = config.trainer.extra.get("nemo_rl") or {}
-    if not isinstance(override, dict):
-        raise ConfigError("trainer.extra['nemo_rl'] must be a mapping of NeMo-RL config overrides")
-    return deep_merge(compiled, override)
+    return _override(config, compiled)
 
 
 def write_config(compiled: dict[str, Any], run_dir: str | Path) -> Path:
@@ -530,6 +634,7 @@ __all__ = [
     "build_env_config",
     "colocation",
     "compile_config",
+    "compile_sft_config",
     "config_path",
     "deep_merge",
     "write_config",

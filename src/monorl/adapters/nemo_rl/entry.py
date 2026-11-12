@@ -1,9 +1,10 @@
-"""``python -m monorl.adapters.nemo_rl.entry --config <yaml> [--run-dir D] [--nemo-rl-home H] [overrides…]``
+"""``python -m monorl.adapters.nemo_rl.entry --config <yaml> [--run-dir D] [--nemo-rl-home H] [--script S] [overrides…]``
 
 Runs inside the NeMo-RL checkout's environment (``uv run`` / its python). It applies the monorl
 patches, registers the monorl environment bridge with NeMo-RL and then executes
-``<NEMO_RL_HOME>/examples/run_grpo.py`` as ``__main__`` with the remaining arguments
-(``--config`` plus hydra-style overrides), exactly like ``uv run python examples/run_grpo.py``.
+``<NEMO_RL_HOME>/examples/run_grpo.py`` (or ``--script examples/run_sft.py`` for SFT) as
+``__main__`` with the remaining arguments (``--config`` plus hydra-style overrides), exactly like
+``uv run python examples/run_grpo.py``.
 
 NeMo-RL v0.7.0 (``81aa43dda4765b0429cf31dab44441e4e4383911``) registries touched:
 ``nemo_rl.environments.utils.ENV_REGISTRY`` / ``register_env`` and
@@ -26,6 +27,7 @@ from monorl.patching import apply, register_patchset
 
 HOME_ENV = "NEMO_RL_HOME"
 RUN_SCRIPT = Path("examples") / "run_grpo.py"
+SFT_SCRIPT = Path("examples") / "run_sft.py"
 
 
 def resolve_home(explicit: str | os.PathLike[str] | None = None) -> Path:
@@ -65,6 +67,9 @@ def parse_args(argv: list[str] | None = None) -> tuple[argparse.Namespace, list[
     parser.add_argument("--config", required=True, help="Compiled NeMo-RL yaml (monorl.adapters.nemo_rl.compile)")
     parser.add_argument("--run-dir", default=None, help=f"monorl run directory (default: ${RUN_DIR_ENV})")
     parser.add_argument("--nemo-rl-home", default=None, help=f"NeMo-RL checkout (default: ${HOME_ENV})")
+    parser.add_argument(
+        "--script", default=str(RUN_SCRIPT), help=f"Example script relative to the checkout (default: {RUN_SCRIPT})"
+    )
     return parser.parse_known_args(argv)
 
 
@@ -78,7 +83,9 @@ def main(argv: list[str] | None = None) -> None:
     if str(home) not in sys.path:
         sys.path.insert(0, str(home))
     install_bridges()
-    script = home / RUN_SCRIPT
+    script = home / args.script
+    if not script.is_file():
+        raise BackendUnavailable(f"NEMO_RL_HOME={home} does not contain {args.script}")
     sys.argv = [str(script), "--config", str(Path(args.config).expanduser().resolve()), *overrides]
     runpy.run_path(str(script), run_name="__main__")
 

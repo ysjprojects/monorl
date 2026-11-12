@@ -1,7 +1,8 @@
-"""Compile a :class:`~monorl.config.RunConfig` into ``trl.GRPOConfig`` keyword arguments.
+"""Compile a :class:`~monorl.config.RunConfig` into ``trl.GRPOConfig`` / ``trl.SFTConfig`` keyword arguments.
 
-Pure function of the config (``grpo_config_kwargs``) so the mapping is unit-testable without
-instantiating ``TrainingArguments``; :func:`compile_grpo_config` builds the real object.
+Pure functions of the config (``grpo_config_kwargs``, ``sft_config_kwargs``) so the mapping is
+unit-testable without instantiating ``TrainingArguments``; :func:`compile_grpo_config` /
+:func:`compile_sft_config` build the real objects.
 """
 
 from __future__ import annotations
@@ -40,34 +41,20 @@ def resolve_device(config: RunConfig) -> torch.device:
 
 def split_batch(config: RunConfig) -> tuple[int, int]:
     """``(per_device_train_batch_size, gradient_accumulation_steps)`` whose product is
-    ``prompts_per_step * group_size`` (TRL's generation batch), honouring ``micro_batch_size``
-    as an upper bound on the per-device batch."""
-    sequences = config.sequences_per_step()
+    ``prompts_per_step * group_size`` (TRL's generation batch) — or ``prompts_per_step`` sequences
+    for SFT — honouring ``micro_batch_size`` as an upper bound on the per-device batch."""
+    sequences = config.trainer.prompts_per_step if config.is_sft else config.sequences_per_step()
     micro = min(config.trainer.micro_batch_size, sequences)
     while sequences % micro:
         micro -= 1
     return micro, sequences // micro
 
 
-def grpo_config_kwargs(config: RunConfig, run_dir: Path, *, device: torch.device | None = None) -> dict[str, Any]:
-    """Keyword arguments for ``GRPOConfig``; ``trainer.extra`` overrides any field last."""
-    device = device or resolve_device(config)
-    algo, tr, ro, lg = config.algorithm, config.trainer, config.rollout, config.logging
-
-    loss_type = LOSS_TYPES.get((algo.name, algo.loss_agg))
-    if loss_type is None:
-        raise ConfigError(
-            f"trainer.backend='trl' supports algorithm.name in {{'grpo', 'dapo'}}, got {algo.name!r}; "
-            "use trainer.backend='reference' for rloo/reinforce (ppo needs a critic: trainer.backend='verl')"
-        )
+def _training_args_kwargs(config: RunConfig, run_dir: Path, device: torch.device) -> dict[str, Any]:
+    """``TrainingArguments`` fields shared by GRPO and SFT."""
+    tr, lg = config.trainer, config.logging
     if tr.optimizer == "adam" and tr.weight_decay > 0:
         raise ConfigError("trainer.optimizer='adam' with weight_decay > 0 has no TRL equivalent; use 'adamw'")
-
-    if algo.advantage_norm == "group":
-        scale_rewards = "group" if algo.advantage_std_norm else "none"
-    else:
-        scale_rewards = algo.advantage_norm
-
     per_device, grad_accum = split_batch(config)
     is_cuda = device.type == "cuda"
     kwargs: dict[str, Any] = {
@@ -75,21 +62,8 @@ def grpo_config_kwargs(config: RunConfig, run_dir: Path, *, device: torch.device
         "seed": config.seed,
         "learning_rate": tr.learning_rate,
         "max_steps": tr.max_steps,
-        "num_generations": ro.group_size,
         "per_device_train_batch_size": per_device,
         "gradient_accumulation_steps": grad_accum,
-        "per_device_eval_batch_size": ro.group_size,
-        "max_completion_length": ro.max_new_tokens,
-        "temperature": ro.temperature,
-        "top_p": ro.top_p,
-        "top_k": ro.top_k if ro.top_k > 0 else 0,
-        "beta": algo.kl_coef,
-        "epsilon": algo.clip_eps,
-        "epsilon_high": algo.clip_eps_high,
-        "loss_type": loss_type,
-        "scale_rewards": scale_rewards,
-        "entropy_coef": algo.entropy_coef,
-        "num_iterations": algo.num_epochs,
         "warmup_steps": tr.warmup_steps,
         "weight_decay": tr.weight_decay,
         "max_grad_norm": tr.max_grad_norm,
@@ -104,12 +78,91 @@ def grpo_config_kwargs(config: RunConfig, run_dir: Path, *, device: torch.device
         "logging_strategy": "steps",
         "logging_steps": lg.log_every,
         "report_to": "none",
-        "log_completions": False,
         "disable_tqdm": True,
-        "remove_unused_columns": False,
     }
     if config.data.eval_uri and tr.eval_every:
         kwargs.update({"eval_strategy": "steps", "eval_steps": tr.eval_every})
+    return kwargs
+
+
+def sft_config_kwargs(config: RunConfig, run_dir: Path, *, device: torch.device | None = None) -> dict[str, Any]:
+    """Keyword arguments for ``SFTConfig`` (TRL 1.17 ``trl/trainer/sft_config.py``).
+
+    ``trainer.prompts_per_step`` sequences per optimizer step, ``max_length = trainer.max_seq_len``,
+    ``completion_only_loss`` unless ``algorithm.sft_train_on_prompt``, ``label_smoothing_factor``
+    from ``algorithm.sft_label_smoothing`` (``Trainer.label_smoother``; TRL falls back to its fused
+    NLL path when it is 0). ``trainer.extra`` overrides any field last.
+    """
+    device = device or resolve_device(config)
+    algo, tr = config.algorithm, config.trainer
+    if algo.name != "sft":
+        raise ConfigError(f"sft_config_kwargs needs algorithm.name='sft', got {algo.name!r}")
+    kwargs = _training_args_kwargs(config, run_dir, device)
+    kwargs.update(
+        {
+            "per_device_eval_batch_size": kwargs["per_device_train_batch_size"],
+            "max_length": tr.max_seq_len,
+            "completion_only_loss": not algo.sft_train_on_prompt,
+            "assistant_only_loss": False,
+            "label_smoothing_factor": algo.sft_label_smoothing,
+            "packing": False,
+            "padding_free": False,
+            "loss_type": "nll",
+        }
+    )
+    kwargs.update(tr.extra)
+    return kwargs
+
+
+def compile_sft_config(config: RunConfig, run_dir: Path, *, device: torch.device | None = None) -> Any:
+    """Instantiate ``trl.SFTConfig``; unknown ``trainer.extra`` keys are a :class:`ConfigError`."""
+    from trl import SFTConfig
+
+    kwargs = sft_config_kwargs(config, run_dir, device=device)
+    fields = {f.name for f in dataclasses.fields(SFTConfig)}
+    unknown = sorted(k for k in config.trainer.extra if k not in fields)
+    if unknown:
+        raise ConfigError(f"trainer.extra keys are not SFTConfig fields: {unknown}")
+    return SFTConfig(**kwargs)
+
+
+def grpo_config_kwargs(config: RunConfig, run_dir: Path, *, device: torch.device | None = None) -> dict[str, Any]:
+    """Keyword arguments for ``GRPOConfig``; ``trainer.extra`` overrides any field last."""
+    device = device or resolve_device(config)
+    algo, tr, ro = config.algorithm, config.trainer, config.rollout
+
+    loss_type = LOSS_TYPES.get((algo.name, algo.loss_agg))
+    if loss_type is None:
+        raise ConfigError(
+            f"trainer.backend='trl' supports algorithm.name in {{'grpo', 'dapo', 'sft'}}, got {algo.name!r}; "
+            "use trainer.backend='reference' for rloo/reinforce (ppo needs a critic: trainer.backend='verl')"
+        )
+
+    if algo.advantage_norm == "group":
+        scale_rewards = "group" if algo.advantage_std_norm else "none"
+    else:
+        scale_rewards = algo.advantage_norm
+
+    kwargs = _training_args_kwargs(config, run_dir, device)
+    kwargs.update(
+        {
+            "num_generations": ro.group_size,
+            "per_device_eval_batch_size": ro.group_size,
+            "max_completion_length": ro.max_new_tokens,
+            "temperature": ro.temperature,
+            "top_p": ro.top_p,
+            "top_k": ro.top_k if ro.top_k > 0 else 0,
+            "beta": algo.kl_coef,
+            "epsilon": algo.clip_eps,
+            "epsilon_high": algo.clip_eps_high,
+            "loss_type": loss_type,
+            "scale_rewards": scale_rewards,
+            "entropy_coef": algo.entropy_coef,
+            "num_iterations": algo.num_epochs,
+            "log_completions": False,
+            "remove_unused_columns": False,
+        }
+    )
     if ro.backend == "vllm":
         extra = ro.extra
         server = bool(extra.get("server_base_url") or extra.get("server_host") or extra.get("mode") == "server")

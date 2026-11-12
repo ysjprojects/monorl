@@ -5,6 +5,28 @@
 export type JsonValue = string | number | boolean | null | JsonValue[] | { [k: string]: JsonValue };
 export type JsonDict = Record<string, JsonValue>;
 
+// ---- messages (monorl.core.types) ---------------------------------------------------------
+
+export type ContentPart =
+  | { type: "text"; text: string }
+  | { type: "image"; image: string }
+  | { type: "audio"; audio: string }
+  | { type: "video"; video: string };
+
+export interface Message {
+  role: string;
+  content: string | ContentPart[];
+}
+
+/** Text parts of a message joined (mirrors `monorl.core.types.message_text`). */
+export function messageText(m: Message): string {
+  if (typeof m.content === "string") return m.content;
+  return m.content
+    .filter((p): p is Extract<ContentPart, { type: "text" }> => p.type === "text")
+    .map((p) => p.text)
+    .join("");
+}
+
 export interface LoraConfig {
   enabled: boolean;
   r: number;
@@ -34,6 +56,8 @@ export interface DataConfig {
   messages_field: string | null;
   prompt_field: string | null;
   answer_field: string | null;
+  image_field: string | string[] | null;
+  response_field: string | null;
   system_prompt: string | null;
   prompt_template: string | null;
   max_prompt_tokens: number;
@@ -45,11 +69,13 @@ export interface DataConfig {
   extra: JsonDict;
 }
 
-export type AlgorithmName = "grpo" | "dapo" | "rloo" | "reinforce" | "ppo";
-export const ALGORITHMS: AlgorithmName[] = ["grpo", "dapo", "rloo", "reinforce", "ppo"];
+export type AlgorithmName = "grpo" | "dapo" | "rloo" | "reinforce" | "ppo" | "sft";
+export const ALGORITHMS: AlgorithmName[] = ["grpo", "dapo", "rloo", "reinforce", "ppo", "sft"];
 
 export interface AlgorithmConfig {
   name: AlgorithmName;
+  sft_label_smoothing: number;
+  sft_train_on_prompt: boolean;
   kl_coef: number;
   kl_estimator: "k1" | "k2" | "k3";
   clip_eps: number;
@@ -164,16 +190,69 @@ export interface RunConfig {
   logging: LoggingConfig;
 }
 
+// ---- pipelines (monorl.config.pipeline) ----------------------------------------------------
+
+export type StageType = "train" | "rejection_sample" | "eval";
+export const STAGE_TYPES: StageType[] = ["train", "rejection_sample", "eval"];
+
+export interface TrainStage {
+  type: "train";
+  name: string;
+  /** Partial RunConfig merged over the pipeline base. */
+  overrides: JsonDict;
+  init_from: "previous" | "base" | string;
+  data_from: "previous" | "config";
+}
+
+export interface RejectionSampleStage {
+  type: "rejection_sample";
+  name: string;
+  data: Partial<DataConfig> | null;
+  num_samples: number;
+  min_reward: number;
+  max_per_prompt: number;
+  max_response_tokens: number | null;
+  require_finish: boolean;
+  dedupe: boolean;
+  mix: string[];
+  rollout_overrides: JsonDict;
+  reward_overrides: JsonDict[] | null;
+  output: string | null;
+  max_prompts: number | null;
+}
+
+export interface EvalStage {
+  type: "eval";
+  name: string;
+  data: Partial<DataConfig> | null;
+  rollout_overrides: JsonDict;
+  max_prompts: number | null;
+}
+
+export type Stage = TrainStage | RejectionSampleStage | EvalStage;
+
+export interface PipelineConfig {
+  name: string | null;
+  base: RunConfig;
+  stages: Stage[];
+}
+
+/** A yaml/json document is a pipeline when it has `stages` and `base` (vs. a RunConfig). */
+export function isPipelineDoc(doc: unknown): doc is { base: unknown; stages: unknown[] } {
+  return !!doc && typeof doc === "object" && "stages" in doc && "base" in doc && Array.isArray(doc.stages);
+}
+
 // ---- server API ---------------------------------------------------------------------------
 
 export type RunState = "pending" | "running" | "succeeded" | "failed" | "cancelled";
 export const TERMINAL_STATES: Record<string, true> = { succeeded: true, failed: true, cancelled: true };
 
-export interface Job {
+export type JobKind = "run" | "pipeline";
+
+interface JobBase {
   id: string;
   name: string;
   run_dir: string;
-  config: RunConfig;
   state: RunState;
   pid: number | null;
   created_at: number;
@@ -181,8 +260,56 @@ export interface Job {
   finished_at: number | null;
   error: string | null;
   updated_at: number;
+  /** Training step for runs; stages finished for pipelines. */
   step: number;
   message: string | null;
+}
+
+export interface RunJob extends JobBase {
+  kind?: "run";
+  config: RunConfig;
+}
+
+export interface PipelineJob extends JobBase {
+  kind: "pipeline";
+  config: PipelineConfig;
+}
+
+export type Job = RunJob | PipelineJob;
+
+export function isPipelineJob(j: Job): j is PipelineJob {
+  return j.kind === "pipeline";
+}
+
+/** The RunConfig a job trains with (a pipeline's base config). */
+export function jobRunConfig(j: Job): RunConfig {
+  return isPipelineJob(j) ? j.config.base : j.config;
+}
+
+/** One entry of a pipeline manifest (`pipeline.json`). */
+export interface StageStatus {
+  index: number;
+  name: string;
+  type: StageType;
+  state: RunState;
+  run_dir: string | null;
+  started_at: number | null;
+  finished_at: number | null;
+  /** Training step (train), sampling chunk (rejection_sample) or 0. */
+  step: number;
+  /** Train: last train-phase metrics row. Rejection: cumulative `{prompts, sampled, accepted, accept_rate, mixed, rows, dataset, "reward/mean"}`. Eval: last eval row. */
+  summary: Record<string, JsonValue>;
+  error?: string | null;
+}
+
+/** GET /api/jobs/{id}/stages */
+export interface StagesResponse {
+  job_id: string;
+  kind: JobKind;
+  name: string;
+  state: RunState;
+  final_model_path: string | null;
+  stages: StageStatus[];
 }
 
 export interface StatusJson {
@@ -195,9 +322,7 @@ export interface StatusJson {
   [k: string]: JsonValue | undefined;
 }
 
-export interface JobDetail extends Job {
-  status: StatusJson | null;
-}
+export type JobDetail = Job & { status: StatusJson | null };
 
 export interface MetricRow {
   step: number;
@@ -238,7 +363,13 @@ export interface ValidateResponse {
 export interface Recipe {
   name: string;
   description: string;
-  config: Partial<RunConfig> & Record<string, unknown>;
+  /** Absent on older servers: a config with `base` + `stages` is a pipeline either way. */
+  kind?: JobKind;
+  config: Record<string, unknown>;
+}
+
+export function recipeIsPipeline(r: Recipe): boolean {
+  return r.kind === "pipeline" || isPipelineDoc(r.config);
 }
 
 export interface HubModel {
@@ -265,10 +396,29 @@ export interface BrowseEntry {
   size: number | null;
 }
 
+/** Placeholder the preview endpoint emits for decoded image cells (PIL / HF `Image` feature). */
+export interface ImageCell {
+  __image__: true;
+  width: number;
+  height: number;
+  mode?: string;
+  path?: string;
+}
+
+export function isImageCell(v: unknown): v is ImageCell {
+  return !!v && typeof v === "object" && "__image__" in v && v.__image__ === true;
+}
+
 export interface PreviewResponse {
   columns: Record<string, string>;
   rows: JsonDict[];
-  inferred: { format: DataFormat; prompt_field: string | null; answer_field: string | null; messages_field: string | null };
+  inferred: {
+    format: DataFormat;
+    prompt_field: string | null;
+    answer_field: string | null;
+    messages_field: string | null;
+    image_fields?: string[];
+  };
   num_rows?: number | null;
 }
 

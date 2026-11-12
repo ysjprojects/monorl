@@ -14,7 +14,8 @@ from fastapi.responses import JSONResponse
 from sse_starlette.sse import EventSourceResponse
 
 from monorl.core.reporting import LOG_FILE, iter_metrics, iter_trajectories, list_checkpoints, read_status
-from monorl.server.jobs import TERMINAL_STATES, JobManager
+from monorl.pipeline.stages import read_manifest
+from monorl.server.jobs import TERMINAL_STATES, JobManager, JobNotFound
 
 router = APIRouter()
 
@@ -56,13 +57,19 @@ def read_log_lines(run_dir: str | os.PathLike[str], *, since: int = 0, tail: int
 
 @router.post("/jobs", status_code=201)
 def create_job(body: dict[str, Any], request: Request) -> dict[str, Any]:
-    payload = body.get("config", body) if isinstance(body, dict) and "config" in body else body
+    """``{config: RunConfig}`` or ``{pipeline: PipelineConfig}`` (bare dicts of either are accepted)."""
+    if isinstance(body, dict) and "pipeline" in body:
+        payload: Any = body["pipeline"]
+        key = "pipeline"
+    else:
+        payload = body.get("config", body) if isinstance(body, dict) and "config" in body else body
+        key = "config"
     if not isinstance(payload, dict):
         return JSONResponse(  # type: ignore[return-value]
-            {"ok": False, "errors": [{"loc": ["config"], "msg": "config must be an object", "type": "type_error"}]},
+            {"ok": False, "errors": [{"loc": [key], "msg": f"{key} must be an object", "type": "type_error"}]},
             status_code=422,
         )
-    return _jobs(request).create(payload)
+    return _jobs(request).create({"pipeline": payload} if key == "pipeline" else payload)
 
 
 @router.get("/jobs")
@@ -121,12 +128,88 @@ def job_logs(
 @router.get("/jobs/{job_id}/checkpoints")
 def job_checkpoints(job_id: str, request: Request) -> dict[str, Any]:
     job = _jobs(request).get(job_id)
-    paths = list_checkpoints(job["run_dir"])
-    final = Path(job["run_dir"]) / "final"
+    return _checkpoints(job["run_dir"])
+
+
+# -- pipeline stages -------------------------------------------------------------------------
+
+
+def _checkpoints(run_dir: str | os.PathLike[str]) -> dict[str, Any]:
+    paths = list_checkpoints(run_dir)
+    final = Path(run_dir) / "final"
     return {
         "checkpoints": [{"step": int(Path(p).name[5:]), "path": p} for p in paths],
         "final": str(final) if final.is_dir() else None,
     }
+
+
+def _stages(job: dict[str, Any]) -> dict[str, Any]:
+    manifest = read_manifest(job["run_dir"]) or {}
+    return {
+        "job_id": job["id"],
+        "kind": job.get("kind", "run"),
+        "name": manifest.get("name", job["name"]),
+        "state": manifest.get("state", job["state"]),
+        "final_model_path": manifest.get("final_model_path"),
+        "error": manifest.get("error"),
+        "stages": list(manifest.get("stages", [])),
+    }
+
+
+def _stage(job: dict[str, Any], index: int) -> dict[str, Any]:
+    for stage in _stages(job)["stages"]:
+        if isinstance(stage, dict) and stage.get("index") == index:
+            return stage
+    raise JobNotFound(f"job {job['id']!r} has no stage {index}")
+
+
+@router.get("/jobs/{job_id}/stages")
+def job_stages(job_id: str, request: Request) -> dict[str, Any]:
+    """Manifest stages of a pipeline job (``stages: []`` for plain runs or before the runner
+    wrote ``pipeline.json``)."""
+    return _stages(_jobs(request).get(job_id))
+
+
+@router.get("/jobs/{job_id}/stages/{index}")
+def job_stage(job_id: str, index: int, request: Request) -> dict[str, Any]:
+    job = _jobs(request).get(job_id)
+    stage = _stage(job, index)
+    stage["status"] = read_status(stage["run_dir"]) if stage.get("run_dir") else None
+    return stage
+
+
+@router.get("/jobs/{job_id}/stages/{index}/metrics")
+def stage_metrics(
+    job_id: str, index: int, request: Request, since: int = Query(0, ge=0), limit: int = Query(MAX_ROWS, ge=1, le=MAX_ROWS)
+) -> dict[str, Any]:
+    stage = _stage(_jobs(request).get(job_id), index)
+    return _rows(iter_metrics(stage["run_dir"], start_line=since), since, limit)
+
+
+@router.get("/jobs/{job_id}/stages/{index}/trajectories")
+def stage_trajectories(
+    job_id: str, index: int, request: Request, since: int = Query(0, ge=0), limit: int = Query(200, ge=1, le=MAX_ROWS)
+) -> dict[str, Any]:
+    stage = _stage(_jobs(request).get(job_id), index)
+    return _rows(iter_trajectories(stage["run_dir"], start_line=since), since, limit)
+
+
+@router.get("/jobs/{job_id}/stages/{index}/logs")
+def stage_logs(
+    job_id: str,
+    index: int,
+    request: Request,
+    tail: int | None = Query(None, ge=0),
+    since: int = Query(0, ge=0),
+) -> dict[str, Any]:
+    stage = _stage(_jobs(request).get(job_id), index)
+    return read_log_lines(stage["run_dir"], since=since, tail=tail)
+
+
+@router.get("/jobs/{job_id}/stages/{index}/checkpoints")
+def stage_checkpoints(job_id: str, index: int, request: Request) -> dict[str, Any]:
+    stage = _stage(_jobs(request).get(job_id), index)
+    return _checkpoints(stage["run_dir"])
 
 
 # -- SSE streams --------------------------------------------------------------------------------

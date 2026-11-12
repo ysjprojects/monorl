@@ -24,8 +24,14 @@ Operations (request -> response):
 Errors: ``{"error": {"type": str, "message": str}}`` with HTTP 4xx/5xx on the http transport.
 
 ``Sample``: ``{"id": str, "messages": [Message], "reference": any, "metadata": {}}``
-``Message``: ``{"role": "system"|"user"|"assistant"|"tool", "content": str, "tool_calls"?: [...],
+``Message``: ``{"role": "system"|"user"|"assistant"|"tool", "content": str | [Part], "tool_calls"?: [...],
 "tool_call_id"?: str, "name"?: str}``
+``Part``: ``{"type": "text", "text": str}`` or ``{"type": "image", "image": str, "detail"?: str}``
+(``audio``/``video`` likewise). Media parts carry only a reference — an absolute local path,
+``file://``/``s3://``/``http(s)://`` URI or ``data:image/...;base64,`` URL — never raw bytes, so
+every wire message stays JSON. Environments that only care about text SHOULD concatenate the
+``text`` parts (``monorl.core.types.message_text``); environments that reply with media use the
+same parts in their own ``messages``.
 ``Action``: ``{"text": str, "tool_calls"?: [{"id", "name", "arguments"}], "finish_reason": str}``
 
 This module is torch-free and is the single source of truth for the Python side; the Go and C++

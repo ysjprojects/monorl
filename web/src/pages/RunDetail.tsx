@@ -1,95 +1,16 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useMemo, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { stringify as toYaml } from "yaml";
-import { api, subscribeSse } from "../api";
-import { MetricChart } from "../components/MetricChart";
-import { Card, ErrorBox, Kv, Pill, Spinner, StateBadge, Tabs } from "../components/ui";
+import { api, jobPath } from "../api";
+import { RunStreams } from "../components/RunStreams";
+import { Card, ErrorBox, Kv, Pill, Spinner, StateBadge } from "../components/ui";
 import { fmtDate, fmtDuration, fmtNum } from "../format";
 import { useAsync } from "../hooks";
-import { TERMINAL_STATES, type MetricRow, type TrajectoryRow } from "../types";
+import { EVAL_METRICS, REJECTION_METRICS, RL_METRICS, SFT_METRICS } from "../metrics";
+import { effectiveAlgorithm } from "../pipeline";
+import { isPipelineJob, jobRunConfig, TERMINAL_STATES, type JobDetail, type JsonValue, type PipelineJob, type StageStatus, type StageType } from "../types";
 
-const CHART_METRICS = ["reward/mean", "reward/std", "loss/policy", "loss/kl", "tokens/response_mean", "lr"];
-const COLORS = ["#38bdf8", "#a78bfa", "#f472b6", "#fb923c", "#34d399", "#facc15"];
-
-/**
- * Tail an append-only stream for a job: SSE first (`/<kind>/stream`), falling back to polling the
- * paginated JSON endpoint if the EventSource errors. Stops once the job is terminal.
- */
-function useStream<T>(jobId: string, kind: "metrics" | "logs", terminal: boolean, poll: (since: number) => Promise<{ items: T[]; next: number }>, parse: (data: string) => T) {
-  const [items, setItems] = useState<T[]>([]);
-  const [mode, setMode] = useState<"sse" | "poll" | "done">("sse");
-  const nextRef = useRef(0);
-  const terminalRef = useRef(terminal);
-  useEffect(() => {
-    terminalRef.current = terminal;
-  });
-
-  useEffect(() => {
-    if (mode !== "sse") return;
-    const event = kind === "metrics" ? "metrics" : "log";
-    let gotAny = false;
-    const dispose = subscribeSse(
-      `/api/jobs/${jobId}/${kind}/stream?since=${nextRef.current}`,
-      [event],
-      (name, data) => {
-        if (name === "end") {
-          setMode("done");
-          return;
-        }
-        gotAny = true;
-        nextRef.current += 1;
-        setItems((prev) => [...prev, parse(data)]);
-      },
-      () => {
-        // EventSource would retry forever; a closed or never-opened stream means the endpoint is
-        // unavailable (older server / proxy without SSE) — fall back to polling.
-        if (!gotAny || terminalRef.current) {
-          dispose();
-          setMode(terminalRef.current ? "done" : "poll");
-        }
-      },
-    );
-    return dispose;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [jobId, kind, mode]);
-
-  useEffect(() => {
-    if (mode !== "poll") return;
-    let cancelled = false;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const tick = async () => {
-      try {
-        const res = await poll(nextRef.current);
-        if (cancelled) return;
-        if (res.items.length) {
-          nextRef.current = res.next;
-          setItems((prev) => [...prev, ...res.items]);
-        }
-      } catch {
-        /* keep polling */
-      }
-      if (cancelled) return;
-      if (terminalRef.current) setMode("done");
-      else timer = setTimeout(tick, 2000);
-    };
-    void tick();
-    return () => {
-      cancelled = true;
-      clearTimeout(timer);
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [jobId, kind, mode]);
-
-  // Terminal while in SSE mode: the server sends `end`; if it never does, do one final poll.
-  useEffect(() => {
-    if (terminal && mode === "sse") {
-      const t = setTimeout(() => setMode((m) => (m === "sse" ? "poll" : m)), 3000);
-      return () => clearTimeout(t);
-    }
-  }, [terminal, mode]);
-
-  return { items, mode };
-}
+const STAGE_TONE: Record<StageType, "sky" | "amber" | "green"> = { train: "sky", rejection_sample: "amber", eval: "green" };
 
 /** Route element: remount the page per job id so per-job stream state starts fresh. */
 export default function RunDetailRoute() {
@@ -106,49 +27,8 @@ function RunDetail({ id }: { id: string }) {
   const terminal = !!job.data && TERMINAL_STATES[job.data.state] === true;
   if (terminal !== jobTerminal) setJobTerminal(terminal);
 
-  const metrics = useStream<MetricRow>(
-    id,
-    "metrics",
-    terminal,
-    async (since) => {
-      const r = await api.metrics(id, since);
-      return { items: r.rows, next: r.next };
-    },
-    (d) => JSON.parse(d) as MetricRow,
-  );
-  const logs = useStream<string>(
-    id,
-    "logs",
-    terminal,
-    async (since) => {
-      const r = await api.logs(id, 500);
-      // /logs returns the last N lines + the absolute `next` offset; only append unseen lines.
-      const unseen = Math.max(0, r.next - since);
-      return { items: unseen === 0 ? [] : r.lines.slice(-unseen), next: r.next };
-    },
-    (d) => {
-      try {
-        const v: unknown = JSON.parse(d);
-        return typeof v === "string" ? v : d;
-      } catch {
-        return d;
-      }
-    },
-  );
-
-  const traj = useIncremental<TrajectoryRow>(id, terminal, async (since) => api.trajectories(id, since));
-  const ckpts = useAsync(() => api.checkpoints(id), [id], terminal ? 0 : 5000);
-
-  const [tab, setTab] = useState<"charts" | "trajectories" | "logs" | "config">("charts");
   const j = job.data;
-  const status = j?.status;
-  const state = status?.state ?? j?.state ?? "pending";
-  const extraMetrics = useMemo(() => {
-    const keys = new Set<string>();
-    for (const r of metrics.items) for (const k of Object.keys(r)) if (typeof r[k] === "number" && !["step", "time"].includes(k) && !CHART_METRICS.includes(k)) keys.add(k);
-    return [...keys].sort();
-  }, [metrics.items]);
-  const [showExtra, setShowExtra] = useState(false);
+  const state = j?.status?.state ?? j?.state ?? "pending";
 
   async function cancel() {
     setCancelling(true);
@@ -170,209 +50,282 @@ function RunDetail({ id }: { id: string }) {
           ← Runs
         </Link>
         <h1 className="text-lg font-semibold">{j?.name ?? id}</h1>
+        {j && (isPipelineJob(j) ? <Pill tone="amber">pipeline</Pill> : <Pill>run</Pill>)}
         <StateBadge state={state} />
-        <Pill tone={metrics.mode === "sse" ? "sky" : "slate"}>{metrics.mode === "sse" ? "live (SSE)" : metrics.mode === "poll" ? "polling" : "finished"}</Pill>
         <div className="ml-auto flex items-center gap-2">
           {j && !TERMINAL_STATES[state] && (
             <button className="btn btn-danger" onClick={cancel} disabled={cancelling}>
-              {cancelling ? "Cancelling…" : "Cancel run"}
+              {cancelling ? "Cancelling…" : isPipelineJob(j) ? "Cancel pipeline" : "Cancel run"}
             </button>
           )}
         </div>
       </div>
       <ErrorBox error={job.error ?? cancelErr} />
       {!j && job.loading && <Spinner />}
-      {j && (
-        <div className="grid gap-4 lg:grid-cols-[2fr_1fr]">
-          <Card title="Status">
-            <Kv
-              items={[
-                ["step", `${status?.step ?? j.step} / ${j.config?.trainer?.max_steps ?? "?"}`],
-                ["message", status?.message ?? j.message ?? j.error ?? "–"],
-                ["model", j.config?.model?.name_or_path ?? "–"],
-                ["data", j.config?.data?.uri ?? "–"],
-                ["algorithm", `${j.config?.algorithm?.name} · rollout ${j.config?.rollout?.backend} · trainer ${j.config?.trainer?.backend}`],
-                ["run dir", j.run_dir],
-                ["started", fmtDate(status?.started_at ?? j.started_at)],
-                ["duration", fmtDuration(status?.started_at ?? j.started_at, j.finished_at)],
-                ["pid", String(status?.pid ?? j.pid ?? "–")],
-              ]}
-            />
-          </Card>
-          <Card title="Checkpoints">
-            {ckpts.data?.checkpoints?.length ? (
-              <ul className="space-y-1 text-xs">
-                {ckpts.data.checkpoints.map((c) => (
-                  <li key={c.path} className="flex justify-between gap-2">
-                    <span className="font-mono text-slate-200">step-{c.step}</span>
-                    <span className="truncate font-mono text-slate-500" title={c.path}>
-                      {c.path}
-                    </span>
-                  </li>
-                ))}
-              </ul>
-            ) : (
-              <div className="text-xs text-slate-500">No checkpoints yet (every {j.config?.trainer?.save_every} steps).</div>
-            )}
-          </Card>
-        </div>
+      {j && (isPipelineJob(j) ? <PipelineView job={j} terminal={terminal} /> : <SingleRunView job={j} terminal={terminal} />)}
+    </div>
+  );
+}
+
+// ---- single run --------------------------------------------------------------------------------
+
+function SingleRunView({ job: j, terminal }: { job: JobDetail; terminal: boolean }) {
+  const base = jobPath(j.id);
+  const status = j.status;
+  const c = jobRunConfig(j);
+  const ckpts = useAsync(() => api.checkpoints(base), [base], terminal ? 0 : 5000);
+  const configYaml = useMemo(() => toYaml(j.config), [j.config]);
+  const sft = c.algorithm?.name === "sft";
+  return (
+    <>
+      <div className="grid gap-4 lg:grid-cols-[2fr_1fr]">
+        <Card title="Status">
+          <Kv
+            items={[
+              ["step", `${status?.step ?? j.step} / ${c?.trainer?.max_steps ?? "?"}`],
+              ["message", status?.message ?? j.message ?? j.error ?? "–"],
+              ["model", c?.model?.name_or_path ?? "–"],
+              ["data", c?.data?.uri ?? "–"],
+              ["algorithm", sft ? `sft · trainer ${c?.trainer?.backend}` : `${c?.algorithm?.name} · rollout ${c?.rollout?.backend} · trainer ${c?.trainer?.backend}`],
+              ["run dir", j.run_dir],
+              ["started", fmtDate(status?.started_at ?? j.started_at)],
+              ["duration", fmtDuration(status?.started_at ?? j.started_at, j.finished_at)],
+              ["pid", String(status?.pid ?? j.pid ?? "–")],
+            ]}
+          />
+        </Card>
+        <CheckpointsCard checkpoints={ckpts.data?.checkpoints ?? []} saveEvery={c?.trainer?.save_every} />
+      </div>
+      <RunStreams base={base} terminal={terminal} sse chartMetrics={sft ? SFT_METRICS : RL_METRICS} configYaml={configYaml} />
+    </>
+  );
+}
+
+function CheckpointsCard({ checkpoints, saveEvery }: { checkpoints: { step: number; path: string }[]; saveEvery?: number }) {
+  return (
+    <Card title="Checkpoints">
+      {checkpoints.length ? (
+        <ul className="space-y-1 text-xs">
+          {checkpoints.map((c) => (
+            <li key={c.path} className="flex justify-between gap-2">
+              <span className="font-mono text-slate-200">step-{c.step}</span>
+              <span className="truncate font-mono text-slate-500" title={c.path}>
+                {c.path}
+              </span>
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <div className="text-xs text-slate-500">No checkpoints yet{saveEvery ? ` (every ${saveEvery} steps)` : ""}.</div>
       )}
+    </Card>
+  );
+}
 
-      <Tabs
-        tabs={[
-          { id: "charts", label: `Charts (${metrics.items.length})` },
-          { id: "trajectories", label: `Trajectories (${traj.length})` },
-          { id: "logs", label: `Logs (${logs.items.length})` },
-          { id: "config", label: "Config" },
-        ]}
-        value={tab}
-        onChange={setTab}
-      />
+// ---- pipeline ----------------------------------------------------------------------------------
 
-      {tab === "charts" && (
-        <div>
-          <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
-            {CHART_METRICS.map((m, i) => (
-              <MetricChart key={m} rows={metrics.items} metric={m} color={COLORS[i % COLORS.length]} />
-            ))}
-            {showExtra && extraMetrics.map((m, i) => <MetricChart key={m} rows={metrics.items} metric={m} color={COLORS[(i + 3) % COLORS.length]} />)}
+function PipelineView({ job: j, terminal }: { job: PipelineJob & { status: JobDetail["status"] }; terminal: boolean }) {
+  const status = j.status;
+  const base = j.config.base;
+  const manifest = useAsync(() => api.stages(j.id), [j.id], terminal ? 0 : 2000);
+  const stages = manifest.data?.stages ?? [];
+  const total = j.config.stages.length;
+  const finished = stages.filter((s) => s.state === "succeeded").length;
+  const active = stages.find((s) => s.state === "running") ?? null;
+
+  // Follow the active stage until the user picks one explicitly.
+  const [picked, setPicked] = useState<number | null>(null);
+  const fallback = active?.index ?? [...stages].reverse().find((s) => s.state !== "pending")?.index ?? (stages.length ? stages[0].index : null);
+  const selectedIndex = picked !== null && stages.some((s) => s.index === picked) ? picked : fallback;
+  const selected = stages.find((s) => s.index === selectedIndex) ?? null;
+  const configYaml = useMemo(() => toYaml(j.config), [j.config]);
+
+  return (
+    <>
+      <div className="grid gap-4 lg:grid-cols-[2fr_3fr]">
+        <Card title="Pipeline status">
+          <Kv
+            items={[
+              ["stages", `${status?.step ?? finished} / ${total} finished`],
+              ["active", active ? `${active.index + 1}. ${active.name} (${active.type})` : terminal ? "–" : "starting…"],
+              ["message", status?.message ?? j.message ?? j.error ?? "–"],
+              ["base model", base?.model?.name_or_path ?? "–"],
+              ["base data", base?.data?.uri ?? "–"],
+              ["final model", manifest.data?.final_model_path ?? "–"],
+              ["run dir", j.run_dir],
+              ["started", fmtDate(status?.started_at ?? j.started_at)],
+              ["duration", fmtDuration(status?.started_at ?? j.started_at, j.finished_at)],
+            ]}
+          />
+          <div className="mt-3 h-1.5 w-full overflow-hidden rounded bg-slate-800">
+            <div className="h-full bg-emerald-600 transition-all" style={{ width: `${total ? (100 * finished) / total : 0}%` }} />
           </div>
-          {extraMetrics.length > 0 && (
-            <button className="btn mt-3" onClick={() => setShowExtra((s) => !s)}>
-              {showExtra ? "Hide" : "Show"} {extraMetrics.length} more metrics
+        </Card>
+        <Card title="Stages">
+          <ErrorBox error={manifest.error} className="mb-2" />
+          {!manifest.data && manifest.loading && <Spinner />}
+          {manifest.data && stages.length === 0 && <div className="text-xs text-slate-500">No stage manifest yet.</div>}
+          {stages.length > 0 && (
+            <div className="overflow-hidden rounded-md border border-slate-800">
+              <table className="w-full text-xs">
+                <thead className="bg-slate-900 text-left uppercase tracking-wide text-slate-500">
+                  <tr>
+                    <th className="px-2 py-1.5">#</th>
+                    <th className="px-2 py-1.5">Name</th>
+                    <th className="px-2 py-1.5">Type</th>
+                    <th className="px-2 py-1.5">State</th>
+                    <th className="px-2 py-1.5 text-right">Step</th>
+                    <th className="px-2 py-1.5">Summary</th>
+                    <th className="px-2 py-1.5 text-right">Duration</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-800">
+                  {stages.map((s) => {
+                    const isActive = s.state === "running";
+                    const isSelected = s.index === selectedIndex;
+                    return (
+                      <tr
+                        key={s.index}
+                        onClick={() => setPicked(s.index)}
+                        className={`cursor-pointer ${isSelected ? "bg-sky-950/50 ring-1 ring-inset ring-sky-600" : "hover:bg-slate-900/60"} ${isActive ? "font-medium text-slate-100" : "text-slate-300"}`}
+                        aria-selected={isSelected}
+                      >
+                        <td className="px-2 py-1.5 font-mono">{s.index + 1}</td>
+                        <td className="px-2 py-1.5 font-mono">{s.name}</td>
+                        <td className="px-2 py-1.5">
+                          <Pill tone={STAGE_TONE[s.type]}>{s.type}</Pill>
+                        </td>
+                        <td className="px-2 py-1.5">
+                          <StateBadge state={s.state} />
+                        </td>
+                        <td className="px-2 py-1.5 text-right font-mono">{s.step}</td>
+                        <td className="max-w-[18rem] truncate px-2 py-1.5 text-slate-400" title={summaryText(s)}>
+                          {summaryText(s)}
+                        </td>
+                        <td className="px-2 py-1.5 text-right font-mono text-slate-400">{fmtDuration(s.started_at, s.finished_at)}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+          {active && picked !== null && picked !== active.index && (
+            <button className="btn mt-2" onClick={() => setPicked(null)}>
+              Follow active stage
             </button>
           )}
-        </div>
-      )}
+        </Card>
+      </div>
 
-      {tab === "trajectories" && <TrajectoryTable rows={traj} />}
+      {selected && <StagePanel key={`${j.id}:${selected.index}`} jobId={j.id} stage={selected} job={j} jobTerminal={terminal} />}
 
-      {tab === "logs" && <LogView lines={logs.items} />}
+      <details className="card">
+        <summary className="cursor-pointer text-sm font-semibold text-slate-200">Pipeline config</summary>
+        <pre className="mt-2 overflow-auto font-mono text-xs text-slate-300">{configYaml}</pre>
+      </details>
+    </>
+  );
+}
 
-      {tab === "config" && j && <pre className="card overflow-auto font-mono text-xs text-slate-300">{toYaml(j.config)}</pre>}
+function summaryText(s: StageStatus): string {
+  const sum = s.summary ?? {};
+  if (s.error) return s.error;
+  if (s.type === "rejection_sample") {
+    const acc = sum.accepted;
+    const sam = sum.sampled;
+    const rate = sum.accept_rate;
+    if (typeof acc === "number" && typeof sam === "number") return `accepted ${acc} / ${sam}${typeof rate === "number" ? ` (${(100 * rate).toFixed(1)}%)` : ""}`;
+  }
+  const keys = s.type === "eval" ? ["eval/reward_mean", "eval/num_samples"] : ["reward/mean", "loss/sft", "loss/policy", "eval/loss"];
+  const parts = keys.filter((k) => typeof sum[k] === "number").map((k) => `${k}=${fmtNum(sum[k], 3)}`);
+  if (parts.length) return parts.join(" · ");
+  const first = Object.entries(sum).find(([, v]) => typeof v === "number");
+  return first ? `${first[0]}=${fmtNum(first[1], 3)}` : s.state === "pending" ? "waiting" : "";
+}
+
+function StagePanel({ jobId, stage: s, job, jobTerminal }: { jobId: string; stage: StageStatus; job: PipelineJob; jobTerminal: boolean }) {
+  const base = jobPath(jobId, s.index);
+  const terminal = TERMINAL_STATES[s.state] === true || jobTerminal;
+  const cfg = job.config.stages[s.index];
+  const ckpts = useAsync(() => api.checkpoints(base), [base], terminal || s.type !== "train" ? 0 : 5000);
+  const algo = cfg?.type === "train" ? effectiveAlgorithm(job.config.base, cfg) : null;
+  const chartMetrics = s.type === "rejection_sample" ? REJECTION_METRICS : s.type === "eval" ? EVAL_METRICS : algo === "sft" ? SFT_METRICS : RL_METRICS;
+  const stageYaml = useMemo(() => (cfg ? toYaml(cfg) : ""), [cfg]);
+  const sum = s.summary ?? {};
+  return (
+    <div className="space-y-4 rounded-lg border border-sky-900/60 p-4">
+      <div className="flex flex-wrap items-center gap-3">
+        <span className="text-sm font-semibold text-slate-100">
+          Stage {s.index + 1}: <span className="font-mono">{s.name}</span>
+        </span>
+        <Pill tone={STAGE_TONE[s.type]}>{s.type}</Pill>
+        {algo && <Pill tone="sky">{algo}</Pill>}
+        <StateBadge state={s.state} />
+        <span className="text-xs text-slate-500">
+          {fmtDate(s.started_at)} · {fmtDuration(s.started_at, s.finished_at)}
+        </span>
+        {s.run_dir && (
+          <span className="ml-auto truncate font-mono text-xs text-slate-500" title={s.run_dir}>
+            {s.run_dir}
+          </span>
+        )}
+      </div>
+      {s.error && <ErrorBox error={s.error} />}
+      <div className="grid gap-4 lg:grid-cols-[2fr_1fr]">
+        {s.type === "rejection_sample" ? <RejectionSummary summary={sum} /> : <SummaryCard summary={sum} />}
+        {s.type === "train" ? (
+          <CheckpointsCard checkpoints={ckpts.data?.checkpoints ?? []} />
+        ) : (
+          <Card title="Stage config">
+            <pre className="max-h-40 overflow-auto font-mono text-xs text-slate-300">{stageYaml}</pre>
+          </Card>
+        )}
+      </div>
+      <RunStreams base={base} terminal={terminal} sse={false} chartMetrics={chartMetrics} configYaml={s.type === "train" ? stageYaml : undefined} />
     </div>
   );
 }
 
-function useIncremental<T>(jobId: string, terminal: boolean, fetchSince: (since: number) => Promise<{ rows: T[]; next: number }>) {
-  const [rows, setRows] = useState<T[]>([]);
-  const nextRef = useRef(0);
-  useEffect(() => {
-    let cancelled = false;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const tick = async () => {
-      try {
-        const r = await fetchSince(nextRef.current);
-        if (cancelled) return;
-        if (r.rows.length) {
-          nextRef.current = r.next;
-          setRows((prev) => [...prev, ...r.rows]);
-        }
-      } catch {
-        /* retry on next tick */
-      }
-      if (!cancelled && !terminal) timer = setTimeout(tick, 3000);
-    };
-    void tick();
-    return () => {
-      cancelled = true;
-      clearTimeout(timer);
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [jobId, terminal]);
-  return rows;
-}
-
-function TrajectoryTable({ rows }: { rows: TrajectoryRow[] }) {
-  const [open, setOpen] = useState<number | null>(null);
-  const [onlyStep, setOnlyStep] = useState<number | "all">("all");
-  const steps = useMemo(() => [...new Set(rows.map((r) => r.step))].sort((a, b) => b - a), [rows]);
-  const shown = useMemo(() => {
-    const list = onlyStep === "all" ? rows : rows.filter((r) => r.step === onlyStep);
-    return list.slice(-200).reverse();
-  }, [rows, onlyStep]);
-  if (rows.length === 0) return <div className="card text-sm text-slate-500">No trajectories logged yet.</div>;
+function SummaryCard({ summary }: { summary: Record<string, JsonValue> }) {
+  const entries = Object.entries(summary).filter(([, v]) => typeof v === "number" || typeof v === "string");
   return (
-    <div className="space-y-2">
-      <div className="flex items-center gap-2 text-xs text-slate-400">
-        step
-        <select className="input w-auto" value={String(onlyStep)} onChange={(e) => setOnlyStep(e.target.value === "all" ? "all" : Number(e.target.value))}>
-          <option value="all">all (latest 200)</option>
-          {steps.map((s) => (
-            <option key={s} value={s}>
-              {s}
-            </option>
-          ))}
-        </select>
-      </div>
-      <div className="overflow-hidden rounded-lg border border-slate-800">
-        <table className="w-full table-fixed text-sm">
-          <thead className="bg-slate-900 text-left text-xs uppercase tracking-wide text-slate-500">
-            <tr>
-              <th className="w-14 px-3 py-2">Step</th>
-              <th className="w-[38%] px-3 py-2">Prompt</th>
-              <th className="px-3 py-2">Response</th>
-              <th className="w-20 px-3 py-2 text-right">Reward</th>
-              <th className="w-16 px-3 py-2 text-right">Tok</th>
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-slate-800">
-            {shown.map((r, i) => {
-              const key = rows.indexOf(r);
-              const expanded = open === key;
-              return (
-                <tr key={`${r.step}-${r.sample_id}-${i}`} className="cursor-pointer align-top hover:bg-slate-900/60" onClick={() => setOpen(expanded ? null : key)}>
-                  <td className="px-3 py-2 font-mono text-xs">{r.step}</td>
-                  <td className={`px-3 py-2 text-xs text-slate-300 ${expanded ? "whitespace-pre-wrap" : "truncate"}`}>{r.prompt}</td>
-                  <td className={`px-3 py-2 text-xs text-slate-200 ${expanded ? "whitespace-pre-wrap" : "truncate"}`}>
-                    {r.response}
-                    {expanded && (
-                      <div className="mt-2 space-y-1 border-t border-slate-800 pt-2 text-slate-400">
-                        {r.reference != null && (
-                          <div>
-                            <span className="text-slate-500">reference:</span> <span className="font-mono">{typeof r.reference === "string" ? r.reference : JSON.stringify(r.reference)}</span>
-                          </div>
-                        )}
-                        <div>
-                          <span className="text-slate-500">breakdown:</span>{" "}
-                          {Object.entries(r.reward_breakdown ?? {}).map(([k, v]) => (
-                            <Pill key={k}>
-                              {k}={fmtNum(v, 3)}
-                            </Pill>
-                          ))}
-                        </div>
-                        <div className="text-slate-500">
-                          group {r.group_id} · sample {r.sample_id} · {r.num_turns} turn(s)
-                        </div>
-                      </div>
-                    )}
-                  </td>
-                  <td className={`px-3 py-2 text-right font-mono text-xs ${r.reward > 0 ? "text-emerald-300" : "text-slate-400"}`}>{fmtNum(r.reward, 3)}</td>
-                  <td className="px-3 py-2 text-right font-mono text-xs text-slate-500">{r.num_response_tokens}</td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
-      </div>
-    </div>
+    <Card title="Summary">
+      {entries.length === 0 ? <div className="text-xs text-slate-500">No metrics yet.</div> : <Kv items={entries.map(([k, v]) => [k, typeof v === "number" ? fmtNum(v) : String(v)])} />}
+    </Card>
   );
 }
 
-function LogView({ lines }: { lines: string[] }) {
-  const ref = useRef<HTMLPreElement>(null);
-  const [follow, setFollow] = useState(true);
-  useEffect(() => {
-    if (follow && ref.current) ref.current.scrollTop = ref.current.scrollHeight;
-  }, [lines, follow]);
+function RejectionSummary({ summary }: { summary: Record<string, JsonValue> }) {
+  const num = (k: string) => (typeof summary[k] === "number" ? summary[k] : null);
+  const accepted = num("accepted");
+  const sampled = num("sampled");
+  const rate = num("accept_rate") ?? (accepted !== null && sampled ? accepted / sampled : null);
   return (
-    <div className="space-y-2">
-      <label className="flex items-center gap-2 text-xs text-slate-400">
-        <input type="checkbox" checked={follow} onChange={(e) => setFollow(e.target.checked)} /> follow tail
-      </label>
-      <pre ref={ref} className="card h-[32rem] overflow-auto whitespace-pre-wrap font-mono text-xs leading-5 text-slate-300">
-        {lines.length ? lines.slice(-2000).join("\n") : "no log output yet"}
-      </pre>
+    <Card title="Rejection sampling">
+      <div className="grid grid-cols-3 gap-3 text-center">
+        <Stat label="sampled" value={sampled} />
+        <Stat label="accepted" value={accepted} />
+        <Stat label="accept rate" value={rate === null ? null : `${(100 * rate).toFixed(1)}%`} />
+      </div>
+      <Kv
+        items={[
+          ["prompts", num("prompts") ?? "–"],
+          ["mixed in", num("mixed") ?? "–"],
+          ["dataset rows", num("rows") ?? "–"],
+          ["dataset", typeof summary.dataset === "string" ? summary.dataset : "–"],
+          ["reward/mean", num("reward/mean") !== null ? fmtNum(num("reward/mean"), 3) : "–"],
+        ]}
+      />
+    </Card>
+  );
+}
+
+function Stat({ label, value }: { label: string; value: number | string | null }) {
+  return (
+    <div className="rounded-md border border-slate-800 bg-slate-950 p-2">
+      <div className="font-mono text-lg text-slate-100">{value === null ? "–" : typeof value === "number" ? fmtNum(value) : value}</div>
+      <div className="text-xs text-slate-500">{label}</div>
     </div>
   );
 }

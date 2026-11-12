@@ -5,8 +5,9 @@ importing sglang. Endpoints (SGLang v0.5.23, ``python/sglang/srt/entrypoints/htt
 
 * ``POST /generate`` — body is ``GenerateReqInput`` (``srt/managers/io_struct.py`` /
   ``sglang/api/v1/api_types.py``): ``input_ids`` (list of token-id lists), ``sampling_params``
-  (one dict per request), ``return_logprob``, ``logprob_start_len``; returns the same flat list
-  of ``{"text", "output_ids", "meta_info"}`` dicts as ``Engine.generate``.
+  (one dict per request), ``return_logprob``, ``logprob_start_len``, ``image_data`` (one entry per
+  request: a list of ``data:image/png;base64`` URLs, or ``None`` for text-only); returns the same
+  flat list of ``{"text", "output_ids", "meta_info"}`` dicts as ``Engine.generate``.
 * ``POST /update_weights_from_tensor`` — ``UpdateWeightsFromTensorReqInput``:
   ``serialized_named_tensors`` (one base64 ``MultiprocessingSerializer`` payload per TP rank),
   ``load_format``, ``flush_cache``; ``{"success", "message"}`` with 400 on failure. Tensors are
@@ -32,9 +33,12 @@ import torch
 from monorl.adapters.sglang.common import (
     bucket_bytes,
     bucket_weights,
+    encode_prompt,
+    expand_image_data,
     expand_requests,
     group_outputs,
-    prompt_token_ids,
+    image_data_urls,
+    is_media_prompt,
     serialized_payloads,
     server_url,
 )
@@ -66,6 +70,8 @@ class SGLangServerClient:
         self.replica = replica
         self._url = server_url(config, replica)
         self._tokenizer = load_tokenizer(config)
+        self._processor: Any | None = None  # AutoProcessor, loaded on the first multimodal prompt
+        self._processor_loaded = False
         self._bucket_bytes = bucket_bytes(config)
         self._sleep_tags: list[str] | None = config.rollout.extra.get("sleep_tags")
         timeout = float(config.rollout.extra.get("timeout", DEFAULT_TIMEOUT))
@@ -87,14 +93,19 @@ class SGLangServerClient:
     def generate(self, prompts: Sequence[PromptInput], params: SamplingParams) -> list[list[Completion]]:
         if not prompts:
             return []
-        prompt_ids = [prompt_token_ids(self._tokenizer, p) for p in prompts]
+        processor = self._load_processor() if any(is_media_prompt(p) for p in prompts) else None
+        encoded = [encode_prompt(self._tokenizer, processor, p) for p in prompts]
+        prompt_ids = [ids for ids, _ in encoded]
         input_ids, sampling = expand_requests(prompt_ids, params)
-        body = {
+        body: dict[str, Any] = {
             "input_ids": input_ids,
             "sampling_params": sampling,
             "return_logprob": params.logprobs,
             "logprob_start_len": -1,
         }
+        image_data = image_data_urls(expand_image_data([images for _, images in encoded], params))
+        if image_data is not None:
+            body["image_data"] = image_data
         response = self._post("/generate", json=body)
         if response.status_code >= 400:
             raise RuntimeError(f"sglang /generate failed (HTTP {response.status_code}): {response.text}")
@@ -151,6 +162,14 @@ class SGLangServerClient:
             self._http.close()
 
     # -- internals ----------------------------------------------------------------------
+    def _load_processor(self) -> Any | None:
+        if not self._processor_loaded:
+            from monorl.rollout.media import load_processor
+
+            self._processor = load_processor(self.config)
+            self._processor_loaded = True
+        return self._processor
+
     def server_info(self) -> dict[str, Any]:
         response = self._http.get("/get_server_info")
         response.raise_for_status()

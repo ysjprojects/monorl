@@ -5,8 +5,9 @@
 :class:`MaterializedSource` (list in memory, ``len()`` works, re-iterable) or
 :class:`StreamingSource` (lazy, ``len()`` raises :class:`DataError` unless the count is known).
 
-Pipeline per row: layout → messages (+ ``system_prompt``, ``prompt_template``) → reference
-(``#### answer`` extraction) → ``max_prompt_tokens`` filter → shuffle/limit.
+Pipeline per row: layout → messages (+ ``system_prompt``, ``prompt_template``) → image parts
+(``image_field``) → reference (``#### answer`` extraction) + SFT ``metadata["response"]`` →
+``max_prompt_tokens`` filter (text tokens only) → shuffle/limit.
 """
 
 from __future__ import annotations
@@ -14,14 +15,15 @@ from __future__ import annotations
 import itertools
 import json
 import re
-from collections.abc import Iterator, Mapping
-from dataclasses import dataclass
+from collections.abc import Callable, Iterator, Mapping
+from dataclasses import dataclass, field
 from typing import Any
 
 from monorl.config.schema import DataConfig
 from monorl.core.errors import DataError
-from monorl.core.types import Message, Sample
+from monorl.core.types import ContentPart, Message, Sample, message_text
 from monorl.data import formats
+from monorl.data.media import MediaResolver, normalize_content_parts, place_images
 from monorl.data.rows import RowRef, RowSource
 
 GSM8K_SEPARATOR = "####"
@@ -46,9 +48,10 @@ class _RowFormatMap(dict):
         raise DataError(f"prompt_template references {{{key}}} but the row has columns {sorted(self)}")
 
 
-def normalize_messages(value: Any, *, where: str) -> list[Message]:
+def normalize_messages(value: Any, *, where: str, resolver: MediaResolver | None = None) -> list[Message]:
     """Accept OpenAI (``role``/``content``) or ShareGPT (``from``/``value``) lists, or their JSON
-    string encoding (CSV/parquet string columns)."""
+    string encoding (CSV/parquet string columns). List-shaped ``content`` (OpenAI image parts,
+    HF image structs) is normalised to monorl parts through ``resolver``."""
     if isinstance(value, str):
         try:
             value = json.loads(value)
@@ -56,6 +59,7 @@ def normalize_messages(value: Any, *, where: str) -> list[Message]:
             raise DataError(f"{where}: messages column is a string that is not JSON") from e
     if not isinstance(value, list) or not value:
         raise DataError(f"{where}: messages column must be a non-empty list of messages")
+    resolver = resolver or MediaResolver()
     out: list[Message] = []
     for i, m in enumerate(value):
         if not isinstance(m, dict):
@@ -64,12 +68,14 @@ def normalize_messages(value: Any, *, where: str) -> list[Message]:
             role = _SHAREGPT_ROLES.get(str(m["from"]).lower())
             if role is None:
                 raise DataError(f"{where}: message {i} has unknown ShareGPT speaker {m['from']!r}")
-            msg: Message = {"role": role, "content": m.get("value") or ""}
+            content = m.get("value")
         else:
             role = m.get("role")
             if role not in ("system", "user", "assistant", "tool"):
                 raise DataError(f"{where}: message {i} has unsupported role {role!r}")
-            msg = {"role": role, "content": m.get("content") if m.get("content") is not None else ""}
+            content = m.get("content")
+        msg: Message = {"role": role, "content": normalize_content_parts(content, resolver, where=f"{where}.messages[{i}]")}
+        if "role" in m:
             for key in _MESSAGE_KEYS[2:]:
                 if m.get(key) is not None:
                     msg[key] = m[key]  # type: ignore[literal-required]
@@ -92,6 +98,10 @@ class Layout:
     prompt_field: str | None = None
     answer_field: str | None = None
     messages_field: str | None = None
+    response_field: str | None = None
+    image_fields: list[str] = field(default_factory=list)
+    """Columns attached to the user turn as image parts (``DataConfig.image_field``; explicit opt-in,
+    ``sniff_format`` only reports candidates)."""
 
     @classmethod
     def resolve(cls, config: DataConfig, columns: dict[str, str], sample_rows: list[dict]) -> Layout:
@@ -106,11 +116,14 @@ class Layout:
                 fmt = "prompt_answer" if (config.answer_field or sniffed["answer_field"]) else "text"
             else:
                 fmt = sniffed["format"]
+        image_fields = config.image_field if isinstance(config.image_field, list) else [config.image_field]
         layout = cls(
             format=fmt,
             prompt_field=config.prompt_field or sniffed["prompt_field"],
             answer_field=config.answer_field or sniffed["answer_field"],
             messages_field=config.messages_field or sniffed["messages_field"],
+            response_field=config.response_field,
+            image_fields=[f for f in image_fields if f],
         )
         if layout.format not in ("chat", "prompt_answer", "text"):
             raise DataError(f"could not infer dataset format from columns {sorted(columns)}; set data.format")
@@ -120,7 +133,7 @@ class Layout:
             raise DataError(f"format={layout.format} needs prompt_field; columns: {sorted(columns)}")
         if layout.format == "prompt_answer" and not layout.answer_field:
             raise DataError(f"format=prompt_answer needs answer_field; columns: {sorted(columns)}")
-        for name in (layout.prompt_field, layout.answer_field, layout.messages_field):
+        for name in (layout.prompt_field, layout.answer_field, layout.messages_field, layout.response_field, *layout.image_fields):
             if name and columns and name not in columns:
                 raise DataError(f"column {name!r} not found; available: {sorted(columns)}")
         return layout
@@ -131,6 +144,8 @@ class Layout:
             "prompt_field": self.prompt_field,
             "answer_field": self.answer_field,
             "messages_field": self.messages_field,
+            "response_field": self.response_field,
+            "image_fields": list(self.image_fields),
         }
 
 
@@ -141,49 +156,77 @@ class SampleMapper:
     prompt_template: str | None = None
     tokenizer: Any = None
     max_prompt_tokens: int | None = None
+    media_base: Callable[[str], str | None] | None = None
+    """``row_id -> base location`` for relative image paths (``RowSource.media_base``)."""
     dropped: int = 0
     """Rows dropped by the token filter so far (diagnostic)."""
+    _resolvers: dict[str | None, MediaResolver] = field(default_factory=dict)
 
     @classmethod
-    def from_config(cls, config: DataConfig, layout: Layout, tokenizer: Any = None) -> SampleMapper:
+    def from_config(
+        cls, config: DataConfig, layout: Layout, tokenizer: Any = None, rows: RowSource | None = None
+    ) -> SampleMapper:
         return cls(
             layout=layout,
             system_prompt=config.system_prompt,
             prompt_template=config.prompt_template,
             tokenizer=tokenizer,
             max_prompt_tokens=config.max_prompt_tokens if tokenizer is not None else None,
+            media_base=rows.media_base if rows is not None else None,
         )
+
+    def resolver_for(self, row_id: str) -> MediaResolver:
+        base = self.media_base(row_id) if self.media_base is not None else None
+        resolver = self._resolvers.get(base)
+        if resolver is None:
+            resolver = self._resolvers[base] = MediaResolver(base)
+        return resolver
 
     # -- row → sample
     def to_sample(self, row_id: str, row: Mapping[str, Any]) -> Sample:
         lay = self.layout
         metadata: dict[str, Any] = {}
+        resolver = self.resolver_for(row_id)
         if lay.format == "chat":
             consumed = lay.messages_field
-            messages = normalize_messages(row[lay.messages_field], where=row_id)
+            messages = normalize_messages(row[lay.messages_field], where=row_id, resolver=resolver)
         else:
             consumed = lay.prompt_field
             prompt = row[lay.prompt_field]
             if formats.looks_like_chat(prompt):
-                messages = normalize_messages(prompt, where=row_id)
+                messages = normalize_messages(prompt, where=row_id, resolver=resolver)
             else:
                 messages = [{"role": "user", "content": "" if prompt is None else str(prompt)}]
 
         reference: Any = None
+        response: str | None = None
         if lay.answer_field and lay.answer_field in row:
             raw = row[lay.answer_field]
             reference, extracted = extract_reference(raw)
             if extracted:
                 metadata["answer_raw"] = raw
+            if lay.format != "chat" and raw is not None:
+                response = str(raw)
         if messages and messages[-1]["role"] == "assistant":
             trailing = messages.pop()
             metadata["assistant_turn"] = trailing
             if reference is None:
-                reference = trailing.get("content")
+                reference = message_text(trailing)
+            if response is None:
+                response = message_text(trailing)
+        if lay.response_field and row.get(lay.response_field) is not None:
+            response = str(row[lay.response_field])
+        metadata["response"] = response
         if not messages:
             raise DataError(f"{row_id}: no prompt messages left after removing the assistant turn")
-        if self.prompt_template is not None and messages[-1]["role"] == "user":
-            messages[-1] = {**messages[-1], "content": self._render(row, messages[-1]["content"])}
+
+        images = [
+            part
+            for name in lay.image_fields
+            for part in resolver.image_parts(row.get(name), where=f"{row_id}.{name}")
+        ]
+        if self.prompt_template is not None or images:
+            self._apply_user_turn(messages, row, images, row_id)
 
         if self.system_prompt is not None:
             if messages[0]["role"] == "system":
@@ -191,9 +234,30 @@ class SampleMapper:
             else:
                 messages.insert(0, {"role": "system", "content": self.system_prompt})
 
-        metadata["row"] = {k: v for k, v in row.items() if k != consumed}
+        skip = {consumed, *lay.image_fields}
+        metadata["row"] = {k: v for k, v in row.items() if k not in skip}
         sample_id = str(row["id"]) if row.get("id") not in (None, "") else row_id
         return Sample(id=sample_id, messages=messages, reference=reference, metadata=metadata)
+
+    def _apply_user_turn(self, messages: list[Message], row: Mapping[str, Any], images: list, row_id: str) -> None:
+        """Render ``prompt_template`` on the last user turn and attach ``images`` to it."""
+        index = next((i for i in range(len(messages) - 1, -1, -1) if messages[i]["role"] == "user"), None)
+        if index is None:
+            if images:
+                raise DataError(f"{row_id}: image_field set but the row has no user turn to attach images to")
+            return
+        if index != len(messages) - 1 and self.prompt_template is not None and not images:
+            return  # template applies to a trailing user turn only (unchanged behaviour)
+        current = messages[index]
+        content = current["content"]
+        existing: list[ContentPart] | None = content if isinstance(content, list) else None
+        text = message_text(current)
+        if self.prompt_template is not None and index == len(messages) - 1:
+            text = self._render(row, text)
+        if not images and existing is None:
+            messages[index] = {**current, "content": text}
+            return
+        messages[index] = {**current, "content": place_images(text, images, existing)}
 
     def _render(self, row: Mapping[str, Any], prompt_text: str) -> str:
         scope = _RowFormatMap(row)
@@ -205,11 +269,14 @@ class SampleMapper:
 
     # -- filtering
     def prompt_tokens(self, messages: list[Message]) -> int:
+        """Text tokens of the prompt (media parts are dropped: image placeholder tokens are
+        model-specific and only known to the processor, so ``max_prompt_tokens`` bounds text)."""
         tok = self.tokenizer
+        text_only = [{**m, "content": message_text(m)} for m in messages]
         if getattr(tok, "chat_template", None):
-            text = tok.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+            text = tok.apply_chat_template(text_only, tokenize=False, add_generation_prompt=True)
         else:
-            text = "\n".join(str(m.get("content", "")) for m in messages)
+            text = "\n".join(m["content"] for m in text_only)
         return len(tok(text, add_special_tokens=False)["input_ids"])
 
     def keep(self, sample: Sample) -> bool:

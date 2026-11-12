@@ -18,18 +18,73 @@ class ToolCall(TypedDict, total=False):
     arguments: dict[str, Any] | str
 
 
+class TextPart(TypedDict):
+    type: Literal["text"]
+    text: str
+
+
+class ImagePart(TypedDict, total=False):
+    """An image reference. ``image`` is a local path, ``file://``/``s3://``/``http(s)://`` URI or a
+    ``data:image/...;base64,`` URL. Engines/trainers load it through the model's processor."""
+
+    type: Literal["image"]
+    image: str
+    detail: str
+
+
+class AudioPart(TypedDict, total=False):
+    type: Literal["audio"]
+    audio: str
+
+
+class VideoPart(TypedDict, total=False):
+    type: Literal["video"]
+    video: str
+
+
+ContentPart = TextPart | ImagePart | AudioPart | VideoPart
+MEDIA_PART_TYPES: tuple[str, ...] = ("image", "audio", "video")
+
+
 class Message(TypedDict, total=False):
-    """OpenAI/HF chat-template compatible message."""
+    """OpenAI/HF chat-template compatible message. ``content`` is plain text or a list of parts
+    (text + image/audio/video) for multimodal models; use :func:`message_text` when only the text
+    matters (rewards, format checks, logs)."""
 
     role: Role
-    content: str
+    content: str | list[ContentPart]
     tool_calls: list[ToolCall]
     tool_call_id: str
     name: str
 
 
+def message_text(message: Message) -> str:
+    """Concatenated text of a message, dropping media parts."""
+    content = message.get("content", "")
+    if isinstance(content, str):
+        return content
+    return "".join(str(p.get("text", "")) for p in content if isinstance(p, dict) and p.get("type") == "text")
+
+
+def message_media(message: Message, kind: str = "image") -> list[str]:
+    """Media references (paths/URIs) of one kind carried by a message."""
+    content = message.get("content", "")
+    if isinstance(content, str):
+        return []
+    return [str(p.get(kind, "")) for p in content if isinstance(p, dict) and p.get("type") == kind]
+
+
+def messages_have_media(messages: list[Message]) -> bool:
+    return any(
+        isinstance(m.get("content"), list) and any(p.get("type") in MEDIA_PART_TYPES for p in m["content"])  # type: ignore[union-attr]
+        for m in messages
+    )
+
+
 # A prompt is either a chat (chat template applied by the engine) or raw token ids
-# (used for token-exact continuation in multi-turn rollouts).
+# (used for token-exact continuation in multi-turn rollouts). Multimodal prompts are always
+# chats: engines derive pixel inputs from the media parts, and ``Completion.prompt_token_ids``
+# records the ids (including media placeholder tokens) they conditioned on.
 PromptInput = list[Message] | list[int]
 
 FinishReason = Literal["stop", "length", "tool_call", "error"]

@@ -1,0 +1,118 @@
+# DeepSeek-R1 style multi-stage loop on CPU with SmolLM2-135M-Instruct and GSM8K:
+# cold-start SFT on the GSM8K worked solutions → GRPO → rejection sampling with the RL policy
+# (keep exact-match completions) → SFT on the accepted samples mixed with the cold-start set →
+# GRPO → greedy eval on the test split. Every stage writes a standard run dir under
+# <run_dir>/stages/; `monorl pipeline --config configs/recipes/r1_sft_grpo_loop_cpu.yaml`.
+name: r1-sft-grpo-loop-smollm-cpu
+base:
+  seed: 42
+  model:
+    name_or_path: HuggingFaceTB/SmolLM2-135M-Instruct
+    dtype: float32
+  data:
+    uri: hf://openai/gsm8k
+    hf_config_name: main
+    split: train
+    format: prompt_answer
+    prompt_field: question
+    answer_field: answer
+    system_prompt: "Solve the problem step by step and finish with the final numeric answer."
+    max_prompt_tokens: 512
+    limit: 256
+    eval_uri: hf://openai/gsm8k
+    eval_split: test
+  algorithm:
+    name: grpo
+    kl_coef: 0.0
+    advantage_norm: group
+  rollout:
+    backend: hf
+    group_size: 4
+    max_new_tokens: 128
+    temperature: 1.0
+    device: cpu
+  trainer:
+    backend: reference
+    learning_rate: 2.0e-6
+    prompts_per_step: 2
+    micro_batch_size: 2
+    max_steps: 10
+    precision: fp32
+    save_every: 5
+    max_seq_len: 768
+    device: cpu
+  rewards:
+    - type: exact_match
+      weight: 1.0
+      params:
+        extract: last_number
+  env:
+    type: single_turn
+  cluster:
+    mode: local
+  logging:
+    run_root: ~/.monorl/runs
+    trajectories_per_step: 4
+stages:
+  # 1. cold start: supervised fine-tuning on the GSM8K reference solutions
+  - type: train
+    name: cold_start_sft
+    init_from: base
+    overrides:
+      algorithm:
+        name: sft
+      data:
+        response_field: answer
+      trainer:
+        learning_rate: 1.0e-5
+        prompts_per_step: 4
+        max_steps: 20
+        save_every: 10
+  # 2. GRPO from the cold-start checkpoint
+  - type: train
+    name: grpo_1
+    init_from: previous
+    overrides:
+      algorithm:
+        name: grpo
+      trainer:
+        max_steps: 10
+  # 3. sample 4 completions per prompt with the RL policy; keep exact matches
+  - type: rejection_sample
+    name: rejection_sample
+    num_samples: 4
+    min_reward: 1.0
+    max_per_prompt: 1
+    require_finish: true
+    dedupe: true
+    max_prompts: 64
+    rollout_overrides:
+      temperature: 0.8
+    mix:
+      - hf://openai/gsm8k   # the cold-start set (same uri as base data → same field mapping)
+  # 4. SFT on the accepted samples (+ mixed-in cold-start data)
+  - type: train
+    name: sft_on_samples
+    init_from: previous
+    data_from: previous
+    overrides:
+      algorithm:
+        name: sft
+      trainer:
+        learning_rate: 5.0e-6
+        prompts_per_step: 4
+        max_steps: 20
+        save_every: 10
+  # 5. second GRPO round
+  - type: train
+    name: grpo_2
+    init_from: previous
+    overrides:
+      algorithm:
+        name: grpo
+      trainer:
+        max_steps: 10
+  # 6. greedy evaluation on the GSM8K test split
+  - type: eval
+    name: eval
+    max_prompts: 32

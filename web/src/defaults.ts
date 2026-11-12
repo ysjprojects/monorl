@@ -23,6 +23,8 @@ export function defaultRunConfig(): RunConfig {
       messages_field: null,
       prompt_field: null,
       answer_field: null,
+      image_field: null,
+      response_field: null,
       system_prompt: null,
       prompt_template: null,
       max_prompt_tokens: 1024,
@@ -35,6 +37,8 @@ export function defaultRunConfig(): RunConfig {
     },
     algorithm: {
       name: "grpo",
+      sft_label_smoothing: 0.0,
+      sft_train_on_prompt: false,
       kl_coef: 0.0,
       kl_estimator: "k3",
       clip_eps: 0.2,
@@ -110,7 +114,7 @@ export function defaultRunConfig(): RunConfig {
   };
 }
 
-function isPlainObject(v: unknown): v is Record<string, unknown> {
+export function isPlainObject(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
 }
 

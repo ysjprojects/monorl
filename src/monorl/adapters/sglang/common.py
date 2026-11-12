@@ -19,6 +19,12 @@ Everything here is verified against SGLang v0.5.23:
   HTTP client can build ``/update_weights_from_tensor`` payloads without importing sglang.
 * ``python/sglang/srt/arg_groups/fields/*.py`` — the ``ServerArgs`` keyword names used in
   :func:`engine_kwargs` and :data:`SERVER_ARG_PASSTHROUGH`.
+* ``python/sglang/srt/entrypoints/engine.py`` ``Engine.generate(input_ids=..., image_data=...)``
+  and ``GenerateReqInput.image_data`` (``srt/managers/io_struct.py``): one entry per request, each
+  a list of images (PIL instance, file path, URL or base64/data URL — ``srt/utils.py``
+  ``load_image``); ``None`` entries mean text-only. With ``input_ids`` the multimodal processor
+  decodes the ids back to text, re-expands the image placeholders and returns the final
+  ``input_ids``, so sending the ``AutoProcessor`` chat-template ids keeps prompt tokens exact.
 """
 
 from __future__ import annotations
@@ -35,7 +41,7 @@ import torch.multiprocessing  # noqa: F401  (registers tensor/storage reducers o
 
 from monorl.config.schema import RunConfig
 from monorl.core.errors import ConfigError
-from monorl.core.types import Completion, FinishReason, PromptInput, SamplingParams
+from monorl.core.types import Completion, FinishReason, PromptInput, SamplingParams, messages_have_media
 
 SGLANG_VERSIONS = ">=0.5.23,<0.6"
 FRAMEWORK = "sglang"
@@ -101,6 +107,50 @@ def prompt_token_ids(tokenizer: Any, prompt: PromptInput) -> list[int]:
     if is_token_prompt(prompt):
         return [int(t) for t in prompt]  # type: ignore[union-attr]
     return chat_prompt_ids(tokenizer, prompt)  # type: ignore[arg-type]
+
+
+def is_media_prompt(prompt: PromptInput) -> bool:
+    """Chat prompt carrying image/audio/video parts (raw token prompts are always text-only)."""
+    return not is_token_prompt(prompt) and messages_have_media(prompt)  # type: ignore[arg-type]
+
+
+def encode_prompt(tokenizer: Any, processor: Any | None, prompt: PromptInput) -> tuple[list[int], list[Any] | None]:
+    """``(prompt_token_ids, images)``: text prompts via :func:`prompt_token_ids`; multimodal chats
+    through the model's ``AutoProcessor`` chat template (``monorl.rollout.media``) so the ids carry
+    the image placeholder tokens sglang's multimodal processor expands."""
+    if not is_media_prompt(prompt):
+        return prompt_token_ids(tokenizer, prompt), None
+    if processor is None:
+        raise ConfigError(
+            "prompt carries image parts but the model has no AutoProcessor (not a vision-language model); "
+            "set data.image_field only with a VLM checkpoint"
+        )
+    from monorl.rollout.media import chat_images, vlm_prompt_ids
+
+    return vlm_prompt_ids(processor, prompt), chat_images(prompt)  # type: ignore[arg-type]
+
+
+def expand_image_data(images: Sequence[list[Any] | None], params: SamplingParams) -> list[list[Any] | None] | None:
+    """Per-request ``image_data`` aligned with :func:`expand_requests` (``None`` when no prompt
+    has images; entries are repeated ``n`` times when a seed forces one request per sample)."""
+    if all(imgs is None for imgs in images):
+        return None
+    repeat = 1 if params.seed is None else params.n
+    out: list[list[Any] | None] = []
+    for imgs in images:
+        entry = list(imgs) if imgs else None
+        out.extend([entry] * repeat)
+    return out
+
+
+def image_data_urls(image_data: list[list[Any] | None] | None) -> list[list[str] | None] | None:
+    """JSON-safe ``image_data`` for ``POST /generate``: PIL images become ``data:image/png;base64``
+    URLs (sglang ``load_image`` decodes them), strings pass through."""
+    if image_data is None:
+        return None
+    from monorl.rollout.media import image_data_url
+
+    return [None if entry is None else [img if isinstance(img, str) else image_data_url(img) for img in entry] for entry in image_data]
 
 
 # -- sampling ----------------------------------------------------------------------------------

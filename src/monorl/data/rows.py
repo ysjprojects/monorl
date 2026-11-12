@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import abc
 import itertools
+import os
+import posixpath
 import random
 from collections.abc import Iterator, Sequence
 from typing import Any
@@ -59,6 +61,11 @@ class RowSource(abc.ABC):
 
     def known_len(self) -> int | None:
         """Row count when it is cheap to know (materialised, or file metadata), else ``None``."""
+        return None
+
+    def media_base(self, row_id: str) -> str | None:
+        """Location relative image paths in the row ``row_id`` are resolved against (a local
+        directory or a ``scheme://...`` prefix), or ``None`` when the source has no such place."""
         return None
 
 
@@ -156,6 +163,12 @@ class FileRows(RowSource):
             return len(self._materialise())
         return None
 
+    def media_base(self, row_id: str) -> str | None:
+        file_uri = row_id.rsplit("#", 1)[0]
+        if self.parsed.kind == "local":
+            return os.path.dirname(file_uri)
+        return posixpath.dirname(file_uri)
+
 
 # -- hugging face hub -------------------------------------------------------------------------
 
@@ -224,6 +237,10 @@ class HubRows(RowSource):
         split_info = splits.get(self.split) if hasattr(splits, "get") else None
         n = getattr(split_info, "num_examples", None)
         return int(n) if n else None
+
+    def media_base(self, row_id: str) -> str | None:
+        rev = f"@{self.parsed.revision}" if self.parsed.revision else ""
+        return f"hf://datasets/{self.parsed.repo_id}{rev}"
 
 
 def open_rows(parsed: ParsedURI, *, split: str, config_name: str | None, streaming: bool, extra: dict[str, Any] | None = None) -> RowSource:

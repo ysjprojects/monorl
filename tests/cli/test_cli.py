@@ -143,7 +143,14 @@ def test_recipes_dir_and_descriptions() -> None:
 
 @pytest.mark.parametrize("recipe", sorted(recipes_dir().glob("*.yaml")), ids=lambda p: p.stem)
 def test_every_recipe_validates(recipe: Path) -> None:
-    cfg = RunConfig.from_yaml(recipe)
+    from monorl.config.loader import load_yaml
+    from monorl.config.pipeline import PipelineConfig, is_pipeline_payload
+
+    data = load_yaml(recipe)
+    if is_pipeline_payload(data):
+        cfg = PipelineConfig.from_dict(data).base
+    else:
+        cfg = RunConfig.from_dict(data)
     assert cfg.model.name_or_path
 
 

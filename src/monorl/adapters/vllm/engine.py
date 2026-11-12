@@ -8,7 +8,10 @@ Built against vLLM v0.33.0:
   (``vllm/engine/arg_utils.py``). ``LLM.generate(prompts, sampling_params, use_tqdm=...)``,
   ``LLM.collective_rpc(method, timeout, args, kwargs)``, ``LLM.sleep(level, mode)``,
   ``LLM.wake_up(tags)``, ``LLM.reset_prefix_cache()``.
-* ``vllm/inputs/llm.py`` ``TokensPrompt(prompt_token_ids=...)``.
+* ``vllm/inputs/llm.py`` ``TokensPrompt(prompt_token_ids=..., multi_modal_data={"image": [...]})``;
+  multimodal chats are tokenised with the model's ``AutoProcessor`` chat template (same recipe as
+  ``monorl.rollout.hf_engine``) so the ids carry the image placeholder tokens vLLM expands.
+  ``EngineArgs.limit_mm_per_prompt`` comes from ``rollout.extra.limit_mm_per_prompt``.
 * ``vllm/platforms`` ``current_platform.is_sleep_mode_available()`` — ``ModelConfig`` raises when
   ``enable_sleep_mode`` is set on a platform without it (``vllm/config/model.py``).
 * ``vllm/v1/engine/llm_engine.py`` ``LLMEngine.engine_core.shutdown()`` releases the engine.
@@ -35,8 +38,11 @@ from monorl.adapters.vllm.common import (
     WORKER_EXTENSION_CLS,
     chunk_weights,
     completions_from_request_output,
-    prompt_token_ids,
+    encode_prompt,
+    is_media_prompt,
+    limit_mm_per_prompt,
     sampling_kwargs,
+    tokens_prompt_kwargs,
 )
 from monorl.config.schema import RunConfig
 from monorl.core.errors import BackendUnavailable
@@ -76,8 +82,8 @@ class VllmEngine:
     in this process so ``collective_rpc`` hands tensors over by reference), ``enforce_eager``,
     ``max_num_seqs``, ``max_num_batched_tokens``, ``logprobs_mode`` (default
     ``processed_logprobs`` so logprobs reflect temperature/top-p, as TRL does),
-    ``chunk_bytes`` for weight updates, ``sleep_level`` (1 keeps weights on CPU, 2 discards them),
-    plus an ``engine_kwargs`` dict passed verbatim to ``vllm.LLM``.
+    plus an ``engine_kwargs`` dict passed verbatim to ``vllm.LLM``. ``limit_mm_per_prompt``
+    (``{"image": N}`` or an int) bounds images per prompt for VLM runs.
     """
 
     def __init__(self, config: RunConfig, *, replica: int = 0) -> None:
@@ -96,6 +102,8 @@ class VllmEngine:
         self._config = config
         self._replica = replica
         self._tokenizer = load_tokenizer(config)
+        self._processor: Any | None = None  # AutoProcessor, loaded on the first multimodal prompt
+        self._processor_loaded = False
         self._lock = threading.RLock()
         self._chunk_bytes = int(extra.get("chunk_bytes", 512 * 1024 * 1024))
         self._sleep_level = int(extra.get("sleep_level", 1))
@@ -123,6 +131,9 @@ class VllmEngine:
         for key in ("max_num_seqs", "max_num_batched_tokens"):
             if key in extra:
                 engine_kwargs[key] = extra[key]
+        mm_limit = limit_mm_per_prompt(extra)
+        if mm_limit is not None:
+            engine_kwargs["limit_mm_per_prompt"] = mm_limit
         engine_kwargs.update(extra.get("engine_kwargs", {}))
         self._vllm = vllm
         self._llm = vllm.LLM(config.model.name_or_path, **engine_kwargs)
@@ -142,8 +153,10 @@ class VllmEngine:
             return []
         from vllm.inputs import TokensPrompt
 
-        ids = [prompt_token_ids(self._tokenizer, p) for p in prompts]
-        vllm_prompts = [TokensPrompt(prompt_token_ids=p) for p in ids]
+        processor = self._load_processor() if any(is_media_prompt(p) for p in prompts) else None
+        encoded = [encode_prompt(self._tokenizer, processor, p) for p in prompts]
+        ids = [e[0] for e in encoded]
+        vllm_prompts = [TokensPrompt(**tokens_prompt_kwargs(p_ids, images)) for p_ids, images in encoded]
         sp = self._vllm.SamplingParams(**sampling_kwargs(params))
         with self._lock:
             self._wake(_ALL_TAGS)
@@ -204,3 +217,11 @@ class VllmEngine:
             return
         self._llm.wake_up(tags=pending)
         self._sleeping_tags.difference_update(pending)
+
+    def _load_processor(self) -> Any | None:
+        if not self._processor_loaded:
+            from monorl.rollout.media import load_processor
+
+            self._processor = load_processor(self._config)
+            self._processor_loaded = True
+        return self._processor

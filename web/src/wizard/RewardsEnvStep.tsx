@@ -2,6 +2,7 @@ import { Card, Field, JsonEditor, NumberInput, Pill, Select, TextInput } from ".
 import { REWARD_TYPES_FALLBACK } from "../defaults";
 import { ENV_TYPES, type EnvType, type JsonDict, type RewardSpec } from "../types";
 import type { StepProps } from "./common";
+import { SftNote } from "./TrainingStep";
 
 const REWARD_HINTS: Record<string, string> = {
   exact_match: "1 if the extracted answer equals the reference answer (params: normalize, extract_regex).",
@@ -35,6 +36,16 @@ export default function RewardsEnvStep({ config, set, system, envs }: StepProps)
     set(
       "rewards",
       rewards.map((x, j) => (j === i ? { ...x, ...r } : x)),
+    );
+
+  if (config.algorithm.name === "sft")
+    return (
+      <Card title="Rewards & environment">
+        <SftNote>rewards and environment settings are not used; the existing values are kept in the config so you can switch back to an RL objective without re-entering them.</SftNote>
+        <div className="mt-3 text-xs text-slate-500">
+          Current: {rewards.length} reward(s) · env <span className="font-mono">{env.type}</span>. Change the objective in the Training step to edit them.
+        </div>
+      </Card>
     );
 
   return (

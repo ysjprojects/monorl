@@ -1,9 +1,12 @@
-"""``pipeline_backend: trl`` — run a :class:`~monorl.config.RunConfig` with ``trl.GRPOTrainer``.
+"""``pipeline_backend: trl`` — run a :class:`~monorl.config.RunConfig` with ``trl.GRPOTrainer``
+(``grpo``/``dapo``) or ``trl.SFTTrainer`` (``algorithm.name: sft``).
 
-monorl data → HF dataset (:mod:`.data`), monorl rewards → TRL reward function (:mod:`.rewards`),
-monorl environments → TRL ``rollout_func`` (:mod:`.rollout`, multi-turn only; single-turn runs on
-TRL's native generation path), monorl reporter ← ``TrainerCallback`` + the
-``trl.grpo.monorl_hooks`` patch (:mod:`.callbacks`, :mod:`.patches`).
+monorl data → HF dataset (:mod:`.data`; ``images`` column + ``AutoProcessor`` for VLMs), monorl
+rewards → TRL reward function (:mod:`.rewards`), monorl environments → TRL ``rollout_func``
+(:mod:`.rollout`, multi-turn only; single-turn runs on TRL's native generation path), monorl
+reporter ← ``TrainerCallback`` + the ``trl.grpo.monorl_hooks`` patch (:mod:`.callbacks`,
+:mod:`.patches`). Both trainers share checkpointing (``checkpoints/step-<n>``), resume and the
+merged ``final/`` export.
 """
 
 from __future__ import annotations
@@ -19,7 +22,7 @@ from typing import Any
 import torch
 
 from monorl.adapters.trl.callbacks import ReporterCallback, link_checkpoint, trajectories_with_advantages
-from monorl.adapters.trl.compile import compile_grpo_config, resolve_device
+from monorl.adapters.trl.compile import compile_grpo_config, compile_sft_config, resolve_device
 from monorl.adapters.trl.data import build_train_and_eval
 from monorl.adapters.trl.patches import HOOKS_ATTR, hooks_patch_applied
 from monorl.adapters.trl.rewards import MonorlRewardFunc
@@ -40,16 +43,34 @@ def _import_trl() -> Any:
     return trl
 
 
-def load_policy_model(config: RunConfig, device: torch.device) -> Any:
-    from transformers import AutoModelForCausalLM
+def load_policy_model(config: RunConfig, device: torch.device, *, vlm: bool = False) -> Any:
+    """``AutoModelForCausalLM`` for text models, ``AutoModelForImageTextToText`` for VLMs (the
+    class ``trl`` itself resolves for image datasets)."""
+    from transformers import AutoModelForCausalLM, AutoModelForImageTextToText
 
-    return AutoModelForCausalLM.from_pretrained(
+    cls = AutoModelForImageTextToText if vlm else AutoModelForCausalLM
+    return cls.from_pretrained(
         config.model.name_or_path,
         dtype=resolve_dtype(config.model.dtype, device),
         revision=config.model.revision,
         trust_remote_code=config.model.trust_remote_code,
         attn_implementation=config.model.attn_implementation,
     )
+
+
+def load_processing_class(config: RunConfig) -> tuple[Any, Any]:
+    """``(tokenizer, processing_class)``: the ``AutoProcessor`` for vision-language checkpoints
+    (``GRPOTrainer``/``SFTTrainer`` need it to turn ``images`` into pixel inputs), else the
+    tokenizer. ``load_processor`` returns ``None`` for text-only models without loading anything."""
+    from monorl.rollout.media import load_processor
+
+    tokenizer = load_tokenizer(config)
+    tokenizer.padding_side = "left"
+    processor = load_processor(config)
+    if processor is None:
+        return tokenizer, tokenizer
+    processor.tokenizer.padding_side = "left"
+    return tokenizer, processor
 
 
 def peft_config_for(config: RunConfig) -> Any | None:
@@ -78,6 +99,50 @@ class TRLPipelineBackend:
     def run(self, config: RunConfig, run_dir: Path, *, reporter: RunReporter) -> RunResult:
         run_dir = Path(run_dir)
         trl = _import_trl()
+        device = resolve_device(config)
+        tokenizer, processing_class = load_processing_class(config)
+        vlm = processing_class is not tokenizer
+        model = load_policy_model(config, device, vlm=vlm)
+        train_ds, eval_ds = build_train_and_eval(config, tokenizer=tokenizer)
+        reporter.log(
+            f"dataset: {len(train_ds)} train samples"
+            + (f", {len(eval_ds)} eval" if eval_ds else "")
+            + (" (multimodal)" if "images" in train_ds.column_names else "")
+        )
+        if config.is_sft:
+            args = compile_sft_config(config, run_dir, device=device)
+            callback = ReporterCallback(reporter, sft=True, label="SFTTrainer")
+            trainer = trl.SFTTrainer(
+                model=model,
+                args=args,
+                train_dataset=train_ds,
+                eval_dataset=eval_ds,
+                processing_class=processing_class,
+                callbacks=[callback],
+                peft_config=peft_config_for(config),
+            )
+        else:
+            args = compile_grpo_config(config, run_dir, device=device)
+            callback = ReporterCallback(reporter)
+            trainer = self._build_grpo_trainer(
+                trl, config, args, model, tokenizer, processing_class, train_ds, eval_ds, callback, reporter
+            )
+        return self._train(trainer, args, tokenizer, callback, run_dir, reporter)
+
+    # -- internals ---------------------------------------------------------------------------
+    def _build_grpo_trainer(
+        self,
+        trl: Any,
+        config: RunConfig,
+        args: Any,
+        model: Any,
+        tokenizer: Any,
+        processing_class: Any,
+        train_ds: Any,
+        eval_ds: Any,
+        callback: ReporterCallback,
+        reporter: RunReporter,
+    ) -> Any:
         report = apply("trl")
         if "unsloth" in sys.modules:
             # Unsloth regenerates GRPOTrainer on import; its adapter re-applies our hooks on the new class.
@@ -87,14 +152,6 @@ class TRLPipelineBackend:
         reporter.log(f"trl {report.installed_version}: patches applied={report.applied} skipped={report.skipped}")
         if report.failed:
             raise ConfigError(f"TRL patches failed: {report.failed}")
-
-        device = resolve_device(config)
-        args = compile_grpo_config(config, run_dir, device=device)
-        tokenizer = load_tokenizer(config)
-        tokenizer.padding_side = "left"
-        model = load_policy_model(config, device)
-        train_ds, eval_ds = build_train_and_eval(config, tokenizer=tokenizer)
-        reporter.log(f"dataset: {len(train_ds)} train samples" + (f", {len(eval_ds)} eval" if eval_ds else ""))
 
         reward_fn = None
         if config.rewards:
@@ -115,7 +172,6 @@ class TRLPipelineBackend:
             from monorl.envs import make_env
 
             rollout = EpisodeRollout(config, lambda: make_env(config))
-        callback = ReporterCallback(reporter)
         hooks = GRPOHooks(rollout=rollout, on_scored=self._on_scored(reporter, reward_func))
 
         with warnings.catch_warnings():
@@ -126,16 +182,21 @@ class TRLPipelineBackend:
                 args=args,
                 train_dataset=train_ds,
                 eval_dataset=eval_ds,
-                processing_class=tokenizer,
+                processing_class=processing_class,
                 callbacks=[callback],
                 peft_config=peft_config_for(config),
                 rollout_func=rollout,
             )
+        setattr(trainer, HOOKS_ATTR, hooks)
+        return trainer
+
+    def _train(
+        self, trainer: Any, args: Any, tokenizer: Any, callback: ReporterCallback, run_dir: Path, reporter: RunReporter
+    ) -> RunResult:
         from transformers import PrinterCallback
         from transformers.trainer_utils import get_last_checkpoint
 
         trainer.remove_callback(PrinterCallback)  # metrics go to metrics.jsonl, not stdout
-        setattr(trainer, HOOKS_ATTR, hooks)
         self.trainer = trainer
 
         resume_from = get_last_checkpoint(args.output_dir) if Path(args.output_dir).is_dir() else None
@@ -168,7 +229,6 @@ class TRLPipelineBackend:
             metrics=dict(callback.last_metrics),
         )
 
-    # -- internals ---------------------------------------------------------------------------
     def _on_scored(self, reporter: RunReporter, reward_func: MonorlRewardFunc) -> Any:
         config = self.config
         seen = {"batches": 0}

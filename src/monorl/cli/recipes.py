@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from monorl.config.loader import load_yaml
+from monorl.config.pipeline import is_pipeline_payload
 from monorl.core.errors import ConfigError
 
 RECIPES_DIR_ENV = "MONORL_RECIPES_DIR"
@@ -32,6 +33,14 @@ class Recipe:
 
     def load(self) -> dict[str, Any]:
         return load_yaml(self.path)
+
+    @property
+    def kind(self) -> str:
+        """``"pipeline"`` for ``base:`` + ``stages:`` files, else ``"run"``."""
+        try:
+            return "pipeline" if is_pipeline_payload(self.load()) else "run"
+        except ConfigError:
+            return "run"
 
 
 def read_description(path: Path) -> str:

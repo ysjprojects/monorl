@@ -18,16 +18,18 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import Any
 
-from monorl.core.types import Message, RewardResult, Trajectory
+from monorl.core.types import Message, RewardResult, Trajectory, message_text
 from monorl.rewards.base import check_trajectories, conversation, reward_name
 
 _DTYPES = {"float32": "float32", "fp32": "float32", "bfloat16": "bfloat16", "bf16": "bfloat16", "float16": "float16", "fp16": "float16"}
 
 
 def render_messages(tokenizer: Any, messages: list[Message]) -> str:
+    """Text-only rendering: a text reward model cannot see media parts, so they are dropped."""
+    text_only = [{**m, "content": message_text(m)} for m in messages]
     if getattr(tokenizer, "chat_template", None):
-        return tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=False)
-    return "\n".join(f"{m.get('role', 'user')}: {m.get('content', '')}" for m in messages)
+        return tokenizer.apply_chat_template(text_only, tokenize=False, add_generation_prompt=False)
+    return "\n".join(f"{m.get('role', 'user')}: {m['content']}" for m in text_only)
 
 
 class RewardModelReward:

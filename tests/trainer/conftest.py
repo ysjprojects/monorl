@@ -87,3 +87,17 @@ def tokenizer(tiny_model_dir: Path):
     from transformers import AutoTokenizer
 
     return AutoTokenizer.from_pretrained(tiny_model_dir)
+
+
+@pytest.fixture(scope="session")
+def tiny_vlm_dir(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    from tests.rollout.tiny_vlm import build_tiny_vlm
+
+    return build_tiny_vlm(tmp_path_factory.mktemp("tiny-qwen2vl"))
+
+
+@pytest.fixture(scope="session")
+def test_images(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Path]:
+    from tests.rollout.tiny_vlm import write_test_images
+
+    return write_test_images(tmp_path_factory.mktemp("images"))

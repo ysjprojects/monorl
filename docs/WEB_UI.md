@@ -16,12 +16,14 @@ Development: `cd web && pnpm dev` runs Vite on `:5173` proxying `/api` to the Py
 
 ## Pages
 
-**Runs** (`/`) — every job the server launched, with state, step, last reward and run dir.
+**Runs** (`/`) — every job the server launched, with kind (`run` / `pipeline`), state, step
+(stages finished for pipelines), last reward and run dir.
 Jobs survive server restarts: they persist in `$MONORL_HOME/jobs.json` (default `~/.monorl`),
 and each run is a subprocess `python -m monorl.cli train --config <run_dir>/config.yaml
 --run-dir <run_dir>` whose progress is read back from the run directory files.
 
-**New run** (`/new`) — a wizard that produces one `RunConfig`:
+**New run** (`/new`) — a wizard that produces one `RunConfig`, or — with the *Pipeline (SFT → RL
+loop)* toggle at the top — a `PipelineConfig` whose `base` is the same wizard config:
 
 1. *Recipes* — start from any `configs/recipes/*.yaml` (`GET /api/recipes`; the leading `# `
    comment is the description) or from scratch.
@@ -35,21 +37,41 @@ and each run is a subprocess `python -m monorl.cli train --config <run_dir>/conf
      never values. Works with MinIO/R2 through `AWS_ENDPOINT_URL` (see [`DATA.md`](DATA.md)).
    * **HF Hub** — dataset search (`/api/datasets/search`), config/subset and split.
    Then *Preview* (`POST /api/datasets/preview`): columns with dtypes, first rows, the inferred
-   layout, and a column mapper writing `prompt_field` / `answer_field` / `messages_field`.
+   layout, and a column mapper writing `prompt_field` / `answer_field` / `messages_field` /
+   `image_field` (comma list for several columns; auto-filled from the sniffer's
+   `image_fields`) and, for SFT, `response_field`. Image cells render as a `[image W×H]` chip
+   (decoded images) or a thumbnail (`http(s)://…png|jpg|webp`, `data:image/…` URIs).
 4. *Rewards & environment* — add weighted reward functions (names and parameter hints come from
    `GET /api/system` components) and choose the env type; remote MEP/1 envs list the example
    binaries discovered under `envs/bin` (`GET /api/envs`).
-5. *Training* — algorithm (grpo/dapo/rloo/reinforce/ppo) and its knobs, rollout engine +
-   sampling, trainer + optimizer, logging.
+5. *Training* — algorithm (grpo/dapo/rloo/reinforce/ppo/**sft**) and its knobs, rollout engine +
+   sampling, trainer + optimizer, logging. Selecting `sft` hides the rollout / rewards / env
+   sections (they are ignored by the SFT loop) and surfaces `sft_label_smoothing`,
+   `sft_train_on_prompt` and `trainer.eval_every`.
 6. *Compute* — local vs Ray, GPUs, placement, weight sync — pre-filled from the doctor report.
-7. *Review* — the YAML, live validation (`POST /api/config/validate` → `{ok, errors:[{loc,msg}]}`)
-   and **Launch** (`POST /api/jobs`).
+7. *Stages* (pipeline mode only) — ordered stage list (add / remove / reorder; *R1 loop* inserts
+   cold-start SFT → GRPO → rejection sampling → SFT → GRPO). Field help comes from
+   `GET /api/config/pipeline_schema`. Train stages edit their `overrides` as YAML with
+   `init_from` / `data_from` selectors; the `data_from: previous` and unique-name rules are
+   checked inline before the server sees the document.
+8. *Review* — the YAML (editable; a pasted `base:` + `stages:` document switches the pipeline
+   fields), live validation (`POST /api/config/validate` with `{config}` or `{pipeline}` →
+   `{ok, errors:[{loc,msg}]}`; a server without pipeline validation yields client-side structural
+   checks, flagged as such) and **Launch** (`POST /api/jobs` with `{config}` or `{pipeline}`).
 
 **Run detail** (`/runs/:id`) — status, config, live metric charts (`reward/mean`, `loss/policy`,
 `loss/kl`, `policy/clipfrac`, token counts, timings; streamed over SSE from
 `/api/jobs/{id}/metrics/stream`), log tail (`/logs/stream`), sampled trajectories with prompt /
 response / reward breakdown, checkpoints list, and *Cancel* (`POST /api/jobs/{id}/cancel`, sends
-`SIGTERM`; the run ends as `cancelled`).
+`SIGTERM`; the run ends as `cancelled`). SFT runs chart `loss/sft`, `sft/ppl`, `eval/loss`.
+
+Pipeline jobs (`kind: pipeline`) show the stage table from `GET /api/jobs/{id}/stages` (index,
+name, type, state, step, summary, duration; the running stage is followed until you pick one)
+and a status card with stages finished / total. Selecting a stage loads its metrics, logs,
+trajectories and checkpoints from `/api/jobs/{id}/stages/{index}/…` (polled; these routes have no
+SSE variant) into the same charts / log / trajectory components. Rejection-sampling stages show
+sampled / accepted counts and the accept-rate chart (`rs/accept_rate`); eval stages chart
+`eval/reward_mean`.
 
 Run logs: the server spawns the trainer with `MONORL_REPORTER_ECHO=0` and redirects its
 stdout/stderr into `<run_dir>/run.log`, so the reporter writes each line to `run.log` once instead

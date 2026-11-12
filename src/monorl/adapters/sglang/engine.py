@@ -5,9 +5,12 @@ Built against SGLang v0.5.23 (``python/sglang/srt/entrypoints/engine.py``):
 * ``Engine(**ServerArgs kwargs)`` — ``model_path``, ``tokenizer_path``, ``tp_size``, ``dp_size``,
   ``mem_fraction_static``, ``context_length``, ``dtype``, ``enable_memory_saver``,
   ``trust_remote_code``, ``revision``, ``log_level`` … (``srt/arg_groups/fields/``).
-* ``Engine.generate(prompt=None, sampling_params=None, input_ids=None, ..., return_logprob=False,
-  logprob_start_len=None, ...)`` → list of ``{"text", "output_ids", "meta_info"}`` dicts, flat
-  and prompt-major when ``n > 1``. ``logprob_start_len=-1`` asks for output-token logprobs only.
+* ``Engine.generate(prompt=None, sampling_params=None, input_ids=None, image_data=None, ...,
+  return_logprob=False, logprob_start_len=None, ...)`` → list of ``{"text", "output_ids",
+  "meta_info"}`` dicts, flat and prompt-major when ``n > 1``. ``logprob_start_len=-1`` asks for
+  output-token logprobs only. ``image_data`` is one entry per request (list of PIL images, or
+  ``None`` for text-only requests); ids of multimodal prompts come from the ``AutoProcessor``
+  chat template (``monorl.rollout.media``) and are re-expanded by sglang's multimodal processor.
 * ``Engine.update_weights_from_tensor(named_tensors, load_format=None, flush_cache=True)`` takes
   ``List[Tuple[str, torch.Tensor]]`` and serialises them itself with
   ``MultiprocessingSerializer`` once per TP rank (``_serialize_tensors_per_rank``); returns
@@ -35,10 +38,12 @@ from monorl.adapters.sglang.common import (
     SGLANG_VERSIONS,
     bucket_bytes,
     bucket_weights,
+    encode_prompt,
     engine_kwargs,
+    expand_image_data,
     expand_requests,
     group_outputs,
-    prompt_token_ids,
+    is_media_prompt,
 )
 from monorl.config.schema import RunConfig
 from monorl.core.errors import BackendUnavailable, WeightSyncError
@@ -105,6 +110,8 @@ class SGLangEngine:
         self.config = config
         self.replica = replica
         self._tokenizer = load_tokenizer(config)
+        self._processor: Any | None = None  # AutoProcessor, loaded on the first multimodal prompt
+        self._processor_loaded = False
         self._bucket_bytes = bucket_bytes(config)
         self._sleep_tags: list[str] | None = config.rollout.extra.get("sleep_tags")
         self._kwargs = engine_kwargs(config)
@@ -126,8 +133,14 @@ class SGLangEngine:
     def generate(self, prompts: Sequence[PromptInput], params: SamplingParams) -> list[list[Completion]]:
         if not prompts:
             return []
-        prompt_ids = [prompt_token_ids(self._tokenizer, p) for p in prompts]
+        processor = self._load_processor() if any(is_media_prompt(p) for p in prompts) else None
+        encoded = [encode_prompt(self._tokenizer, processor, p) for p in prompts]
+        prompt_ids = [ids for ids, _ in encoded]
         input_ids, sampling = expand_requests(prompt_ids, params)
+        image_data = expand_image_data([images for _, images in encoded], params)
+        kwargs: dict[str, Any] = {}
+        if image_data is not None:
+            kwargs["image_data"] = image_data
         with self._lock:
             if self._asleep:
                 raise RuntimeError("sglang engine is asleep; call wake_up() before generate()")
@@ -136,6 +149,7 @@ class SGLangEngine:
                 sampling_params=sampling,
                 return_logprob=params.logprobs,
                 logprob_start_len=-1,
+                **kwargs,
             )
         if isinstance(outputs, dict):
             outputs = [outputs]
@@ -186,6 +200,14 @@ class SGLangEngine:
             self._engine.shutdown()
 
     # -- internals ----------------------------------------------------------------------
+    def _load_processor(self) -> Any | None:
+        if not self._processor_loaded:
+            from monorl.rollout.media import load_processor
+
+            self._processor = load_processor(self.config)
+            self._processor_loaded = True
+        return self._processor
+
     def _flush_cache(self) -> None:
         result = self._engine.flush_cache()
         success = getattr(result, "success", result)

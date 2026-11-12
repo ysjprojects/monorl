@@ -113,6 +113,13 @@ class ComponentLoop:
         if pad is None:
             pad = getattr(self.tokenizer, "eos_token_id", None)
         self.pad_token_id = int(pad) if pad is not None else 0
+        # VLM checkpoints: the engine's processor if it has one (HF engine), else our own copy;
+        # None for text-only models, which keeps the text batch path untouched.
+        self.processor = getattr(self.raw_engines[0], "processor", None)
+        if self.processor is None:
+            from monorl.rollout.media import load_processor
+
+            self.processor = load_processor(config)
         self.max_seq_len = int(getattr(self.trainer, "max_seq_len", None) or config.trainer.max_seq_len)
 
         extra = config.rollout.extra
@@ -377,6 +384,7 @@ class ComponentLoop:
             pad_token_id=self.pad_token_id,
             max_seq_len=self.max_seq_len,
             meta={"step": step, "policy_version": item.policy_version, "sample_ids": [t.sample.id for t in trajectories]},
+            processor=self.processor,
         )
         metrics.update(token_stats)
         metrics["advantage/mean"] = float(batch.advantages.sum().item() / max(1, batch.num_response_tokens))

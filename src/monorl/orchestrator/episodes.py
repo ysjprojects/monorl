@@ -9,6 +9,14 @@ Turn 0 hands the chat to the engine (which applies the chat template and records
 ids in ``Completion.prompt_token_ids``). Later turns — and every turn when the environment exposes
 tool schemas — are chat-templated here with :func:`chat_prompt_ids` and sent as raw token ids so
 the engine conditions on exactly the ids the batch builder will later train on.
+
+Multimodal chats (image parts) are sent to the engine as chats on **every** turn: raw ids cannot
+carry pixel tensors, so the engine re-runs the processor over the whole chat (image preprocessing
+and placeholder expansion included) each turn and records the ids it conditioned on. This costs
+one processor pass per turn and forgoes prefix caching; the token-exact prefix check in the batch
+builder still applies because the processor renders earlier turns identically. Tool schemas
+cannot be passed through ``RolloutEngine.generate``, so multimodal episodes against tool-exposing
+environments are rejected.
 """
 
 from __future__ import annotations
@@ -21,7 +29,16 @@ from typing import Any
 
 from monorl.core.errors import MonorlError
 from monorl.core.interfaces import Environment, RolloutEngine
-from monorl.core.types import Completion, Message, PromptInput, Sample, SamplingParams, Trajectory, Turn
+from monorl.core.types import (
+    Completion,
+    Message,
+    PromptInput,
+    Sample,
+    SamplingParams,
+    Trajectory,
+    Turn,
+    messages_have_media,
+)
 
 
 class EpisodeAborted(MonorlError):
@@ -68,14 +85,19 @@ def run_episode(
             if abort is not None and abort.is_set():
                 raise EpisodeAborted(f"episode {spec.group_id} aborted")
             prompt: PromptInput
-            if turn_index == 0 and tools is None:
+            multimodal = messages_have_media(messages)
+            if multimodal and tools is not None:
+                raise MonorlError(
+                    f"episode {spec.group_id}: multimodal chats cannot be combined with environment tool schemas"
+                )
+            if (turn_index == 0 and tools is None) or multimodal:
                 prompt = list(messages)
             else:
                 prompt = chat_prompt_ids(tokenizer, messages, tools)
             completion = spec.engine.generate([prompt], params)[0][0]
             if completion.prompt_token_ids is not None:
                 prompt_ids = list(completion.prompt_token_ids)
-            elif turn_index == 0 and tools is None:
+            elif isinstance(prompt[0], dict):
                 prompt_ids = chat_prompt_ids(tokenizer, messages, None)
             else:
                 prompt_ids = list(prompt)  # type: ignore[arg-type]

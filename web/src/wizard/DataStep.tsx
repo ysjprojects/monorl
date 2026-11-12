@@ -3,8 +3,56 @@ import { api } from "../api";
 import { Card, ErrorBox, Field, NumberInput, Pill, Select, Spinner, Tabs, TextInput, Toggle } from "../components/ui";
 import { fmtBytes, fmtCompact } from "../format";
 import { useAsync, useDebounced } from "../hooks";
-import type { BrowseEntry, DataFormat, PreviewResponse } from "../types";
+import { isImageCell, type BrowseEntry, type DataFormat, type JsonValue, type PreviewResponse } from "../types";
 import type { StepProps } from "./common";
+
+const IMAGE_EXT = /\.(png|jpe?g|webp)(\?.*)?$/i;
+
+/** `image_field` is a column or a list of columns; the input edits it as a comma list. */
+function imageFieldText(v: string | string[] | null): string {
+  return Array.isArray(v) ? v.join(", ") : (v ?? "");
+}
+
+function parseImageField(text: string): string | string[] | null {
+  const parts = text
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  if (parts.length === 0) return null;
+  return parts.length === 1 ? parts[0] : parts;
+}
+
+/** Preview table cell: decoded image placeholders become a chip, image URIs a thumbnail, the rest text. */
+export function PreviewCell({ value }: { value: JsonValue | undefined }) {
+  if (isImageCell(value))
+    return (
+      <span className="inline-flex items-center gap-1 rounded border border-sky-800 bg-sky-950/60 px-1.5 py-0.5 text-sky-200" title={[value.path, value.mode ? `mode ${value.mode}` : null].filter(Boolean).join(" · ") || undefined}>
+        <span aria-hidden>🖼</span>[image {value.width}×{value.height}]
+      </span>
+    );
+  if (typeof value === "string" && (value.startsWith("data:image/") || (/^https?:\/\//.test(value) && IMAGE_EXT.test(value))))
+    return (
+      <span className="inline-flex items-center gap-2">
+        <img src={value} alt="" loading="lazy" className="h-12 w-12 rounded border border-slate-700 object-cover" />
+        {!value.startsWith("data:") && <span className="max-w-[10rem] truncate text-slate-500" title={value}>{value.split("/").pop()}</span>}
+      </span>
+    );
+  if (typeof value === "string" && IMAGE_EXT.test(value))
+    return (
+      <span className="inline-flex items-center gap-1 rounded border border-slate-700 bg-slate-800 px-1.5 py-0.5 text-slate-300" title={value}>
+        <span aria-hidden>🖼</span>[image {value.split("/").pop()}]
+      </span>
+    );
+  if (Array.isArray(value) && value.length > 0 && value.every(isImageCell))
+    return (
+      <span className="inline-flex flex-wrap gap-1">
+        {value.map((v, i) => (
+          <PreviewCell key={i} value={v} />
+        ))}
+      </span>
+    );
+  return <div className="line-clamp-3 whitespace-pre-wrap">{typeof value === "string" ? value : JSON.stringify(value)}</div>;
+}
 
 type SourceTab = "local" | "s3" | "hf";
 
@@ -100,12 +148,15 @@ export default function DataStep({ config, set, patch }: StepProps) {
       setPreview(p);
       setPreviewedUri(uri);
       if (applyInferred && p.inferred) {
+        const images = p.inferred.image_fields ?? [];
         patch({
           data: {
             format: p.inferred.format ?? "auto",
             prompt_field: p.inferred.prompt_field ?? null,
             answer_field: p.inferred.answer_field ?? null,
             messages_field: p.inferred.messages_field ?? null,
+            // `null` would be kept by deepMerge; only overwrite when the sniffer found image columns.
+            ...(images.length ? { image_field: images.length === 1 ? images[0] : images } : {}),
           },
         });
       }
@@ -131,6 +182,11 @@ export default function DataStep({ config, set, patch }: StepProps) {
   const columns = preview ? Object.keys(preview.columns) : [];
   const colOptions = [{ value: "", label: "(none)" }, ...columns.map((c) => ({ value: c }))];
   const s3 = connectors.data?.s3;
+  const sft = config.algorithm.name === "sft";
+  // Image columns: what the sniffer reported, plus columns typed as images or holding decoded image cells.
+  const imageColumns = preview
+    ? [...new Set([...(preview.inferred?.image_fields ?? []), ...columns.filter((c) => /image/i.test(preview.columns[c] ?? "") || preview.rows.some((r) => isImageCell(r[c])))])]
+    : [];
 
   return (
     <div className="space-y-4">
@@ -233,7 +289,7 @@ export default function DataStep({ config, set, patch }: StepProps) {
                   <tr key={i} className="align-top">
                     {columns.map((c) => (
                       <td key={c} className="max-w-xs px-2 py-1 font-mono text-slate-300">
-                        <div className="line-clamp-3 whitespace-pre-wrap">{typeof row[c] === "string" ? row[c] : JSON.stringify(row[c])}</div>
+                        <PreviewCell value={row[c]} />
                       </td>
                     ))}
                   </tr>
@@ -270,6 +326,18 @@ export default function DataStep({ config, set, patch }: StepProps) {
               <TextInput value={d.messages_field} onChange={(v) => set("data.messages_field", v)} nullable placeholder="auto" />
             )}
           </Field>
+          <Field path="data.image_field" label="Image field(s)" description="Column(s) holding images (HF Image feature, path/URI, bytes or base64); comma-separate several. Attached to the user message as image parts.">
+            <TextInput value={imageFieldText(d.image_field)} onChange={(v) => set("data.image_field", parseImageField(v ?? ""))} placeholder={imageColumns.length ? imageColumns.join(", ") : "none (text-only)"} className="font-mono" />
+          </Field>
+          {sft && (
+            <Field path="data.response_field" label="Response field" description="Target response column for SFT (defaults to answer_field / the trailing assistant turn).">
+              {columns.length ? (
+                <Select value={d.response_field ?? ""} onChange={(v) => set("data.response_field", v || null)} options={colOptions} />
+              ) : (
+                <TextInput value={d.response_field} onChange={(v) => set("data.response_field", v)} nullable placeholder="auto" />
+              )}
+            </Field>
+          )}
           <Field path="data.system_prompt" label="System prompt" className="md:col-span-2">
             <textarea className="input" rows={2} value={d.system_prompt ?? ""} onChange={(e) => set("data.system_prompt", e.target.value || null)} placeholder="optional" />
           </Field>

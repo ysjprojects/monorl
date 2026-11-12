@@ -32,8 +32,10 @@ Shapes:
 
 ```
 Sample  = {"id": str, "messages": [Message], "reference": any, "metadata": {}}
-Message = {"role": "system"|"user"|"assistant"|"tool", "content": str,
+Message = {"role": "system"|"user"|"assistant"|"tool", "content": str | [Part],
            "tool_calls"?: [{"id", "name", "arguments"}], "tool_call_id"?: str, "name"?: str}
+Part    = {"type": "text", "text": str}
+        | {"type": "image", "image": str, "detail"?: str}      # also "audio"/"video"
 Action  = {"text": str, "tool_calls"?: [{"id", "name", "arguments"}], "finish_reason": str}
 EnvSpec = {"name": str, "version": str, "protocol": "MEP/1", "max_turns": int,
            "parallel_episodes": int, "tools": [...], "description": str, "extra": {}}
@@ -56,6 +58,14 @@ Semantics:
   `invalid_request` (400), `unknown_episode` (404), `unknown_op`/`not_found` (404),
   `method_not_allowed` (405), `env_error` (500 — the environment threw/returned an error).
   Lists/objects are never `null` on the wire (`messages: []`, `info: {}`, `tools: []`).
+- Multimodal messages carry `content` as a list of parts. Media parts hold only a **reference**
+  (`image`: absolute local path, `file://`/`s3://`/`http(s)://` URI or `data:image/...;base64,`
+  URL), never raw bytes, so every wire message is plain JSON. The data layer materialises
+  dataset images to `$MONORL_HOME/cache/media/<sha256>.<ext>` before they reach an env, so a
+  local path is the common case; remote URIs appear only when the dataset referenced them that
+  way. Text-only environments concatenate the `text` parts (`monorl.core.types.message_text`
+  in Python) and ignore the rest; environments may return the same parts in their own
+  `messages` (e.g. a screenshot after a `step`).
 
 Transports:
 

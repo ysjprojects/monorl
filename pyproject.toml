@@ -38,6 +38,7 @@ unsloth = ["unsloth>=2026.10"]
 openenv = ["openenv-core>=0.3.0"]
 hermes = ["hermes-agent>=0.19"]
 rewards = ["math-verify>=0.7"]
+multimodal = ["pillow>=10", "torchvision>=0.20"]
 dev = [
     "pytest>=8",
     "pytest-asyncio>=0.24",

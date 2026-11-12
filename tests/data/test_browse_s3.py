@@ -139,7 +139,7 @@ def test_s3_browse_and_preview(moto_s3: dict) -> None:
 
     out = preview_uri(f"s3://{bucket}/data/jsonl", limit=4)
     assert out["rows"] == QA_ROWS[:4]
-    assert out["inferred"] == {"format": "prompt_answer", "prompt_field": "question", "answer_field": "answer", "messages_field": None}
+    assert out["inferred"] == {"format": "prompt_answer", "prompt_field": "question", "answer_field": "answer", "messages_field": None, "image_fields": []}
     assert out["num_rows"] == len(QA_ROWS)
     pq_out = preview_uri(f"s3://{bucket}/data/parquet/chat.parquet", limit=2)
     assert pq_out["num_rows"] == len(CHAT_ROWS) and pq_out["inferred"]["format"] == "chat"

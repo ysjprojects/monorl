@@ -25,7 +25,7 @@ from collections.abc import Iterator, Sequence
 from pathlib import Path
 from typing import Any
 
-from monorl.core.types import RunState, Trajectory
+from monorl.core.types import RunState, Trajectory, message_text
 
 STATUS_FILE = "status.json"
 METRICS_FILE = "metrics.jsonl"
@@ -210,8 +210,8 @@ def list_checkpoints(run_dir: str | os.PathLike[str]) -> list[str]:
 def _last_user_text(messages: Sequence[dict[str, Any]]) -> str:
     for m in reversed(messages):
         if m.get("role") == "user":
-            return str(m.get("content", ""))
-    return str(messages[-1].get("content", "")) if messages else ""
+            return message_text(m)  # type: ignore[arg-type]
+    return message_text(messages[-1]) if messages else ""  # type: ignore[arg-type]
 
 
 def _jsonable(x: Any) -> Any:

@@ -9,6 +9,12 @@ Endpoints used (vLLM v0.33.0 unless noted):
 * ``POST /v1/completions`` (``vllm/entrypoints/openai/completion/protocol.py``): ``prompt`` as a
   list of token-id lists, ``return_token_ids=true`` → ``choices[i].token_ids`` /
   ``prompt_token_ids``; ``logprobs=0`` → ``choices[i].logprobs.token_logprobs``.
+* ``POST /v1/chat/completions`` (``vllm/entrypoints/openai/chat_completion/protocol.py``) for
+  prompts with image parts: ``messages`` with ``image_url`` data URLs, ``logprobs=true,
+  top_logprobs=0`` and ``return_token_ids=true``. The chat endpoint's logprob entries only carry
+  token *strings*, so token ids come from ``choices[i].token_ids`` and the prompt ids the server
+  conditioned on (chat template + image placeholders rendered server-side) from the
+  response-level ``prompt_token_ids``. One request per prompt (a chat request is one conversation).
 * ``POST /sleep?level=N``, ``POST /wake_up``, ``GET /is_sleeping``
   (``vllm/entrypoints/serve/dev/sleep/api_router.py``, enabled by ``VLLM_SERVER_DEV_MODE=1``).
 * ``POST /reset_prefix_cache`` (``vllm/entrypoints/serve/dev/cache/api_router.py``).
@@ -27,8 +33,12 @@ import httpx
 import torch
 
 from monorl.adapters.vllm.common import (
+    chat_completion_kwargs,
+    chat_completion_messages,
+    completions_from_chat_response,
     completions_from_choices,
     dtype_name,
+    is_media_prompt,
     prompt_token_ids,
     sampling_kwargs,
     tensor_to_bytes,
@@ -102,17 +112,32 @@ class VllmServerClient:
     def generate(self, prompts: Sequence[PromptInput], params: SamplingParams) -> list[list[Completion]]:
         if not prompts:
             return []
-        ids = [prompt_token_ids(self._tokenizer, p) for p in prompts]
-        body: dict[str, Any] = {
-            "model": self._model_name,
-            "prompt": ids,
-            "return_token_ids": True,
-            **sampling_kwargs(params),
-        }
+        text_idx = [i for i, p in enumerate(prompts) if not is_media_prompt(p)]
+        media_idx = [i for i, p in enumerate(prompts) if is_media_prompt(p)]
+        result: list[list[Completion] | None] = [None] * len(prompts)
         with self._lock:
             self._wake(_ALL_TAGS)
-            resp = self._post("/v1/completions", json=body)
-        return completions_from_choices(resp.json()["choices"], ids, params.n, want_logprobs=params.logprobs)
+            if text_idx:
+                ids = [prompt_token_ids(self._tokenizer, prompts[i]) for i in text_idx]
+                body: dict[str, Any] = {
+                    "model": self._model_name,
+                    "prompt": ids,
+                    "return_token_ids": True,
+                    **sampling_kwargs(params),
+                }
+                resp = self._post("/v1/completions", json=body)
+                grouped = completions_from_choices(resp.json()["choices"], ids, params.n, want_logprobs=params.logprobs)
+                for i, comps in zip(text_idx, grouped, strict=True):
+                    result[i] = comps
+            for i in media_idx:
+                body = {
+                    "model": self._model_name,
+                    "messages": chat_completion_messages(prompts[i]),  # type: ignore[arg-type]
+                    **chat_completion_kwargs(params),
+                }
+                resp = self._post("/v1/chat/completions", json=body)
+                result[i] = completions_from_chat_response(resp.json(), params.n, want_logprobs=params.logprobs)
+        return [r for r in result if r is not None]
 
     def update_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> None:
         with self._lock:

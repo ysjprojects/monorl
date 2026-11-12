@@ -1,0 +1,48 @@
+# Supervised "cold start" fine-tuning (DeepSeek-R1 stage 1) on CPU: SmolLM2-135M-Instruct learns
+# GSM8K's worked solutions. No rollouts or rewards: the orchestrator's SFT loop encodes
+# `question` + the chat template + `answer` and trains the response span with the reference
+# trainer. `response_field` selects the target column; without it the SFT loop uses `answer_field`
+# or a trailing assistant turn in chat-format data. Runs on a laptop in a couple of minutes.
+run_name: sft-coldstart-smollm-cpu
+seed: 42
+model:
+  name_or_path: HuggingFaceTB/SmolLM2-135M-Instruct
+  dtype: float32
+data:
+  uri: hf://openai/gsm8k
+  hf_config_name: main
+  split: train
+  format: prompt_answer
+  prompt_field: question
+  answer_field: answer
+  response_field: answer
+  system_prompt: "Solve the problem step by step and finish with the final numeric answer."
+  max_prompt_tokens: 512
+  limit: 256
+algorithm:
+  name: sft
+  loss_agg: token
+  sft_label_smoothing: 0.0
+  sft_train_on_prompt: false
+rollout:
+  backend: hf
+  device: cpu
+trainer:
+  backend: reference
+  learning_rate: 1.0e-5
+  scheduler: cosine
+  warmup_steps: 2
+  prompts_per_step: 4
+  micro_batch_size: 2
+  max_steps: 20
+  precision: fp32
+  save_every: 10
+  max_seq_len: 768
+  device: cpu
+env:
+  type: single_turn
+cluster:
+  mode: local
+logging:
+  run_root: ~/.monorl/runs
+  trajectories_per_step: 2

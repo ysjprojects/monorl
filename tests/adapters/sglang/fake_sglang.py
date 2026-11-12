@@ -172,6 +172,7 @@ class Engine:
                     "prompt": prompt,
                     "sampling_params": sampling_params,
                     "input_ids": input_ids,
+                    "image_data": image_data,
                     "return_logprob": return_logprob,
                     "logprob_start_len": logprob_start_len,
                     "stream": stream,

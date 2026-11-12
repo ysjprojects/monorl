@@ -8,6 +8,12 @@ folded into the logprobs, so trainer-side logprobs computed with the same temper
 importance ratios of exactly 1 on-policy. vLLM (``processed_logprobs``) and SGLang report logprobs
 *after* those processors; the orchestrator therefore recomputes ``old_logprobs`` with the trainer
 for non-``hf`` engines whenever a truncating sampler knob is active.
+
+Vision-language checkpoints (:func:`monorl.rollout.media.load_processor` finds a processor) encode
+chats with image parts through ``processor.apply_chat_template`` so ``Completion.prompt_token_ids``
+contains the media placeholder tokens, and ``generate`` receives ``pixel_values``/``image_grid_thw``/
+``mm_token_type_ids``. Raw-id prompts, text-only chats and text-only models take the tokenizer path
+unchanged.
 """
 
 from __future__ import annotations
@@ -18,15 +24,24 @@ import logging
 import os
 import threading
 from collections.abc import Iterable, Iterator, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer, GenerationConfig
+from transformers import AutoTokenizer, GenerationConfig
 from transformers.generation import StoppingCriteria, StoppingCriteriaList, StopStringCriteria
 
 from monorl.config.schema import RunConfig
 from monorl.core.types import Completion, FinishReason, PromptInput, SamplingParams
+from monorl.rollout.media import (
+    auto_model_class,
+    collate_media,
+    load_processor,
+    needs_processor,
+    split_processor_outputs,
+    vlm_encode,
+)
 
 log = logging.getLogger(__name__)
 
@@ -75,6 +90,31 @@ def _is_token_prompt(prompt: PromptInput) -> bool:
     return len(prompt) > 0 and isinstance(prompt[0], int)
 
 
+@dataclass(slots=True)
+class _EncodedPrompt:
+    ids: list[int]
+    token_aligned: dict[str, torch.Tensor] | None = None
+    """Processor tensors aligned with ``ids`` (``[1, len(ids)]``), e.g. ``mm_token_type_ids``."""
+    media: dict[str, torch.Tensor] | None = None
+    """Per-prompt media tensors (``pixel_values``, ``image_grid_thw``, ...)."""
+
+    @property
+    def multimodal(self) -> bool:
+        return bool(self.media) or bool(self.token_aligned)
+
+
+def encode_prompt(prompt: PromptInput, tokenizer: Any, processor: Any | None) -> _EncodedPrompt:
+    """Raw ids pass through; chats with media parts go through the processor (when the model has
+    one), every other chat through :func:`chat_prompt_ids` — the text path is unchanged."""
+    if _is_token_prompt(prompt):
+        return _EncodedPrompt(ids=[int(t) for t in prompt])  # type: ignore[union-attr]
+    if processor is not None and needs_processor(prompt):  # type: ignore[arg-type]
+        enc = vlm_encode(processor, prompt)  # type: ignore[arg-type]
+        aligned, media = split_processor_outputs(enc)
+        return _EncodedPrompt(ids=[int(t) for t in enc["input_ids"][0].tolist()], token_aligned=aligned, media=media)
+    return _EncodedPrompt(ids=chat_prompt_ids(tokenizer, prompt))
+
+
 class _FinishRecorder(StoppingCriteria):
     """Stopping criterion that also remembers *when* and *why* each sequence finished.
 
@@ -120,8 +160,9 @@ class HFRolloutEngine:
         self.replica = replica
         self.device = resolve_device(config.rollout.device)
         self.dtype = resolve_dtype(config.model.dtype, self.device)
-        self._tokenizer = load_tokenizer(config)
-        self.model = AutoModelForCausalLM.from_pretrained(
+        self._processor = load_processor(config)
+        self._tokenizer = self._processor.tokenizer if self._processor is not None else load_tokenizer(config)
+        self.model = auto_model_class(config).from_pretrained(
             config.model.name_or_path,
             dtype=self.dtype,
             revision=config.model.revision,
@@ -144,17 +185,22 @@ class HFRolloutEngine:
     def tokenizer(self) -> Any:
         return self._tokenizer
 
+    @property
+    def processor(self) -> Any | None:
+        """``AutoProcessor`` for VLM checkpoints (shared with the batch builder), else ``None``."""
+        return self._processor
+
     def generate(self, prompts: Sequence[PromptInput], params: SamplingParams) -> list[list[Completion]]:
         if not prompts:
             return []
         if params.n < 1:
             raise ValueError("SamplingParams.n must be >= 1")
-        prompt_ids = [list(p) if _is_token_prompt(p) else chat_prompt_ids(self._tokenizer, p) for p in prompts]
+        encoded = [encode_prompt(p, self._tokenizer, self._processor) for p in prompts]
         with self._lock:
             if self._asleep:
                 raise RuntimeError("engine is asleep; call wake_up() before generate()")
             with self._seeded(params.seed):
-                return self._generate_locked(prompt_ids, params)
+                return self._generate_locked(encoded, params)
 
     def update_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> None:
         with self._lock, torch.no_grad():
@@ -246,19 +292,44 @@ class HFRolloutEngine:
             mask[i, width - len(p) :] = 1
         return ids.to(self.device), mask.to(self.device)
 
+    def _multimodal_inputs(self, encoded: list[_EncodedPrompt], n: int, width: int) -> dict[str, torch.Tensor]:
+        """Processor tensors for ``len(encoded) * n`` rows (row ``i*n+j`` = prompt ``i``): token-aligned
+        tensors left-padded with 0 to ``width``; media tensors concatenated in row order. Rows are
+        expanded here rather than by ``num_return_sequences`` because ``generate`` would
+        ``repeat_interleave`` patch tensors such as Qwen2-VL's ``pixel_values [patches, D]`` along
+        dim 0, interleaving patches of different copies."""
+        rows = len(encoded) * n
+        aligned: dict[str, torch.Tensor] = {}
+        for i, e in enumerate(encoded):
+            for k, v in (e.token_aligned or {}).items():
+                if k not in aligned:
+                    aligned[k] = torch.zeros((rows, width), dtype=v.dtype)
+                aligned[k][i * n : (i + 1) * n, width - v.shape[1] :] = v[0]
+        media = collate_media([e.media for e in encoded for _ in range(n)])
+        return {k: v.to(self.device) for k, v in (aligned | media).items()}
+
     @torch.no_grad()
-    def _generate_locked(self, prompt_ids: list[list[int]], params: SamplingParams) -> list[list[Completion]]:
+    def _generate_locked(self, encoded: list[_EncodedPrompt], params: SamplingParams) -> list[list[Completion]]:
         greedy = params.temperature <= 0.0
         n = 1 if greedy else params.n
+        prompt_ids = [e.ids for e in encoded]
         input_ids, attention_mask = self._left_pad(prompt_ids)
         rows = input_ids.shape[0] * n
         stop = StopStringCriteria(self._tokenizer, list(params.stop)) if params.stop else None
         recorder = _FinishRecorder(rows, self._eos_ids, stop)
+        model_kwargs: dict[str, Any] = {}
+        expand = 1
+        if any(e.multimodal for e in encoded):
+            model_kwargs = self._multimodal_inputs(encoded, n, input_ids.shape[1])
+            input_ids = input_ids.repeat_interleave(n, dim=0)
+            attention_mask = attention_mask.repeat_interleave(n, dim=0)
+            expand = n
         out = self.model.generate(
             input_ids=input_ids,
             attention_mask=attention_mask,
-            generation_config=self._generation_config(params, n),
+            generation_config=self._generation_config(params, n // expand),
             stopping_criteria=StoppingCriteriaList([recorder]),
+            **model_kwargs,
         )
         prompt_width = input_ids.shape[1]
         generated = out.sequences[:, prompt_width:]

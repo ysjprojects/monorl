@@ -3,7 +3,7 @@
 Public surface::
 
     open_source(data_config, *, split=None, tokenizer=None, seed=0) -> DataSource
-    sniff_format(columns, sample_rows) -> {format, prompt_field, answer_field, messages_field}
+    sniff_format(columns, sample_rows) -> {format, prompt_field, answer_field, messages_field, image_fields}
     browse.browse_uri(uri) / browse.preview_uri(uri, split=, hf_config_name=, limit=)
     register(registry)   # data_source: local | hf | s3
 """
@@ -38,8 +38,14 @@ def open_source(
     * scheme → local / hf / s3 (fsspec) row source; ``streaming`` keeps hf/s3/local lazy
     * layout from ``format``/field overrides, else :func:`sniff_format` on the first rows
     * ``prompt_template`` (``str.format_map`` over the row + ``{prompt}``), ``system_prompt``
-    * ``#### answer`` extraction into ``Sample.reference`` (raw under ``metadata["answer_raw"]``)
-    * ``max_prompt_tokens`` filter when ``tokenizer`` is given (chat template applied to count)
+    * ``image_field`` column(s) → ``{"type": "image", "image": <path|uri>}`` parts on the user
+      turn (``'<image>'`` in ``prompt_template`` positions them; default before the text); chat
+      rows with OpenAI-style parts are normalised the same way (:mod:`monorl.data.media`)
+    * ``#### answer`` extraction into ``Sample.reference`` (raw under ``metadata["answer_raw"]``);
+      the SFT target under ``metadata["response"]`` (``response_field`` → ``answer_field`` →
+      trailing assistant turn, else ``None``)
+    * ``max_prompt_tokens`` filter when ``tokenizer`` is given (chat template applied to the text
+      parts only; media placeholder tokens are not counted)
     * deterministic ``shuffle(seed)`` then ``limit``
     """
     parsed = parse_uri(data_config.uri)
@@ -54,7 +60,7 @@ def open_source(
         extra=data_config.extra or None,
     )
     layout = Layout.resolve(data_config, rows.columns(), rows.head(SNIFF_ROWS))
-    mapper = SampleMapper.from_config(data_config, layout, tokenizer)
+    mapper = SampleMapper.from_config(data_config, layout, tokenizer, rows=rows)
     cls = StreamingSource if data_config.streaming else MaterializedSource
     return cls(
         source_kind(parsed),

@@ -67,7 +67,7 @@ from pathlib import Path
 from typing import Any
 
 from monorl.core.errors import BackendUnavailable
-from monorl.core.types import Completion, Message, Sample, StepResult, ToolCall
+from monorl.core.types import Completion, Message, Sample, StepResult, ToolCall, message_text
 from monorl.envs.tool_calling import parse_tool_calls
 
 log = logging.getLogger("monorl.adapters.hermes")
@@ -408,7 +408,7 @@ class HermesEnv:
         messages: list[Message] = list(sample.messages)
         system = f"{self.render_system_prompt()}\n\nWorking directory for this task: {self.cwd}"
         if messages and messages[0].get("role") == "system":
-            messages[0] = {"role": "system", "content": f"{system}\n\n{messages[0].get('content', '')}".strip()}
+            messages[0] = {"role": "system", "content": f"{system}\n\n{message_text(messages[0])}".strip()}
         else:
             messages.insert(0, {"role": "system", "content": system})
         self._messages = [dict(m) for m in messages]

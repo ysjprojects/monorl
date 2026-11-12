@@ -10,10 +10,15 @@ below exists in that tag's config tree unless prefixed with ``+`` (Hydra "add" o
 * ``verl/trainer/config/model/hf_model.yaml``         actor_rollout_ref.model.*
 * ``verl/trainer/config/reward/reward.yaml``          reward.custom_reward_function.*, reward.reward_manager.*
 * ``verl/trainer/ppo/core_algos.py``                  ``AdvantageEstimator`` names
+* ``verl/trainer/config/sft_trainer_engine.yaml``     data.*, trainer.*, checkpoint.* (SFT, with
+  ``model@model: hf_model``, ``engine@engine: fsdp``, ``optim@optim: fsdp`` defaults) — v0.9.1
+  replaced ``fsdp_sft_trainer`` with the engine-based ``verl/trainer/sft_trainer.py`` /
+  ``sft_trainer_ray.py`` (``MultiTurnSFTDataset``: ``data.messages_key``, ``data.image_key``).
 
 The result is a nested dict; :func:`to_overrides` flattens it into ``key=value`` strings for
 ``python -m verl.trainer.main_ppo`` (Hydra CLI grammar). ``trainer.extra`` is deep-merged last so
-any verl knob can be set or overridden from the RunConfig.
+any verl knob can be set or overridden from the RunConfig. Multimodal runs set ``data.image_key``
+and ``actor_rollout_ref.model.use_remove_padding`` as ``examples/grpo_trainer/run_qwen2_5_vl_7b_fsdp.sh`` does.
 """
 
 from __future__ import annotations
@@ -23,8 +28,12 @@ from pathlib import Path
 from typing import Any
 
 from monorl.adapters.verl.data import (
+    IMAGES_KEY,
+    MESSAGES_KEY,
     PROMPT_KEY,
     TOOL_AGENT,
+    sft_train_parquet_path,
+    sft_val_parquet_path,
     train_parquet_path,
     val_parquet_path,
 )
@@ -79,12 +88,18 @@ def deep_merge(base: dict[str, Any], extra: dict[str, Any]) -> dict[str, Any]:
     return base
 
 
-def compile_config(config: RunConfig, run_dir: str | Path) -> dict[str, Any]:
+def compile_config(config: RunConfig, run_dir: str | Path, *, multimodal: bool | None = None) -> dict[str, Any]:
     """Build the verl override tree for ``config``; paths point into ``run_dir``.
 
     Does not touch the filesystem: the data/reward/tool artefacts referenced here are written by
     :mod:`monorl.adapters.verl.data`, :mod:`.reward` and :mod:`.tools` (``VerlBackend.prepare``).
+    ``multimodal`` (default: ``data.image_field`` is set) adds the VLM keys; ``algorithm.name='sft'``
+    dispatches to :func:`compile_sft_config`.
     """
+    if config.is_sft:
+        return compile_sft_config(config, run_dir, multimodal=multimodal)
+    if multimodal is None:
+        multimodal = config.data.image_field is not None
     run_dir = Path(run_dir).expanduser().resolve()
     algo, rollout, trainer, model, cluster, env, data, logging = (
         config.algorithm,
@@ -208,6 +223,16 @@ def compile_config(config: RunConfig, run_dir: str | Path) -> dict[str, Any]:
     if model.dtype in ROLLOUT_DTYPE:
         tree["actor_rollout_ref"]["rollout"]["dtype"] = ROLLOUT_DTYPE[model.dtype]
 
+    if multimodal:
+        # verl/utils/dataset/rl_dataset.py reads images from data.image_key; VLM actors need the
+        # unpadded (rmpad) path (examples/grpo_trainer/run_qwen2_5_vl_7b_fsdp.sh).
+        tree["data"]["image_key"] = IMAGES_KEY
+        tree["actor_rollout_ref"]["model"]["use_remove_padding"] = True
+        mm_limit = rollout.extra.get("limit_mm_per_prompt")
+        if mm_limit is not None:
+            limit = {"image": int(mm_limit)} if isinstance(mm_limit, int) else dict(mm_limit)
+            tree["actor_rollout_ref"]["rollout"]["engine_kwargs"] = {rollout_name: {"+limit_mm_per_prompt": limit}}
+
     if tool_calling:
         tree["actor_rollout_ref"]["rollout"]["multi_turn"].update(
             {
@@ -263,6 +288,94 @@ def compile_config(config: RunConfig, run_dir: str | Path) -> dict[str, Any]:
         tree["trainer"]["n_gpus_per_node"] = cluster.trainer_gpus
         tree["trainer"]["v1"] = {"trainer_mode": "separate_async"}
 
+    extra = {k: v for k, v in trainer.extra.items() if k not in RESERVED_EXTRA_KEYS}
+    return deep_merge(tree, extra)
+
+
+# verl optim/fsdp.yaml lr_scheduler_type: "constant" or "cosine" (linear decay has no equivalent).
+SFT_SCHEDULER = {"constant": "constant", "cosine": "cosine", "linear": "cosine"}
+SFT_ENGINE_DTYPE = {"bf16": "bfloat16", "fp16": "float16"}
+
+
+def compile_sft_config(config: RunConfig, run_dir: str | Path, *, multimodal: bool | None = None) -> dict[str, Any]:
+    """Override tree for ``verl.trainer.sft_trainer_ray`` (``sft_trainer_engine.yaml``).
+
+    ``trainer.prompts_per_step`` sequences per optimizer step (``data.train_batch_size``),
+    ``trainer.micro_batch_size`` → ``data.micro_batch_size_per_gpu``, ``trainer.max_seq_len`` →
+    ``data.max_length``; ``trainer.total_epochs`` is set to ``max_steps`` so the epoch loop can
+    never end before ``trainer.total_training_steps`` (the trainer returns at the last step).
+    ``checkpoint.save_contents`` adds ``hf_model`` so every ``global_step_<n>/huggingface`` is a
+    loadable export (the run's ``final/`` hand-off).
+    """
+    run_dir = Path(run_dir).expanduser().resolve()
+    trainer, model, cluster, data, logging = (
+        config.trainer,
+        config.model,
+        config.cluster,
+        config.data,
+        config.logging,
+    )
+    if multimodal is None:
+        multimodal = data.image_field is not None
+    loggers = ["console"]
+    if logging.wandb_project:
+        loggers.append("wandb")
+    if logging.tensorboard:
+        loggers.append("tensorboard")
+    tree: dict[str, Any] = {
+        "data": {
+            "train_files": str(sft_train_parquet_path(run_dir)),
+            "val_files": str(sft_val_parquet_path(run_dir)) if data.eval_uri else None,
+            "messages_key": MESSAGES_KEY,
+            "max_length": trainer.max_seq_len,
+            "truncation": "right",
+            "train_batch_size": trainer.prompts_per_step,
+            "micro_batch_size_per_gpu": trainer.micro_batch_size,
+            "use_dynamic_bsz": False,
+            "shuffle": data.shuffle,
+            "seed": config.seed,
+            "trust_remote_code": model.trust_remote_code,
+        },
+        "model": {
+            "path": model.name_or_path,
+            "tokenizer_path": model.tokenizer_name_or_path,
+            "trust_remote_code": model.trust_remote_code,
+            "custom_chat_template": model.chat_template,
+            "enable_gradient_checkpointing": trainer.gradient_checkpointing,
+            "lora_rank": model.lora.r if model.lora.enabled else 0,
+            "lora_alpha": model.lora.alpha if model.lora.enabled else 16,
+            "target_modules": model.lora.target_modules if model.lora.enabled else "all-linear",
+            "use_remove_padding": True,
+        },
+        "optim": {
+            "lr": trainer.learning_rate,
+            "weight_decay": trainer.weight_decay,
+            "lr_warmup_steps": trainer.warmup_steps if trainer.warmup_steps > 0 else -1,
+            "lr_scheduler_type": SFT_SCHEDULER[trainer.scheduler],
+            "clip_grad": trainer.max_grad_norm,
+            "total_training_steps": trainer.max_steps,
+        },
+        "engine": {"seed": config.seed},
+        "checkpoint": {"save_contents": ["model", "optimizer", "extra", "hf_model"]},
+        "trainer": {
+            "nnodes": cluster.num_nodes,
+            "n_gpus_per_node": max(1, cluster.gpus_per_node),
+            "total_training_steps": trainer.max_steps,
+            "total_epochs": trainer.max_steps,
+            "save_freq": trainer.save_every,
+            "test_freq": trainer.eval_every if (trainer.eval_every and data.eval_uri) else -1,
+            "project_name": PROJECT_NAME,
+            "experiment_name": config.run_name or run_dir.name,
+            "logger": loggers,
+            "default_local_dir": str(run_dir / CHECKPOINT_DIR),
+            "resume_mode": "auto",
+            "seed": config.seed,
+        },
+    }
+    if trainer.precision in SFT_ENGINE_DTYPE:
+        tree["engine"]["dtype"] = SFT_ENGINE_DTYPE[trainer.precision]
+    if multimodal:
+        tree["data"]["image_key"] = IMAGES_KEY
     extra = {k: v for k, v in trainer.extra.items() if k not in RESERVED_EXTRA_KEYS}
     return deep_merge(tree, extra)
 

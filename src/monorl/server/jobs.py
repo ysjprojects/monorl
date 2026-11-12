@@ -1,12 +1,14 @@
-"""Job manager: spawns training runs as subprocesses and reconciles their state from the run
-directory (``status.json``) plus process liveness.
+"""Job manager: spawns training runs and pipelines as subprocesses and reconciles their state
+from the run directory (``status.json``) plus process liveness.
 
 Jobs persist in ``$MONORL_HOME/jobs.json`` so the server can be restarted while runs continue.
 A job record::
 
-    {id, name, run_dir, config, state, pid, created_at, started_at, finished_at, error,
+    {id, kind, name, run_dir, config, state, pid, created_at, started_at, finished_at, error,
      updated_at, step, message}
 
+``kind`` is ``"run"`` (``config`` = RunConfig, command ``monorl train``) or ``"pipeline"``
+(``config`` = PipelineConfig, command ``monorl pipeline``; stages live in ``<run_dir>/pipeline.json``).
 ``state`` is a :data:`monorl.core.types.RunState`; ``step``/``message``/``updated_at`` mirror the
 trainer's ``status.json`` so list views do not have to open every run directory.
 """
@@ -28,13 +30,17 @@ from typing import Any
 
 import psutil
 
+from monorl.config.pipeline import PipelineConfig, is_pipeline_payload
 from monorl.config.schema import RunConfig
 from monorl.core.errors import MonorlError
 from monorl.core.reporting import CONFIG_FILE, LOG_FILE, read_status
+from monorl.pipeline.stages import PIPELINE_CONFIG_FILE, default_pipeline_name
 
 JOBS_FILE = "jobs.json"
 TERMINAL_STATES: frozenset[str] = frozenset({"succeeded", "failed", "cancelled"})
 DEFAULT_TRAIN_CMD: tuple[str, ...] = (sys.executable, "-m", "monorl.cli", "train")
+DEFAULT_PIPELINE_CMD: tuple[str, ...] = (sys.executable, "-m", "monorl.cli", "pipeline")
+JOB_KINDS: tuple[str, ...] = ("run", "pipeline")
 
 _SAFE_NAME = re.compile(r"[^A-Za-z0-9._-]+")
 
@@ -57,6 +63,14 @@ def train_command() -> list[str]:
     if override:
         return shlex.split(override)
     return list(DEFAULT_TRAIN_CMD)
+
+
+def pipeline_command() -> list[str]:
+    """Command prefix used to launch a pipeline; ``MONORL_PIPELINE_CMD`` (shell-split) overrides it."""
+    override = os.environ.get("MONORL_PIPELINE_CMD")
+    if override:
+        return shlex.split(override)
+    return list(DEFAULT_PIPELINE_CMD)
 
 
 def _timestamp() -> str:
@@ -90,12 +104,14 @@ class JobManager:
         home: str | os.PathLike[str] | None = None,
         *,
         train_cmd: list[str] | None = None,
+        pipeline_cmd: list[str] | None = None,
         grace_seconds: float | None = None,
     ) -> None:
         self.home = Path(home).expanduser() if home is not None else default_home()
         self.home.mkdir(parents=True, exist_ok=True)
         self.path = self.home / JOBS_FILE
         self._train_cmd = train_cmd
+        self._pipeline_cmd = pipeline_cmd
         env_grace = os.environ.get("MONORL_CANCEL_GRACE")
         self.grace_seconds = grace_seconds if grace_seconds is not None else float(env_grace or 5.0)
         self._lock = threading.RLock()
@@ -113,6 +129,7 @@ class JobManager:
             return
         for job in data.get("jobs", []):
             if isinstance(job, dict) and "id" in job:
+                job.setdefault("kind", "run")
                 self._jobs[job["id"]] = job
 
     def _save(self) -> None:
@@ -121,20 +138,36 @@ class JobManager:
         os.replace(tmp, self.path)
 
     # -- creation ------------------------------------------------------------------------
-    def _resolve_run_dir(self, config: RunConfig) -> tuple[str, Path]:
-        """``<logging.run_root>/<run_name>``; a suffix is appended when the directory exists."""
-        root = Path(config.logging.run_root).expanduser()
-        name = _SAFE_NAME.sub("-", config.run_name) if config.run_name else default_run_name(config)
+    def _unique_run_dir(self, root: Path, name: str) -> tuple[str, Path]:
+        """``<root>/<name>``; a suffix is appended when the directory exists."""
         candidate, n = root / name, 1
         while candidate.exists():
             n += 1
             candidate = root / f"{name}-{n}"
         return (name if n == 1 else f"{name}-{n}"), candidate
 
-    def create(self, config_dict: dict[str, Any]) -> dict[str, Any]:
-        """Validate, write ``<run_dir>/config.yaml`` and spawn the trainer. Raises
-        :class:`monorl.core.errors.ConfigError` on an invalid config."""
-        config = RunConfig.from_dict(config_dict)
+    def _resolve_run_dir(self, config: RunConfig) -> tuple[str, Path]:
+        root = Path(config.logging.run_root).expanduser()
+        name = _SAFE_NAME.sub("-", config.run_name) if config.run_name else default_run_name(config)
+        return self._unique_run_dir(root, name)
+
+    def _resolve_pipeline_dir(self, config: PipelineConfig) -> tuple[str, Path]:
+        root = Path(config.base.logging.run_root).expanduser()
+        name = _SAFE_NAME.sub("-", config.name) if config.name else default_pipeline_name(config)
+        return self._unique_run_dir(root, name)
+
+    def create(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Validate, write the config into the run dir and spawn the worker process.
+
+        ``payload`` is a RunConfig dict, ``{"pipeline": <PipelineConfig dict>}`` or a bare
+        PipelineConfig dict (``base`` + ``stages``). Raises
+        :class:`monorl.core.errors.ConfigError` on an invalid config.
+        """
+        if isinstance(payload, dict) and isinstance(payload.get("pipeline"), dict):
+            return self._create_pipeline(payload["pipeline"])
+        if is_pipeline_payload(payload):
+            return self._create_pipeline(payload)
+        config = RunConfig.from_dict(payload)
         with self._lock:
             name, run_dir = self._resolve_run_dir(config)
             config.run_name = name
@@ -142,47 +175,63 @@ class JobManager:
             config_path = run_dir / CONFIG_FILE
             config.to_yaml(config_path)
             cmd = [*(self._train_cmd or train_command()), "--config", str(config_path), "--run-dir", str(run_dir)]
-            now = time.time()
-            job: dict[str, Any] = {
-                "id": uuid.uuid4().hex[:12],
-                "name": name,
-                "run_dir": str(run_dir),
-                "config": config.to_dict(),
-                "state": "pending",
-                "pid": None,
-                "created_at": now,
-                "started_at": None,
-                "finished_at": None,
-                "error": None,
-                "updated_at": now,
-                "step": 0,
-                "message": None,
-                "command": cmd,
-            }
+            return self._spawn("run", name, run_dir, config.to_dict(), cmd)
+
+    def _create_pipeline(self, payload: dict[str, Any]) -> dict[str, Any]:
+        config = PipelineConfig.from_dict(payload)
+        with self._lock:
+            name, run_dir = self._resolve_pipeline_dir(config)
+            config = config.model_copy(update={"name": name})
+            run_dir.mkdir(parents=True, exist_ok=False)
+            config_path = run_dir / PIPELINE_CONFIG_FILE
+            config.to_yaml(config_path)
+            cmd = [*(self._pipeline_cmd or pipeline_command()), "--config", str(config_path), "--run-dir", str(run_dir)]
+            return self._spawn("pipeline", name, run_dir, config.to_dict(), cmd)
+
+    def _spawn(self, kind: str, name: str, run_dir: Path, config: dict[str, Any], cmd: list[str]) -> dict[str, Any]:
+        now = time.time()
+        job: dict[str, Any] = {
+            "id": uuid.uuid4().hex[:12],
+            "kind": kind,
+            "name": name,
+            "run_dir": str(run_dir),
+            "config": config,
+            "state": "pending",
+            "pid": None,
+            "created_at": now,
+            "started_at": None,
+            "finished_at": None,
+            "error": None,
+            "updated_at": now,
+            "step": 0,
+            "message": None,
+            "command": cmd,
+        }
+        try:
+            log = open(run_dir / LOG_FILE, "ab")
             try:
-                log = open(run_dir / LOG_FILE, "ab")
-                try:
-                    proc = subprocess.Popen(
-                        cmd,
-                        stdin=subprocess.DEVNULL,
-                        stdout=log,
-                        stderr=subprocess.STDOUT,
-                        cwd=str(run_dir),
-                        start_new_session=True,
-                        # The reporter writes run.log itself; its stderr echo would be captured
-                        # into the same file and duplicate every line.
-                        env={**os.environ, "MONORL_REPORTER_ECHO": "0"},
-                    )
-                finally:
-                    log.close()
-            except OSError as e:
-                job.update(state="failed", error=f"failed to spawn trainer: {e}", finished_at=time.time())
-            else:
-                self._procs[job["id"]] = proc
-                job.update(state="running", pid=proc.pid, started_at=time.time())
-            self._jobs[job["id"]] = job
-            self._save()
-            return dict(job)
+                proc = subprocess.Popen(
+                    cmd,
+                    stdin=subprocess.DEVNULL,
+                    stdout=log,
+                    stderr=subprocess.STDOUT,
+                    cwd=str(run_dir),
+                    start_new_session=True,
+                    # The reporter writes run.log itself; its stderr echo would be captured
+                    # into the same file and duplicate every line.
+                    env={**os.environ, "MONORL_REPORTER_ECHO": "0"},
+                )
+            finally:
+                log.close()
+        except OSError as e:
+            worker = "trainer" if kind == "run" else "pipeline"
+            job.update(state="failed", error=f"failed to spawn {worker}: {e}", finished_at=time.time())
+        else:
+            self._procs[job["id"]] = proc
+            job.update(state="running", pid=proc.pid, started_at=time.time())
+        self._jobs[job["id"]] = job
+        self._save()
+        return dict(job)
 
     # -- queries -------------------------------------------------------------------------
     def list(self) -> list[dict[str, Any]]:

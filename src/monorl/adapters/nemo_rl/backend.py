@@ -28,8 +28,8 @@ from typing import Any
 import monorl
 from monorl.adapters.nemo_rl.compile import compile_config, write_config
 from monorl.adapters.nemo_rl.data import export_dataset, write_bridge_module
-from monorl.adapters.nemo_rl.entry import HOME_ENV, resolve_home
-from monorl.adapters.nemo_rl.patches import RUN_DIR_ENV
+from monorl.adapters.nemo_rl.entry import HOME_ENV, RUN_SCRIPT, SFT_SCRIPT, resolve_home
+from monorl.adapters.nemo_rl.patches import ALGORITHM_ENV, RUN_DIR_ENV
 from monorl.config.schema import RunConfig
 from monorl.core.errors import ConfigError
 from monorl.core.reporting import CHECKPOINT_DIR, RunReporter, iter_metrics
@@ -49,7 +49,7 @@ def nemo_rl_home(config: RunConfig) -> Path:
 
 
 def build_command(config: RunConfig, home: Path, yaml_path: Path, run_dir: Path) -> list[str]:
-    """The argv launched with ``cwd=home``."""
+    """The argv launched with ``cwd=home`` (``--script run_sft.py`` for ``algorithm.name: sft``)."""
     extra = config.trainer.extra
     launcher = extra.get("nemo_rl_launcher")
     if launcher is None:
@@ -73,6 +73,8 @@ def build_command(config: RunConfig, home: Path, yaml_path: Path, run_dir: Path)
         str(run_dir),
         "--nemo-rl-home",
         str(home),
+        "--script",
+        str(SFT_SCRIPT if config.is_sft else RUN_SCRIPT),
         *overrides,
     ]
 
@@ -84,9 +86,11 @@ def monorl_src_root() -> Path:
 
 def build_env(config: RunConfig, home: Path, run_dir: Path, base: dict[str, str] | None = None) -> dict[str, str]:
     """Child environment: ``RAY_ADDRESS`` (when ``cluster.ray_address``), ``MONORL_RUN_DIR``,
-    ``NEMO_RL_HOME`` and a ``PYTHONPATH`` that resolves the run-dir shim module and ``monorl``."""
+    ``MONORL_ALGORITHM`` (the logger patch names ``train/loss`` ``loss/sft`` for SFT), ``NEMO_RL_HOME``
+    and a ``PYTHONPATH`` that resolves the run-dir shim module and ``monorl``."""
     env = dict(os.environ if base is None else base)
     env[RUN_DIR_ENV] = str(run_dir)
+    env[ALGORITHM_ENV] = config.algorithm.name
     env[HOME_ENV] = str(home)
     env["PYTHONUNBUFFERED"] = "1"
     if config.cluster.ray_address:

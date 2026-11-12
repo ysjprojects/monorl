@@ -60,7 +60,10 @@ def test_run_raises_backend_unavailable_without_home(nemo_config: RunConfig, tmp
 def test_build_command_and_env(nemo_config: RunConfig, fake_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     run_dir = tmp_path / "run"
     yaml_path = run_dir / "nemo_rl" / "nemo_rl.yaml"
-    tail = ["-m", ENTRY_MODULE, "--config", str(yaml_path), "--run-dir", str(run_dir), "--nemo-rl-home", str(fake_home)]
+    tail = [
+        "-m", ENTRY_MODULE, "--config", str(yaml_path), "--run-dir", str(run_dir), "--nemo-rl-home", str(fake_home),
+        "--script", "examples/run_grpo.py",
+    ]
 
     monkeypatch.setattr("monorl.adapters.nemo_rl.backend.shutil.which", lambda name: "/usr/bin/uv" if name == "uv" else None)
     assert build_command(nemo_config, fake_home, yaml_path, run_dir) == ["uv", "run", "python", *tail]
@@ -76,6 +79,7 @@ def test_build_command_and_env(nemo_config: RunConfig, fake_home: Path, tmp_path
 
     env = build_env(nemo_config, fake_home, run_dir, base={"PATH": "/bin", "PYTHONPATH": "/extra"})
     assert env["MONORL_RUN_DIR"] == str(run_dir) and env["NEMO_RL_HOME"] == str(fake_home)
+    assert env["MONORL_ALGORITHM"] == "grpo"
     assert env["PYTHONPATH"].split(os.pathsep) == [str(run_dir), str(monorl_src_root()), "/extra"]
     assert env["PYTHONUNBUFFERED"] == "1" and "RAY_ADDRESS" not in env and env["PATH"] == "/bin"
     ray_cfg = RunConfig.from_dict({**nemo_config.to_dict(), "cluster": {**nemo_config.cluster.model_dump(mode="json"), "ray_address": "auto"}})

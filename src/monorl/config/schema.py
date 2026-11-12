@@ -64,6 +64,17 @@ class DataConfig(_Model):
     messages_field: str | None = Field(None, description="Column holding chat messages (format=chat).")
     prompt_field: str | None = Field(None, description="Column holding the prompt/question.")
     answer_field: str | None = Field(None, description="Column holding the reference answer (optional).")
+    image_field: str | list[str] | None = Field(
+        None,
+        description=(
+            "Column(s) holding images (HF Image feature, file path/URI, bytes or base64) attached to the "
+            "prompt as image content parts. Use '<image>' in prompt_template to position them."
+        ),
+    )
+    response_field: str | None = Field(
+        None,
+        description="Column holding the target response for SFT (defaults to answer_field / the trailing assistant turn).",
+    )
     system_prompt: str | None = Field(None, description="System prompt prepended to every sample.")
     prompt_template: str | None = Field(
         None, description="Python format string applied to the prompt column, e.g. '{prompt}\\nThink step by step.'"
@@ -78,9 +89,12 @@ class DataConfig(_Model):
 
 
 class AlgorithmConfig(_Model):
-    name: Literal["grpo", "dapo", "rloo", "reinforce", "ppo"] = Field(
-        "grpo", description="Policy-gradient objective."
+    name: Literal["grpo", "dapo", "rloo", "reinforce", "ppo", "sft"] = Field(
+        "grpo",
+        description="Policy-gradient objective, or 'sft' for supervised fine-tuning on the dataset responses (no rollouts).",
     )
+    sft_label_smoothing: float = Field(0.0, ge=0.0, lt=1.0, description="Label smoothing for sft.")
+    sft_train_on_prompt: bool = Field(False, description="sft: include prompt tokens in the loss (default: response only).")
     kl_coef: float = Field(0.0, ge=0.0, description="Coefficient of the KL penalty to the reference policy (0 disables).")
     kl_estimator: Literal["k1", "k2", "k3"] = Field("k3", description="KL estimator (Schulman's k1/k2/k3).")
     clip_eps: float = Field(0.2, gt=0.0, description="PPO clipping epsilon (lower bound).")
@@ -197,6 +211,10 @@ class RunConfig(_Model):
 
     @model_validator(mode="after")
     def _check(self) -> RunConfig:
+        if self.algorithm.name == "sft":
+            if self.env.type != "single_turn":
+                raise ValueError("sft trains on dataset responses; env.type must be 'single_turn'")
+            return self
         if self.algorithm.name == "ppo" and self.trainer.backend not in PIPELINE_BACKENDS:
             raise ValueError(
                 "algorithm 'ppo' needs a critic (GAE/value loss), which only the verl pipeline backend provides; "
@@ -216,6 +234,10 @@ class RunConfig(_Model):
         if not self.rewards and self.env.type == "single_turn":
             raise ValueError("single_turn env needs at least one reward in `rewards`")
         return self
+
+    @property
+    def is_sft(self) -> bool:
+        return self.algorithm.name == "sft"
 
     # -- (de)serialisation ---------------------------------------------------------------
     @classmethod

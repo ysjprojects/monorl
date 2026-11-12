@@ -1,7 +1,16 @@
 import { api } from "../api";
 import { ErrorBox, Pill, Spinner } from "../components/ui";
 import { useAsync } from "../hooks";
-import type { Recipe } from "../types";
+import { isPlainObject } from "../defaults";
+import { recipeIsPipeline, type Recipe } from "../types";
+
+/** `config.<section>.<key>` of a partial recipe document, when it is a string. */
+function recipeStr(config: Record<string, unknown>, section: string, key: string): string | null {
+  const sec = config[section];
+  if (!isPlainObject(sec)) return null;
+  const v = sec[key];
+  return typeof v === "string" ? v : null;
+}
 
 export default function Recipes({ onPick }: { onPick: (r: Recipe) => void }) {
   const recipes = useAsync(() => api.recipes(), []);
@@ -14,18 +23,23 @@ export default function Recipes({ onPick }: { onPick: (r: Recipe) => void }) {
       {recipes.data && recipes.data.length > 0 && (
         <div className="mt-3 grid gap-3 md:grid-cols-3">
           {recipes.data.map((r) => {
-            const c = r.config;
-            const model = c.model?.name_or_path;
-            const algo = c.algorithm?.name;
+            const pipeline = recipeIsPipeline(r);
+            const base = pipeline && isPlainObject(r.config.base) ? r.config.base : r.config;
+            const stages = pipeline && Array.isArray(r.config.stages) ? r.config.stages : [];
+            const model = recipeStr(base, "model", "name_or_path");
+            const algo = recipeStr(base, "algorithm", "name");
+            const rolloutBackend = recipeStr(base, "rollout", "backend");
+            const trainerBackend = recipeStr(base, "trainer", "backend");
+            const envType = recipeStr(base, "env", "type");
             return (
               <button key={r.name} type="button" onClick={() => onPick(r)} className="rounded-md border border-slate-800 bg-slate-900 p-3 text-left hover:border-sky-600">
                 <div className="font-mono text-sm text-slate-100">{r.name}</div>
                 <div className="mt-1 line-clamp-2 text-xs text-slate-500">{r.description}</div>
                 <div className="mt-2 flex flex-wrap gap-1">
-                  {algo && <Pill tone="sky">{algo}</Pill>}
-                  {c.rollout?.backend && <Pill>{c.rollout.backend}</Pill>}
-                  {c.trainer?.backend && <Pill>{c.trainer.backend}</Pill>}
-                  {c.env?.type && c.env.type !== "single_turn" && <Pill tone="amber">{c.env.type}</Pill>}
+                  {pipeline ? <Pill tone="amber">pipeline · {stages.length} stages</Pill> : algo && <Pill tone="sky">{algo}</Pill>}
+                  {rolloutBackend && <Pill>{rolloutBackend}</Pill>}
+                  {trainerBackend && <Pill>{trainerBackend}</Pill>}
+                  {envType && envType !== "single_turn" && <Pill tone="amber">{envType}</Pill>}
                   {model && <Pill>{model.split("/").pop()}</Pill>}
                 </div>
               </button>

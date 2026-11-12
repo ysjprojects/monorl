@@ -1,4 +1,5 @@
 import { useContext, useState, type ReactNode } from "react";
+import { parse as parseYaml, stringify as toYaml } from "yaml";
 import { SchemaContext, schemaProp } from "../schema";
 import type { RunState } from "../types";
 
@@ -219,5 +220,52 @@ export function Kv({ items }: { items: [ReactNode, ReactNode][] }) {
         </div>
       ))}
     </dl>
+  );
+}
+
+/**
+ * Textarea bound to a YAML document. `shape` restricts what is accepted ("object" = mapping,
+ * "array" = sequence); an empty document maps to `empty`. Invalid text shows the parse error and
+ * is not committed.
+ */
+export function YamlEditor<T>({ value, onChange, shape, empty, rows = 6, placeholder, className = "" }: { value: T; onChange: (v: T) => void; shape: "object" | "array"; empty: T; rows?: number; placeholder?: string; className?: string }) {
+  const [text, setText] = useState<string | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  const isEmpty = value == null || (Array.isArray(value) ? value.length === 0 : typeof value === "object" && Object.keys(value as object).length === 0);
+  const shown = text ?? (isEmpty ? "" : toYaml(value));
+  return (
+    <div className={className}>
+      <textarea
+        className={`input font-mono text-xs ${err ? "border-rose-700" : ""}`}
+        rows={rows}
+        value={shown}
+        placeholder={placeholder}
+        spellCheck={false}
+        onChange={(e) => {
+          const t = e.target.value;
+          setText(t);
+          if (t.trim() === "") {
+            onChange(empty);
+            setErr(null);
+            return;
+          }
+          try {
+            const parsed: unknown = parseYaml(t);
+            const ok = shape === "array" ? Array.isArray(parsed) : !!parsed && typeof parsed === "object" && !Array.isArray(parsed);
+            if (!ok) setErr(shape === "array" ? "must be a YAML list" : "must be a YAML mapping");
+            else {
+              onChange(parsed as T);
+              setErr(null);
+            }
+          } catch (ex) {
+            setErr(ex instanceof Error ? ex.message : "invalid YAML");
+          }
+        }}
+        onBlur={() => {
+          if (!err) setText(null);
+        }}
+      />
+      {err && <div className="mt-1 text-xs text-rose-400">{err}</div>}
+    </div>
   );
 }

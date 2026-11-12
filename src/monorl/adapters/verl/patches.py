@@ -47,6 +47,14 @@ METRIC_MAP: dict[str, str] = {
     "timing_s/gen": "time/rollout",
     "timing_s/update_actor": "time/train",
 }
+# verl/trainer/sft_trainer.py (and sft_trainer_ray.py) ``train/*`` + ``val/loss`` -> contract names.
+SFT_METRIC_MAP: dict[str, str] = {
+    "train/loss": "loss/sft",
+    "train/lr": "lr",
+    "train/grad_norm": "train/grad_norm",
+    "train/global_tokens": "tokens/total",
+    "val/loss": "eval/loss",
+}
 
 
 def map_metrics(data: dict[str, Any]) -> dict[str, float]:
@@ -61,8 +69,9 @@ def map_metrics(data: dict[str, Any]) -> dict[str, float]:
             number = float(value)
         except (TypeError, ValueError):
             continue
-        if key in METRIC_MAP:
-            out[METRIC_MAP[key]] = number
+        name = METRIC_MAP.get(key) or SFT_METRIC_MAP.get(key)
+        if name is not None:
+            out[name] = number
         elif key.startswith("timing_s/"):
             out["time/" + key[len("timing_s/") :]] = number
         out.setdefault(key, number)

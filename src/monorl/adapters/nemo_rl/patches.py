@@ -29,6 +29,20 @@ VERSIONS = ">=0.3,<1"
 
 #: Environment variable naming the monorl run directory (set by the launcher / entry wrapper).
 RUN_DIR_ENV = "MONORL_RUN_DIR"
+#: ``algorithm.name`` of the run (set by the launcher); ``sft`` renames ``train/loss`` → ``loss/sft``.
+ALGORITHM_ENV = "MONORL_ALGORITHM"
+
+#: ``nemo_rl/algorithms/sft.py`` ``train/<key>`` → monorl metric name.
+SFT_TRAIN_METRICS: dict[str, str] = {
+    "loss": "loss/sft",
+    "global_valid_toks": "tokens/valid",
+    "global_valid_seqs": "sequences/valid",
+    "grad_norm": "grad_norm",
+    "lr": "lr",
+    "wd": "weight_decay",
+}
+#: ``validation/<key>`` → ``eval/*`` for SFT (``val_loss`` → ``eval/loss``).
+SFT_VALIDATION_METRICS: dict[str, str] = {"val_loss": "eval/loss"}
 
 #: ``train/<key>`` → monorl metric name (see ``docs/ARCHITECTURE.md`` metric names).
 TRAIN_METRICS: dict[str, str] = {
@@ -105,23 +119,27 @@ def phase_for(prefix: str) -> str:
     return "train"
 
 
-def translate_metrics(metrics: dict[str, Any], prefix: str | None = "") -> dict[str, float]:
+def translate_metrics(metrics: dict[str, Any], prefix: str | None = "", *, algorithm: str | None = None) -> dict[str, float]:
     """Numeric ``metrics`` logged under NeMo-RL ``prefix`` → contract-named ``{name: float}``.
 
-    Unknown keys are kept as ``nemo/<prefix>/<key>`` so nothing numeric is lost.
+    Unknown keys are kept as ``nemo/<prefix>/<key>`` so nothing numeric is lost. ``algorithm``
+    (default ``$MONORL_ALGORITHM``) selects the SFT names for ``train``/``validation`` payloads.
     """
     p = (prefix or "").strip("/")
+    sft = (algorithm or os.environ.get(ALGORITHM_ENV)) == "sft"
+    train_map = SFT_TRAIN_METRICS if sft else TRAIN_METRICS
+    validation_map = SFT_VALIDATION_METRICS if sft else VALIDATION_METRICS
     out: dict[str, float] = {}
     for key, value in metrics.items():
         number = _as_float(value)
         if number is None:
             continue
         if p == "train":
-            name = TRAIN_METRICS.get(key, f"nemo/train/{key}")
+            name = train_map.get(key, f"nemo/train/{key}")
         elif p == "timing/train":
             name = TIMING_METRICS.get(key, f"time/{key}")
         elif p == "validation":
-            name = VALIDATION_METRICS.get(key, f"eval/{key}")
+            name = validation_map.get(key, f"eval/{key}")
         elif p == "timing/validation":
             name = f"time/eval/{key}"
         elif p == "timing/setup":
@@ -208,6 +226,7 @@ PATCHES = PatchSet(
 )
 
 __all__ = [
+    "ALGORITHM_ENV",
     "DISTRIBUTION",
     "FRAMEWORK",
     "PATCHES",

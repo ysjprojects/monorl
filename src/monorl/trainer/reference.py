@@ -39,11 +39,12 @@ from typing import Any, Protocol
 import numpy as np
 import torch
 from torch import nn
-from transformers import AutoModelForCausalLM, get_scheduler
+from transformers import get_scheduler
 
 from monorl.config.schema import RunConfig
 from monorl.core.batch import TrainBatch
 from monorl.rollout.hf_engine import iter_hf_weights, load_tokenizer, resolve_device
+from monorl.rollout.media import auto_model_class, collate_media
 
 log = logging.getLogger(__name__)
 
@@ -145,10 +146,10 @@ LossFn = Callable[..., PolicyLossOutput]
 """``(logprobs, old_logprobs, advantages, response_mask, *, algorithm, ref_logprobs=None, entropy=None)``."""
 
 
-def _default_loss_fn() -> LossFn:
-    from monorl.algorithms import policy_loss
+def _default_loss_fn(algorithm: Any) -> LossFn:
+    from monorl.algorithms import select_loss_fn
 
-    return policy_loss
+    return select_loss_fn(algorithm)
 
 
 def sequence_logprobs_and_entropy(
@@ -233,7 +234,7 @@ class ReferenceTrainer:
 
     # -- construction ---------------------------------------------------------------------
     def _load_base(self) -> nn.Module:
-        model = AutoModelForCausalLM.from_pretrained(
+        model = auto_model_class(self.config).from_pretrained(
             self.config.model.name_or_path,
             dtype=self.param_dtype,
             revision=self.config.model.revision,
@@ -275,7 +276,7 @@ class ReferenceTrainer:
     @property
     def loss_fn(self) -> LossFn:
         if self._loss_fn is None:
-            self._loss_fn = _default_loss_fn()
+            self._loss_fn = _default_loss_fn(self.config.algorithm)
         return self._loss_fn
 
     # -- Trainer --------------------------------------------------------------------------
@@ -311,8 +312,13 @@ class ReferenceTrainer:
             if micro_tokens == 0:
                 continue
             with self._autocast():
-                logits = self.model(input_ids=micro.input_ids, attention_mask=micro.attention_mask, position_ids=micro.position_ids).logits
+                logits = self._forward(self.model, micro)
             logprobs, entropy = sequence_logprobs_and_entropy(logits, micro.input_ids, self.temperature, entropy=True)
+            loss_kwargs: dict[str, Any] = {}
+            if self.config.algorithm.name == "sft" and self.config.algorithm.sft_label_smoothing > 0:
+                from monorl.algorithms import mean_logprob_all_tokens
+
+                loss_kwargs["mean_logprob_all_tokens"] = mean_logprob_all_tokens(logits, self.temperature)
             del logits
             mask = micro.response_mask.float()
             logprobs = logprobs * mask
@@ -324,6 +330,7 @@ class ReferenceTrainer:
                 algorithm=self.config.algorithm,
                 ref_logprobs=micro.ref_logprobs,
                 entropy=entropy,
+                **loss_kwargs,
             )
             scaled = out.loss * weight
             if self.scaler is not None:
@@ -375,7 +382,7 @@ class ReferenceTrainer:
             for start in range(0, len(prepared), mbs):
                 micro = prepared.slice(start, start + mbs)
                 with self._autocast():
-                    logits = model(input_ids=micro.input_ids, attention_mask=micro.attention_mask, position_ids=micro.position_ids).logits
+                    logits = self._forward(model, micro)
                 lp, _ = sequence_logprobs_and_entropy(logits, micro.input_ids, self.temperature, entropy=False)
                 out[start : start + len(micro)] = lp * micro.response_mask.float()
             model.train(was_training)
@@ -487,6 +494,7 @@ class ReferenceTrainer:
     # -- internals ------------------------------------------------------------------------
     def _prepare(self, batch: TrainBatch) -> TrainBatch:
         if batch.input_ids.shape[1] > self.max_seq_len:
+            width = batch.input_ids.shape[1]
             batch = TrainBatch(
                 input_ids=batch.input_ids[:, : self.max_seq_len],
                 attention_mask=batch.attention_mask[:, : self.max_seq_len],
@@ -498,8 +506,28 @@ class ReferenceTrainer:
                 ref_logprobs=None if batch.ref_logprobs is None else batch.ref_logprobs[:, : self.max_seq_len],
                 position_ids=None if batch.position_ids is None else batch.position_ids[:, : self.max_seq_len],
                 meta=batch.meta,
+                extra={
+                    k: v[:, : self.max_seq_len] if isinstance(v, torch.Tensor) and v.ndim >= 2 and v.shape[1] == width else v
+                    for k, v in batch.extra.items()
+                },
             )
         return batch.to(self.device)
+
+    def _forward(self, model: nn.Module, micro: TrainBatch) -> torch.Tensor:
+        """Logits for one micro-batch. ``extra`` tensors (``[B, T]``-aligned, e.g.
+        ``mm_token_type_ids``) are passed as-is; ``extra["per_sequence"]`` media tensors are
+        concatenated for the micro-batch (``pixel_values``, ``image_grid_thw``, ...). Multimodal
+        batches let the model derive its own position ids (Qwen2-VL M-RoPE needs 3-D positions,
+        which the 1-D ``position_ids`` of a text batch would silently override)."""
+        kwargs: dict[str, Any] = {}
+        position_ids = micro.position_ids
+        for k, v in micro.extra.items():
+            if k == "per_sequence":
+                kwargs.update(collate_media(v))
+                position_ids = None
+            elif isinstance(v, torch.Tensor):
+                kwargs[k] = v
+        return model(input_ids=micro.input_ids, attention_mask=micro.attention_mask, position_ids=position_ids, **kwargs).logits
 
     def _autocast(self) -> Any:
         if self.autocast_dtype is None:

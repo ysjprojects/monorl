@@ -1,11 +1,17 @@
-"""``python -m monorl.adapters.verl.entry <hydra overrides>`` — verl's ``main_ppo`` with monorl patches.
+"""``python -m monorl.adapters.verl.entry [--sft] <hydra overrides>`` — verl's trainers with monorl patches.
 
-Mirrors ``verl/trainer/main_ppo.py::main`` (v0.9.1): same Hydra config (``pkg://verl.trainer.config``,
-``ppo_trainer``), same validation, same ``run_ppo``; the only difference is the ``TaskRunner``
-class. verl runs the trainer inside a Ray actor (``TaskRunnerV1``), so patches applied in this
-driver process would not reach the ``Tracking`` logger; :class:`MonorlTaskRunner` subclasses
-verl's runner and applies :data:`monorl.adapters.verl.patches.PATCHES` inside the actor before
-delegating to ``run``. The driver applies them too, for ``get_ppo_ray_runtime_env``.
+Without ``--sft`` this mirrors ``verl/trainer/main_ppo.py::main`` (v0.9.1): same Hydra config
+(``pkg://verl.trainer.config``, ``ppo_trainer``), same validation, same ``run_ppo``; the only
+difference is the ``TaskRunner`` class. verl runs the trainer inside a Ray actor (``TaskRunnerV1``),
+so patches applied in this driver process would not reach the ``Tracking`` logger;
+:class:`MonorlTaskRunner` subclasses verl's runner and applies
+:data:`monorl.adapters.verl.patches.PATCHES` inside the actor before delegating to ``run``. The
+driver applies them too, for ``get_ppo_ray_runtime_env``.
+
+With ``--sft`` it mirrors ``verl/trainer/sft_trainer_ray.py::main`` (config ``sft_trainer_engine``):
+``SFTTrainer`` runs in the driver (its ``TrainingWorker`` Ray workers only hold the engine) and
+builds ``Tracking`` there, so the driver-side patches already mirror ``train/loss`` & co. into
+``metrics.jsonl``.
 """
 
 from __future__ import annotations
@@ -24,6 +30,8 @@ from monorl.patching import apply, register_patchset
 
 CONFIG_PATH = "pkg://verl.trainer.config"
 CONFIG_NAME = "ppo_trainer"
+SFT_CONFIG_NAME = "sft_trainer_engine"
+SFT_FLAG = "--sft"
 
 
 def apply_patches() -> None:
@@ -56,6 +64,17 @@ def main(config) -> None:
     main_ppo.run_ppo(config, task_runner_class=MonorlTaskRunner)
 
 
+@hydra.main(config_path=CONFIG_PATH, config_name=SFT_CONFIG_NAME, version_base=None)
+def main_sft(config) -> None:
+    from verl.trainer import sft_trainer_ray
+
+    auto_set_device(config)
+    sft_trainer_ray.run_sft(config)
+
+
 if __name__ == "__main__":
     apply_patches()
+    if SFT_FLAG in sys.argv:
+        sys.argv.remove(SFT_FLAG)
+        sys.exit(main_sft())
     sys.exit(main())

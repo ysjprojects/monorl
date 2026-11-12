@@ -17,6 +17,14 @@ class TrainBatch:
     the response positions. ``old_logprobs``/``ref_logprobs`` are ``[B, T]`` aligned with
     ``input_ids`` (logprob of ``input_ids[:, t]`` given ``input_ids[:, :t]``), zero outside the
     response mask.
+
+    ``extra`` carries additional model inputs (multimodal processor tensors). Every value is
+    batch-aligned so :meth:`slice` stays correct: a tensor is indexed along dim 0 (e.g.
+    ``mm_token_type_ids`` ``[B, T]``), a list is indexed like ``group_ids`` (e.g.
+    ``extra["per_sequence"]``: one ``dict[str, Tensor] | None`` per sequence holding tensors whose
+    first dim is *not* the batch — ``pixel_values``, ``image_grid_thw`` — which the trainer
+    concatenates per micro-batch with :func:`monorl.rollout.media.collate_media`); anything else
+    is shared and passed through as-is.
     """
 
     input_ids: torch.Tensor
@@ -29,6 +37,7 @@ class TrainBatch:
     ref_logprobs: torch.Tensor | None = None
     position_ids: torch.Tensor | None = None
     meta: dict[str, Any] = field(default_factory=dict)
+    extra: dict[str, Any] = field(default_factory=dict)
 
     def __len__(self) -> int:
         return int(self.input_ids.shape[0])
@@ -48,6 +57,7 @@ class TrainBatch:
             ref_logprobs=mv(self.ref_logprobs),
             position_ids=mv(self.position_ids),
             meta=dict(self.meta),
+            extra={k: _move_extra(v, device) for k, v in self.extra.items()},
         )
 
     def slice(self, start: int, stop: int) -> TrainBatch:
@@ -67,8 +77,27 @@ class TrainBatch:
             ref_logprobs=sl(self.ref_logprobs),
             position_ids=sl(self.position_ids),
             meta=dict(self.meta),
+            extra={k: _slice_extra(v, start, stop) for k, v in self.extra.items()},
         )
 
     @property
     def num_response_tokens(self) -> int:
         return int(self.response_mask.sum().item())
+
+
+def _slice_extra(value: Any, start: int, stop: int) -> Any:
+    if isinstance(value, torch.Tensor):
+        return value[start:stop]
+    if isinstance(value, list):
+        return value[start:stop]
+    return value
+
+
+def _move_extra(value: Any, device: torch.device | str) -> Any:
+    if isinstance(value, torch.Tensor):
+        return value.to(device)
+    if isinstance(value, list):
+        return [_move_extra(v, device) for v in value]
+    if isinstance(value, dict):
+        return {k: _move_extra(v, device) for k, v in value.items()}
+    return value

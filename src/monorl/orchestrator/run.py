@@ -1,7 +1,8 @@
 """``monorl.orchestrator.run``: the single entrypoint every launcher (CLI, server job, tests) calls.
 
 Owns the run directory (:class:`~monorl.core.reporting.RunReporter`), signal handling and the
-dispatch between pipeline backends (trl/verl/nemo_rl own their loop) and the component loop.
+dispatch between pipeline backends (trl/verl/nemo_rl own their loop, SFT included), the SFT loop
+(``algorithm.name: sft``, no rollouts) and the component RL loop.
 """
 
 from __future__ import annotations
@@ -20,6 +21,7 @@ from monorl.core.registry import registry
 from monorl.core.reporting import CONFIG_FILE, RunReporter, list_checkpoints
 from monorl.core.types import RunResult
 from monorl.orchestrator.loop import ComponentLoop
+from monorl.orchestrator.sft import SFTLoop
 
 
 def default_run_name(config: RunConfig) -> str:
@@ -40,12 +42,14 @@ def run(config: RunConfig, run_dir: Path | None = None, *, resume: bool = False)
     config.to_yaml(reporter.run_dir / CONFIG_FILE)
     cancel = threading.Event()
     backend = config.trainer.backend
-    kind = "pipeline" if config.is_pipeline_backend else "component"
+    kind = "pipeline" if config.is_pipeline_backend else "sft" if config.is_sft else "component"
     with _signal_guard(cancel, reporter):
         reporter.set_status("running", f"starting {kind} backend {backend!r} (resume={resume})", step=0)
         try:
             if config.is_pipeline_backend:
                 result = _run_pipeline(config, reporter)
+            elif config.is_sft:
+                result = SFTLoop(config, reporter, cancel=cancel, resume=resume).run()
             else:
                 result = ComponentLoop(config, reporter, cancel=cancel, resume=resume).run()
         except KeyboardInterrupt:

@@ -13,6 +13,12 @@ Upstream references (vLLM v0.33.0):
   ``FlatLogprobs`` (``vllm/logprobs.py``) when ``flat_logprobs=True``.
 * ``vllm/v1/engine/__init__.py`` ``FINISH_REASON_STRINGS = ("stop", "length", "abort", "error",
   "repetition")``.
+* ``vllm/inputs/llm.py`` ``TokensPrompt(prompt_token_ids, multi_modal_data={"image": [PIL...]})``
+  for in-process multimodal prompts; ``vllm/engine/arg_utils.py`` ``limit_mm_per_prompt``.
+* ``vllm/entrypoints/openai/chat_completion/protocol.py`` ``ChatCompletionRequest`` (``messages``
+  with ``image_url`` parts, ``logprobs``/``top_logprobs``, ``return_token_ids``,
+  ``max_completion_tokens``) and ``ChatCompletionResponse`` (``choices[i].token_ids``,
+  ``choices[i].logprobs.content[k].logprob``, response-level ``prompt_token_ids``).
 """
 
 from __future__ import annotations
@@ -23,7 +29,15 @@ from typing import Any
 
 import torch
 
-from monorl.core.types import Completion, FinishReason, PromptInput, SamplingParams
+from monorl.core.errors import ConfigError
+from monorl.core.types import (
+    Completion,
+    FinishReason,
+    Message,
+    PromptInput,
+    SamplingParams,
+    messages_have_media,
+)
 
 #: Fully-qualified name vLLM resolves via ``resolve_obj_by_qualname`` for ``worker_extension_cls``
 #: (``vllm/v1/worker/worker_base.py`` ``WorkerWrapperBase.init_worker``).
@@ -79,6 +93,141 @@ def prompt_token_ids(tokenizer: Any, prompt: PromptInput) -> list[int]:
     from monorl.rollout.hf_engine import chat_prompt_ids
 
     return chat_prompt_ids(tokenizer, prompt)
+
+
+def is_media_prompt(prompt: PromptInput) -> bool:
+    """Chat prompt carrying image/audio/video parts (raw token prompts are always text-only)."""
+    return not is_token_prompt(prompt) and messages_have_media(prompt)  # type: ignore[arg-type]
+
+
+def encode_prompt(tokenizer: Any, processor: Any | None, prompt: PromptInput) -> tuple[list[int], list[Any] | None]:
+    """``(prompt_token_ids, images)`` for one prompt.
+
+    Text prompts tokenise as :func:`prompt_token_ids`; multimodal chats go through the model's
+    ``AutoProcessor`` chat template (``monorl.rollout.media.vlm_prompt_ids``) so the ids include
+    the media placeholder tokens vLLM expands, and the decoded images are returned alongside.
+    """
+    if not is_media_prompt(prompt):
+        return prompt_token_ids(tokenizer, prompt), None
+    if processor is None:
+        raise ConfigError(
+            "prompt carries image parts but the model has no AutoProcessor (not a vision-language model); "
+            "set data.image_field only with a VLM checkpoint"
+        )
+    from monorl.rollout.media import chat_images, vlm_prompt_ids
+
+    return vlm_prompt_ids(processor, prompt), chat_images(prompt)  # type: ignore[arg-type]
+
+
+def tokens_prompt_kwargs(ids: list[int], images: list[Any] | None) -> dict[str, Any]:
+    """Keyword arguments for ``vllm.inputs.TokensPrompt``."""
+    kwargs: dict[str, Any] = {"prompt_token_ids": ids}
+    if images:
+        kwargs["multi_modal_data"] = {"image": list(images)}
+    return kwargs
+
+
+def limit_mm_per_prompt(extra: dict[str, Any]) -> dict[str, int] | None:
+    """``rollout.extra.limit_mm_per_prompt`` (``{"image": 4}`` or a bare int for images) as the
+    ``EngineArgs.limit_mm_per_prompt`` mapping."""
+    value = extra.get("limit_mm_per_prompt")
+    if value is None:
+        return None
+    if isinstance(value, int):
+        return {"image": int(value)}
+    if isinstance(value, dict):
+        return {str(k): int(v) for k, v in value.items()}
+    raise ConfigError(f"rollout.extra.limit_mm_per_prompt must be an int or a mapping, got {value!r}")
+
+
+# -- /v1/chat/completions (server mode, multimodal prompts) -------------------------------------
+
+
+def chat_completion_messages(messages: Sequence[Message]) -> list[dict[str, Any]]:
+    """monorl chat → OpenAI ``messages``: image parts become ``image_url`` data URLs (the server
+    decodes them; vLLM accepts ``data:image/...;base64`` URLs), text parts stay ``text``."""
+    from monorl.rollout.media import image_data_url, load_image
+
+    out: list[dict[str, Any]] = []
+    for m in messages:
+        content = m.get("content", "")
+        msg: dict[str, Any] = {"role": m.get("role", "user")}
+        if isinstance(content, str):
+            msg["content"] = content
+        else:
+            parts: list[dict[str, Any]] = []
+            for part in content:
+                kind = part.get("type")
+                if kind == "text":
+                    parts.append({"type": "text", "text": str(part.get("text", ""))})
+                elif kind == "image":
+                    url = str(part.get("image", ""))
+                    if not url.startswith("data:"):
+                        url = image_data_url(load_image(url))
+                    parts.append({"type": "image_url", "image_url": {"url": url}})
+                else:
+                    raise ConfigError(f"vLLM server mode supports text and image parts, got {kind!r}")
+            msg["content"] = parts
+        for key in ("name", "tool_calls", "tool_call_id"):
+            if key in m:
+                msg[key] = m[key]
+        out.append(msg)
+    return out
+
+
+def chat_completion_kwargs(params: SamplingParams) -> dict[str, Any]:
+    """``ChatCompletionRequest`` body subset. ``logprobs=True, top_logprobs=0`` returns exactly the
+    sampled token's logprob per position; ``return_token_ids=True`` adds ``choices[i].token_ids``
+    and the response-level ``prompt_token_ids`` (the chat endpoint's logprob entries carry token
+    *strings*, so the ids must come from ``return_token_ids``)."""
+    return {
+        "n": params.n,
+        "max_completion_tokens": params.max_new_tokens,
+        "temperature": params.temperature,
+        "top_p": params.top_p,
+        "top_k": 0 if params.top_k < 0 else params.top_k,
+        "min_p": params.min_p,
+        "repetition_penalty": params.repetition_penalty,
+        "stop": list(params.stop),
+        "seed": params.seed,
+        "logprobs": bool(params.logprobs),
+        "top_logprobs": 0,
+        "return_token_ids": True,
+    }
+
+
+def completions_from_chat_response(response: dict[str, Any], n: int, *, want_logprobs: bool) -> list[Completion]:
+    """One ``ChatCompletionResponse`` → ``n`` completions ordered by ``choices[i].index``."""
+    choices = response.get("choices") or []
+    if len(choices) != n:
+        raise ValueError(f"server returned {len(choices)} chat choices, expected {n}")
+    prompt_ids = response.get("prompt_token_ids")
+    if prompt_ids is None:
+        raise ValueError("chat response lacks prompt_token_ids; request must set return_token_ids=true")
+    result: list[Completion] = []
+    for choice in sorted(choices, key=lambda c: c["index"]):
+        token_ids = choice.get("token_ids")
+        if token_ids is None:
+            raise ValueError("chat response lacks choices[].token_ids; request must set return_token_ids=true")
+        lps: list[float] | None = None
+        if want_logprobs:
+            content = (choice.get("logprobs") or {}).get("content")
+            if content is None:
+                raise ValueError("chat response lacks logprobs.content; request must set logprobs=true")
+            lps = [math.nan if e.get("logprob") is None else float(e["logprob"]) for e in content]
+            if len(lps) != len(token_ids):
+                raise ValueError(f"logprobs length {len(lps)} != token_ids length {len(token_ids)}")
+        message = choice.get("message") or {}
+        result.append(
+            Completion(
+                text=str(message.get("content") or ""),
+                token_ids=[int(t) for t in token_ids],
+                logprobs=lps,
+                finish_reason=map_finish_reason(choice.get("finish_reason")),
+                prompt_token_ids=[int(t) for t in prompt_ids],
+            )
+        )
+    return result
 
 
 def sampled_logprobs(output: Any) -> list[float] | None:

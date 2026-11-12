@@ -29,17 +29,32 @@ METRIC_MAP: dict[str, str] = {
     "epoch": "train/epoch",
 }
 
+#: ``SFTTrainer`` log keys (``trl/trainer/sft_trainer.py`` ``_metrics``) → contract names.
+SFT_METRIC_MAP: dict[str, str] = {
+    "loss": "loss/sft",
+    "mean_token_accuracy": "sft/token_accuracy",
+    "entropy": "loss/entropy",
+    "num_tokens": "tokens/total",
+    "learning_rate": "lr",
+    "grad_norm": "train/grad_norm",
+    "epoch": "train/epoch",
+}
+#: ``eval_<key>`` names that do not simply take the ``eval/`` prefix of the train mapping.
+SFT_EVAL_METRIC_MAP: dict[str, str] = {"loss": "eval/loss", "mean_token_accuracy": "eval/sft/token_accuracy"}
+
 #: TRL keys that duplicate ``reward/mean`` / ``reward/std`` for our single composite reward function.
 _IGNORED_PREFIXES = ("rewards/monorl/",)
 _IGNORED_KEYS = {"step", "total_flos", "train_runtime", "train_samples_per_second", "train_steps_per_second"}
 
 
-def map_metrics(logs: dict[str, Any]) -> dict[str, float]:
+def map_metrics(logs: dict[str, Any], *, sft: bool = False) -> dict[str, float]:
     """Rename TRL log keys to monorl names; unmapped numeric keys keep their TRL name under ``trl/``.
 
-    ``eval_`` prefixed keys land under ``eval/``. ``rewards/<fn>/mean`` becomes ``reward/<fn>``;
-    ``reward/<member>`` metrics emitted by the monorl reward wrapper pass through unchanged.
+    ``eval_`` prefixed keys land under ``eval/`` (SFT: ``eval_loss`` → ``eval/loss``).
+    ``rewards/<fn>/mean`` becomes ``reward/<fn>``; ``reward/<member>`` metrics emitted by the monorl
+    reward wrapper pass through unchanged.
     """
+    metric_map = SFT_METRIC_MAP if sft else METRIC_MAP
     out: dict[str, float] = {}
     for key, value in logs.items():
         if key in _IGNORED_KEYS or value is None:
@@ -51,15 +66,18 @@ def map_metrics(logs: dict[str, Any]) -> dict[str, float]:
         prefix = ""
         if key.startswith("eval_"):
             prefix, key = "eval/", key[len("eval_") :]
+            if sft and key in SFT_EVAL_METRIC_MAP:
+                out[SFT_EVAL_METRIC_MAP[key]] = value
+                continue
         if key.startswith(_IGNORED_PREFIXES):
             continue
-        if key in METRIC_MAP:
-            name = METRIC_MAP[key]
+        if key in metric_map:
+            name = metric_map[key]
         elif key.startswith("rewards/") and key.endswith("/mean"):
             name = "reward/" + key[len("rewards/") : -len("/mean")]
         elif key.startswith("rewards/") and key.endswith("/std"):
             name = "reward/" + key[len("rewards/") : -len("/std")] + "_std"
-        elif key.startswith(("reward/", "loss/", "policy/", "tokens/", "time/")):
+        elif key.startswith(("reward/", "loss/", "policy/", "tokens/", "time/", "sft/")):
             name = key
         else:
             name = "trl/" + key
@@ -70,18 +88,20 @@ def map_metrics(logs: dict[str, Any]) -> dict[str, float]:
 class ReporterCallback(TrainerCallback):
     """Writes ``metrics.jsonl``/``status.json`` and mirrors TRL checkpoints as ``step-<n>`` entries."""
 
-    def __init__(self, reporter: RunReporter) -> None:
+    def __init__(self, reporter: RunReporter, *, sft: bool = False, label: str = "GRPOTrainer") -> None:
         self.reporter = reporter
+        self.sft = sft
+        self.label = label
         self.last_metrics: dict[str, float] = {}
 
     def on_train_begin(self, args: TrainingArguments, state: TrainerState, control: TrainerControl, **kw: Any) -> None:
-        self.reporter.set_status("running", f"GRPOTrainer: {state.max_steps} steps", step=int(state.global_step))
+        self.reporter.set_status("running", f"{self.label}: {state.max_steps} steps", step=int(state.global_step))
 
     def on_log(self, args: TrainingArguments, state: TrainerState, control: TrainerControl, logs: dict | None = None, **kw: Any) -> None:
         if not logs:
             return
         phase = "eval" if any(k.startswith("eval_") for k in logs) else "train"
-        metrics = map_metrics(logs)
+        metrics = map_metrics(logs, sft=self.sft)
         if phase == "train":
             self.last_metrics.update(metrics)
         self.reporter.log_metrics(int(state.global_step), metrics, phase=phase)

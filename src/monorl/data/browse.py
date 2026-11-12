@@ -8,11 +8,13 @@ from __future__ import annotations
 
 import base64
 import datetime as _dt
+import io
 import posixpath
 from typing import Any
 
 from monorl.core.errors import DataError
 from monorl.data.formats import SNIFF_ROWS, infer_columns, sniff_format
+from monorl.data.media import image_extension, is_pil_image
 from monorl.data.rows import open_rows
 from monorl.data.uri import ParsedURI, filesystem_for, parse_uri
 
@@ -103,7 +105,10 @@ def preview_uri(
 
     Returns ``{"columns": {name: dtype}, "rows": [...], "inferred": sniff_format(...),
     "num_rows": int | None}``; ``num_rows`` is filled only when it is cheap (parquet metadata,
-    Hub split info, small local files already materialised).
+    Hub split info, small local files already materialised). Image values (PIL objects, HF
+    ``Image`` structs, image bytes) are rendered as ``{"__image__": true, "width", "height"}``
+    — never the bytes — and path/URI strings are passed through; ``inferred["image_fields"]``
+    lists the candidate image columns.
     """
     if limit < 1:
         raise ValueError("limit must be >= 1")
@@ -131,14 +136,49 @@ def _jsonable(value: Any) -> Any:
         return value
     if isinstance(value, str):
         return value if len(value) <= PREVIEW_MAX_STRING else value[:PREVIEW_MAX_STRING] + "…"
+    if is_pil_image(value):
+        return _image_summary(value.size)
     if isinstance(value, dict):
+        if set(value) == {"bytes", "path"}:
+            return _image_struct_summary(value)
         return {str(k): _jsonable(v) for k, v in value.items()}
     if isinstance(value, (list, tuple)):
         return [_jsonable(v) for v in value]
     if isinstance(value, (bytes, bytearray)):
+        if image_extension(bytes(value[:16])) is not None:
+            return _image_summary(_image_size(bytes(value)))
         return {"__bytes__": len(value), "base64_head": base64.b64encode(bytes(value[:48])).decode()}
     if isinstance(value, (_dt.datetime, _dt.date, _dt.time)):
         return value.isoformat()
     if hasattr(value, "tolist"):  # numpy scalars/arrays
         return _jsonable(value.tolist())
     return str(value)
+
+
+def _image_summary(size: tuple[int, int] | None) -> dict[str, Any]:
+    out: dict[str, Any] = {"__image__": True}
+    if size is not None:
+        out["width"], out["height"] = int(size[0]), int(size[1])
+    return out
+
+
+def _image_struct_summary(value: dict[str, Any]) -> Any:
+    """HF ``Image`` struct: bytes → size summary (never the bytes), path-only → the path/URI."""
+    data = value.get("bytes")
+    if data:
+        summary = _image_summary(_image_size(bytes(data)))
+        if value.get("path"):
+            summary["path"] = str(value["path"])
+        return summary
+    return str(value["path"]) if value.get("path") else None
+
+
+def _image_size(data: bytes) -> tuple[int, int] | None:
+    """Image dimensions from the header only (PIL is lazy; the pixels are never decoded)."""
+    try:
+        from PIL import Image
+
+        with Image.open(io.BytesIO(data)) as img:
+            return img.size
+    except Exception:
+        return None

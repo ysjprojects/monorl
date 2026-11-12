@@ -107,6 +107,7 @@ SDK is header-only (`envs/sdk/cpp/include/mep.hpp`) and serves the same protocol
 ```
 monorl serve   [--host --port --no-open --reload]        web UI + API
 monorl train   --config PATH [--set k.path=v ...] [--run-dir DIR] [--resume]
+monorl pipeline --config PATH [--set k.path=v ...] [--run-dir DIR] [--resume]   multi-stage: SFT → GRPO → rejection sampling → SFT → GRPO → eval
 monorl doctor  [--json]                                  system / frameworks / patches / components
 monorl bench   rollout | env | sync | plan [--config PATH ...]   size a run: tokens/s, episodes/s, sync time, placement plan
 monorl patches list | status [FRAMEWORK] | apply FRAMEWORK
@@ -153,6 +154,7 @@ configs/recipes/   example RunConfigs                      third_party/ pins.tom
 - [Patching: declaring, gating, verifying](docs/PATCHING.md)
 - [Data: URIs, S3/MinIO/R2 env vars, formats, field mapping](docs/DATA.md)
 - [Distributed: placement, Ray, weight sync, async rollouts](docs/DISTRIBUTED.md)
+- [Pipelines: SFT → RL → rejection sampling loops, stage manifest, API](docs/PIPELINES.md)
 - [Web UI](docs/WEB_UI.md)
 
 ## Containers & CI

@@ -1,0 +1,141 @@
+# DeepSeek-R1 style loop on 8 GPUs with Qwen2.5-7B: cold-start SFT on OpenR1-Math worked solutions
+# → GRPO on DAPO-Math-17k (vLLM TP=2 x DP=4 colocated, sleeps during the optimizer step, CUDA-IPC
+# weight sync) → rejection sampling (8 samples/prompt, keep verified answers, at most 2 per prompt)
+# → SFT on the accepted samples mixed with the cold-start set → GRPO → greedy eval on MATH-500.
+# `monorl pipeline --config configs/recipes/r1_sft_grpo_loop_8gpu_vllm.yaml`
+name: r1-sft-grpo-loop-qwen7b-8gpu
+base:
+  seed: 42
+  model:
+    name_or_path: Qwen/Qwen2.5-7B
+    dtype: bfloat16
+    attn_implementation: flash_attention_2
+  data:
+    uri: hf://BytedTsinghua-SIA/DAPO-Math-17k
+    split: train
+    format: prompt_answer
+    prompt_field: prompt
+    answer_field: solution
+    system_prompt: "Reason step by step inside <think></think>, then give the final answer in \\boxed{}."
+    max_prompt_tokens: 2048
+    eval_uri: hf://HuggingFaceH4/MATH-500
+    eval_split: test
+  algorithm:
+    name: grpo
+    clip_eps: 0.2
+    clip_eps_high: 0.28
+    advantage_norm: group
+    loss_agg: token
+    kl_coef: 0.0
+  rollout:
+    backend: vllm
+    group_size: 8
+    max_new_tokens: 8192
+    temperature: 1.0
+    tensor_parallel_size: 2
+    data_parallel_size: 4
+    gpu_memory_utilization: 0.55
+    max_model_len: 12288
+    enable_sleep_mode: true
+    async_steps_ahead: 1
+    extra:
+      max_parallel_episodes: 256
+  trainer:
+    backend: reference
+    learning_rate: 1.0e-6
+    prompts_per_step: 64
+    micro_batch_size: 4
+    max_steps: 300
+    precision: bf16
+    gradient_checkpointing: true
+    save_every: 25
+    max_seq_len: 12288
+  rewards:
+    - type: math_verify
+      weight: 1.0
+  env:
+    type: single_turn
+  cluster:
+    mode: ray
+    ray_address: auto
+    num_nodes: 1
+    gpus_per_node: 8
+    placement: colocated
+    weight_sync: cuda_ipc
+  logging:
+    run_root: ~/.monorl/runs
+    wandb_project: monorl-r1-loop
+    trajectories_per_step: 8
+stages:
+  # 1. cold start: SFT on long chain-of-thought solutions
+  - type: train
+    name: cold_start_sft
+    init_from: base
+    overrides:
+      algorithm:
+        name: sft
+      data:
+        uri: hf://open-r1/OpenR1-Math-220k
+        hf_config_name: default
+        prompt_field: problem
+        answer_field: answer
+        response_field: solution
+        max_prompt_tokens: 1024
+        limit: 20000
+      trainer:
+        learning_rate: 5.0e-6
+        prompts_per_step: 32
+        micro_batch_size: 2
+        max_steps: 600
+        save_every: 100
+        max_seq_len: 8192
+  # 2. GRPO from the cold-start checkpoint
+  - type: train
+    name: grpo_1
+    init_from: previous
+    overrides:
+      trainer:
+        max_steps: 300
+  # 3. rejection sampling with the RL policy: 8 samples per prompt, keep verified ones
+  - type: rejection_sample
+    name: rejection_sample
+    num_samples: 8
+    min_reward: 1.0
+    max_per_prompt: 2
+    require_finish: true
+    dedupe: true
+    max_response_tokens: 6144
+    max_prompts: 8000
+    rollout_overrides:
+      temperature: 0.7
+      extra:
+        rejection_prompts_per_step: 256
+    mix:
+      - hf://open-r1/OpenR1-Math-220k
+  # 4. SFT on the accepted samples (+ the cold-start data)
+  - type: train
+    name: sft_on_samples
+    init_from: previous
+    data_from: previous
+    overrides:
+      algorithm:
+        name: sft
+      trainer:
+        learning_rate: 3.0e-6
+        prompts_per_step: 32
+        micro_batch_size: 2
+        max_steps: 400
+        save_every: 100
+        max_seq_len: 8192
+  # 5. second GRPO round
+  - type: train
+    name: grpo_2
+    init_from: previous
+    overrides:
+      trainer:
+        max_steps: 300
+  # 6. greedy evaluation on MATH-500
+  - type: eval
+    name: eval_math500
+    rollout_overrides:
+      max_new_tokens: 8192

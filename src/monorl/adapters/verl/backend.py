@@ -27,7 +27,7 @@ from typing import Any
 import yaml
 
 from monorl.adapters.verl.compiler import compile_config, to_overrides
-from monorl.adapters.verl.data import export_datasets
+from monorl.adapters.verl.data import export_datasets, parquet_has_images
 from monorl.adapters.verl.patches import RUN_DIR_ENV
 from monorl.adapters.verl.reward import write_reward_module
 from monorl.adapters.verl.tools import write_tool_config
@@ -92,8 +92,11 @@ def final_model_path(run_dir: str | Path) -> str | None:
     dirs = checkpoint_dirs(run_dir)
     if not dirs:
         return None
-    hf = dirs[-1][1] / HF_EXPORT_SUBDIR
-    return str(hf if hf.is_dir() else dirs[-1][1])
+    last = dirs[-1][1]
+    for hf in (last / HF_EXPORT_SUBDIR, last / "huggingface"):  # PPO actor export / SFT ``hf_model`` export
+        if hf.is_dir():
+            return str(hf)
+    return str(last)
 
 
 class VerlBackend:
@@ -117,18 +120,21 @@ class VerlBackend:
         config_path = run_dir / CONFIG_FILE
         if not config_path.exists():
             config.to_yaml(config_path)
-        export_datasets(config, run_dir)
-        write_reward_module(config, run_dir, config_path=config_path)
-        if config.env.type == "tool_calling":
-            write_tool_config(config, run_dir)
-        tree = compile_config(config, run_dir)
+        paths = export_datasets(config, run_dir)
+        multimodal = parquet_has_images(paths["train"])
+        if not config.is_sft:
+            write_reward_module(config, run_dir, config_path=config_path)
+            if config.env.type == "tool_calling":
+                write_tool_config(config, run_dir)
+        tree = compile_config(config, run_dir, multimodal=multimodal)
         (run_dir / COMPILED_CONFIG_FILE).write_text(yaml.safe_dump(tree, sort_keys=False))
         overrides = to_overrides(tree)
         (run_dir / OVERRIDES_FILE).write_text("\n".join(overrides) + "\n")
         return overrides
 
-    def build_command(self, overrides: list[str]) -> list[str]:
-        return [self.python, "-m", ENTRY_MODULE, *overrides]
+    def build_command(self, overrides: list[str], *, sft: bool = False) -> list[str]:
+        """``python -m monorl.adapters.verl.entry [--sft] <overrides>``."""
+        return [self.python, "-m", ENTRY_MODULE, *(["--sft"] if sft else []), *overrides]
 
     def build_env(self, config: RunConfig, run_dir: str | Path) -> dict[str, str]:
         env = dict(os.environ)
@@ -158,7 +164,7 @@ class VerlBackend:
             raise BackendUnavailable("pipeline_backend 'verl' needs `pip install monorl[verl]` (verl>=0.9.1)")
         reporter.set_status("pending", "compiling verl config")
         overrides = self.prepare(config, run_dir)
-        cmd = self.build_command(overrides)
+        cmd = self.build_command(overrides, sft=config.is_sft)
         reporter.log("launching: " + " ".join(cmd[:3]) + f" (+{len(overrides)} overrides, see {OVERRIDES_FILE})")
 
         installed = self._install_signal_handlers()
