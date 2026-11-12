@@ -1,0 +1,23 @@
+schema_version = "1.4"
+
+[task]
+name = "monorl/hello-file"
+description = "Create a file with one fixed line."
+keywords = ["example", "files"]
+
+[metadata]
+difficulty = "easy"
+category = "files"
+
+[agent]
+timeout_sec = 300.0
+
+[verifier]
+timeout_sec = 60.0
+
+[environment]
+# A prebuilt image: no environment/ directory is needed.
+docker_image = "python:3.12-slim-bookworm"
+workdir = "/app"
+cpus = 1
+memory_mb = 512

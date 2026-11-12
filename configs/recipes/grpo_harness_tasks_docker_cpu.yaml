@@ -1,0 +1,62 @@
+# GRPO on task directories (the Harbor / Terminal-Bench task format), every episode in its own
+# Docker container, on CPU with SmolLM2-135M-Instruct. The dataset is a directory of tasks
+# (`examples/sandbox/tasks`): each brings its instruction, its image (`docker_image` or
+# `environment/Dockerfile`, built once and cached), its limits and its verifier
+# (`tests/test.sh`, copied into the container only after the agent has ended; it writes the reward
+# to /logs/verifier). The agent is `examples/sandbox/agents/shell_agent.py`, a standard-library
+# loop with one tool, a shell, mounted read-only into every container; it reaches the policy
+# through the capture gateway on the host. Needs a running Docker daemon; run from the repository
+# root (the dataset and the mount are relative paths). Point `data.uri` at any directory of Harbor
+# tasks and `env.params.command` at your own agent (docs/SANDBOX.md).
+run_name: grpo-harness-tasks-docker-cpu
+seed: 42
+model:
+  name_or_path: HuggingFaceTB/SmolLM2-135M-Instruct
+  dtype: float32
+data:
+  uri: examples/sandbox/tasks
+  max_prompt_tokens: 512
+algorithm:
+  name: grpo
+  kl_coef: 0.0
+  advantage_norm: group
+rollout:
+  backend: hf
+  group_size: 4
+  max_new_tokens: 96
+  temperature: 1.0
+  device: cpu
+  # a tool call ends the turn; the gateway parses it and answers with OpenAI `tool_calls`
+  stop: ["</tool_call>"]
+  turn_rendering: tokens
+trainer:
+  backend: reference
+  learning_rate: 2.0e-6
+  prompts_per_step: 3
+  micro_batch_size: 2
+  max_steps: 20
+  precision: fp32
+  save_every: 10
+  max_seq_len: 1536
+  device: cpu
+# the reward is the task verifier's; reward functions could be added on top
+rewards: []
+env:
+  type: harness
+  # policy calls per episode; the agent stops by itself after --max-steps
+  max_turns: 4
+  params:
+    command: ["{python}", "/opt/monorl-agents/shell_agent.py", "--max-steps", "4"]
+    # tasks that set [agent].timeout_sec use their own
+    timeout: 300
+    sandbox:
+      backend: docker
+      # the interpreter `{python}` names inside the task images
+      python: python3
+      mounts: ["examples/sandbox/agents:/opt/monorl-agents:ro"]
+      pids_limit: 256
+cluster:
+  mode: local
+logging:
+  run_root: ~/.monorl/runs
+  trajectories_per_step: 4

@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING, Any
 
 from monorl.core.interfaces import Environment, EpisodeDriver
 from monorl.core.registry import registry
-from monorl.envs.harness import HarnessEnv, make_harness_env
+from monorl.envs.harness import HarnessEnv, make_harness_env, policy_processor
 from monorl.envs.protocol import EnvSpec
 from monorl.envs.remote import RemoteEnv, make_remote_env
 from monorl.envs.single_turn import SingleTurnEnv
@@ -61,7 +61,10 @@ def _make_remote(config: RunConfig, **kwargs: Any) -> RemoteEnv:
 
 def _make_harness(config: RunConfig, **kwargs: Any) -> HarnessEnv:
     return make_harness_env(
-        config.env.params, max_turns=_max_turns_override(config), model=config.model.name_or_path
+        config.env.params,
+        max_turns=_max_turns_override(config),
+        model=config.model.name_or_path,
+        processor=lambda: policy_processor(config),
     )
 
 

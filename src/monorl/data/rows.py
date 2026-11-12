@@ -7,6 +7,8 @@ A :class:`RowSource` yields ``(row_id, row)`` pairs. Two flavours:
   shuffles and seeds.
 * :class:`HubRows` — ``datasets.load_dataset`` over a Hub repo, ``Dataset`` (materialised,
   indexable) or ``IterableDataset`` (streaming).
+* :class:`~monorl.data.tasks.TaskRows` — a local directory of task directories (the Harbor task
+  format), one row per task.
 """
 
 from __future__ import annotations
@@ -261,4 +263,10 @@ def open_rows(
 ) -> RowSource:
     if parsed.kind == "hf":
         return HubRows(parsed, split=split, config_name=config_name, streaming=streaming, load_kwargs=extra)
+    if parsed.kind == "local":
+        from monorl.data.tasks import TaskRows, find_task_dirs  # imports this module
+
+        task_dirs = find_task_dirs(parsed.path)
+        if task_dirs:  # a directory of task directories (Harbor format), one row per task
+            return TaskRows(parsed, task_dirs, skip_unsupported=bool((extra or {}).get("skip_unsupported")))
     return FileRows(parsed, streaming=streaming)

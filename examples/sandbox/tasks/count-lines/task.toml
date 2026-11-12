@@ -1,0 +1,22 @@
+schema_version = "1.4"
+
+[task]
+name = "monorl/count-lines"
+description = "Count the lines of a file that the task image ships."
+keywords = ["example", "files"]
+
+[metadata]
+difficulty = "easy"
+category = "files"
+
+[agent]
+timeout_sec = 300.0
+
+[verifier]
+timeout_sec = 60.0
+
+[environment]
+# Built once from environment/Dockerfile and reused by every episode.
+build_timeout_sec = 600.0
+cpus = 1
+memory_mb = 512

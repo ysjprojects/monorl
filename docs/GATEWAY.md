@@ -267,11 +267,14 @@ env:
 ```
 
 `host` only changes the URLs handed to the agent; without it they name the bind address
-(loopback for a gateway bound to every interface). Beyond loopback the gateway is reachable by
-everything that can reach the port: the unguessable session id (128 random bits, valid for one
-episode) is the only credential, every route except `/health` requires it, and the traffic is
-plain HTTP. Bind to the narrowest interface that works (a bridge address rather than
-`0.0.0.0`) and do not expose the port to networks you do not trust.
+(loopback for a gateway bound to every interface). With `env.params.sandbox.backend: docker` the
+harness chooses both for the platform (loopback plus `host.docker.internal` on Docker Desktop,
+every interface plus `--add-host` on Docker Engine; [`SANDBOX.md`](SANDBOX.md) §2), and
+`env.params.gateway` overrides it. Beyond loopback the gateway is reachable by everything that
+can reach the port: the unguessable session id (128 random bits, valid for one episode) is the
+only credential, every route except `/health` requires it, and the traffic is plain HTTP. Bind
+to the narrowest interface that works (a bridge address rather than `0.0.0.0`) and do not expose
+the port to networks you do not trust.
 
 ## 2. From calls to turns and threads
 
