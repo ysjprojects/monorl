@@ -8,6 +8,7 @@ from typing import Any
 
 import pytest
 import yaml
+from click import unstyle
 from typer.testing import CliRunner
 
 from monorl.cli.main import app
@@ -76,8 +77,9 @@ def test_help_lists_pipeline(runner: CliRunner) -> None:
     assert result.exit_code == 0 and "pipeline" in result.output
     result = runner.invoke(app, ["pipeline", "--help"])
     assert result.exit_code == 0
+    help_text = unstyle(result.output)  # typer styles its help when GITHUB_ACTIONS / FORCE_COLOR is set
     for flag in ("--config", "--set", "--run-dir", "--resume"):
-        assert flag in result.output
+        assert flag in help_text
 
 
 def test_pipeline_command_with_overrides(

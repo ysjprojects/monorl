@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import time
 
 import pytest
@@ -74,10 +75,19 @@ def test_memory_limit_enforced():
     assert (ok_status, out.strip()) == ("ok", "fine")
 
 
-def test_sandbox_isolation():
+def test_sandbox_isolation(monkeypatch):
+    """The program runs in a throwaway directory that is also its HOME, and sees none of the
+    caller's environment."""
+    monkeypatch.setenv("MONORL_SECRET", "hunter2")
     sandbox = Sandbox(timeout_s=10.0, memory_mb=256)
     status, _, out = sandbox.run(
-        "import os, sys\nprint(os.getcwd() != os.path.expanduser('~'), 'MONORL_SECRET' in os.environ)"
+        "import os\n"
+        "print(os.path.realpath(os.getcwd()))\n"
+        "print(os.path.realpath(os.path.expanduser('~')))\n"
+        "print('MONORL_SECRET' in os.environ)"
     )
     assert status == "ok"
-    assert out.strip() == "True False"
+    cwd, home, leaked = out.strip().splitlines()
+    assert cwd == home != os.path.realpath(os.path.expanduser("~"))
+    assert leaked == "False"
+    assert not os.path.exists(cwd)  # the working directory is gone after the run
