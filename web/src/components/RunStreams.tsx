@@ -2,11 +2,12 @@
 // `jobPath(id, stageIndex)` for a pipeline stage; the JSON routes and the SSE tail under it share
 // one shape.
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, eventsUrl, subscribeSse, type TailCursors } from "../api";
 import { fmtNum } from "../format";
 import type { MetricRow, TrajectoryRow } from "../types";
 import { MetricChart } from "./MetricChart";
+import { PhasePill, TranscriptView } from "./TranscriptView";
 import { Pill, Tabs } from "./ui";
 
 const COLORS = ["#38bdf8", "#a78bfa", "#f472b6", "#fb923c", "#34d399", "#facc15"];
@@ -205,81 +206,132 @@ function RunStreamsView({ base, terminal, chartMetrics, configYaml }: RunStreams
   );
 }
 
+/** Rows rendered at most: the newest ones matching the filters. */
+const MAX_TRAJECTORY_ROWS = 200;
+
 function TrajectoryTable({ rows }: { rows: TrajectoryRow[] }) {
+  /** Index into `rows` (append-only, so stable) of the expanded row. */
   const [open, setOpen] = useState<number | null>(null);
   const [onlyStep, setOnlyStep] = useState<number | "all">("all");
+  const [onlyPhase, setOnlyPhase] = useState("all");
   const steps = useMemo(() => [...new Set(rows.map((r) => r.step))].sort((a, b) => b - a), [rows]);
+  const phases = useMemo(() => [...new Set(rows.flatMap((r) => (r.phase ? [r.phase] : [])))], [rows]);
+  const multiPhase = phases.length > 1;
+  const phase = multiPhase ? onlyPhase : "all";
   const shown = useMemo(() => {
-    const list = onlyStep === "all" ? rows : rows.filter((r) => r.step === onlyStep);
-    return list.slice(-200).reverse();
-  }, [rows, onlyStep]);
+    const list: { row: TrajectoryRow; index: number }[] = [];
+    for (let i = rows.length - 1; i >= 0 && list.length < MAX_TRAJECTORY_ROWS; i--) {
+      const r = rows[i];
+      if ((onlyStep === "all" || r.step === onlyStep) && (phase === "all" || r.phase === phase)) list.push({ row: r, index: i });
+    }
+    return list;
+  }, [rows, onlyStep, phase]);
+  const toggle = useCallback((index: number) => setOpen((o) => (o === index ? null : index)), []);
   if (rows.length === 0) return <div className="card text-sm text-slate-500">No trajectories logged yet.</div>;
+  const columns = multiPhase ? 8 : 7;
   return (
     <div className="space-y-2">
-      <div className="flex items-center gap-2 text-xs text-slate-400">
+      <div className="flex flex-wrap items-center gap-2 text-xs text-slate-400">
         step
         <select className="input w-auto" value={String(onlyStep)} onChange={(e) => setOnlyStep(e.target.value === "all" ? "all" : Number(e.target.value))}>
-          <option value="all">all (latest 200)</option>
+          <option value="all">all (latest {MAX_TRAJECTORY_ROWS})</option>
           {steps.map((s) => (
             <option key={s} value={s}>
               {s}
             </option>
           ))}
         </select>
+        {multiPhase && (
+          <>
+            <span className="ml-2">phase</span>
+            <select className="input w-auto" aria-label="phase" value={phase} onChange={(e) => setOnlyPhase(e.target.value)}>
+              <option value="all">all</option>
+              {phases.map((p) => (
+                <option key={p} value={p}>
+                  {p}
+                </option>
+              ))}
+            </select>
+          </>
+        )}
+        <span className="ml-auto text-slate-500">click a row for the full episode</span>
       </div>
       <div className="overflow-hidden rounded-lg border border-slate-800">
         <table className="w-full table-fixed text-sm">
           <thead className="bg-slate-900 text-left text-xs uppercase tracking-wide text-slate-500">
             <tr>
-              <th className="w-14 px-3 py-2">Step</th>
-              <th className="w-[38%] px-3 py-2">Prompt</th>
+              <th className="w-16 px-3 py-2">Step</th>
+              {multiPhase && <th className="w-24 px-3 py-2">Phase</th>}
+              <th className="w-[32%] px-3 py-2">Prompt</th>
               <th className="px-3 py-2">Response</th>
+              <th className="w-16 px-3 py-2 text-right">Turns</th>
+              <th className="w-18 px-3 py-2 text-center">Solved</th>
               <th className="w-20 px-3 py-2 text-right">Reward</th>
               <th className="w-16 px-3 py-2 text-right">Tok</th>
             </tr>
           </thead>
           <tbody className="divide-y divide-slate-800">
-            {shown.map((r, i) => {
-              const key = rows.indexOf(r);
-              const expanded = open === key;
-              return (
-                <tr key={`${r.step}-${r.sample_id}-${i}`} className="cursor-pointer align-top hover:bg-slate-900/60" onClick={() => setOpen(expanded ? null : key)}>
-                  <td className="px-3 py-2 font-mono text-xs">{r.step}</td>
-                  <td className={`px-3 py-2 text-xs text-slate-300 ${expanded ? "whitespace-pre-wrap" : "truncate"}`}>{r.prompt}</td>
-                  <td className={`px-3 py-2 text-xs text-slate-200 ${expanded ? "whitespace-pre-wrap" : "truncate"}`}>
-                    {r.response}
-                    {expanded && (
-                      <div className="mt-2 space-y-1 border-t border-slate-800 pt-2 text-slate-400">
-                        {r.reference != null && (
-                          <div>
-                            <span className="text-slate-500">reference:</span> <span className="font-mono">{typeof r.reference === "string" ? r.reference : JSON.stringify(r.reference)}</span>
-                          </div>
-                        )}
-                        <div>
-                          <span className="text-slate-500">breakdown:</span>{" "}
-                          {Object.entries(r.reward_breakdown ?? {}).map(([k, v]) => (
-                            <Pill key={k}>
-                              {k}={fmtNum(v, 3)}
-                            </Pill>
-                          ))}
-                        </div>
-                        <div className="text-slate-500">
-                          group {r.group_id} · sample {r.sample_id} · {r.num_turns} turn(s)
-                        </div>
-                      </div>
-                    )}
-                  </td>
-                  <td className={`px-3 py-2 text-right font-mono text-xs ${r.reward > 0 ? "text-emerald-300" : "text-slate-400"}`}>{fmtNum(r.reward, 3)}</td>
-                  <td className="px-3 py-2 text-right font-mono text-xs text-slate-500">{r.num_response_tokens}</td>
-                </tr>
-              );
-            })}
+            {shown.map(({ row, index }) => (
+              <TrajectoryRowView key={index} row={row} index={index} expanded={open === index} showPhase={multiPhase} columns={columns} onToggle={toggle} />
+            ))}
+            {shown.length === 0 && (
+              <tr>
+                <td colSpan={columns} className="px-3 py-4 text-center text-xs text-slate-500">
+                  No trajectories match the filters.
+                </td>
+              </tr>
+            )}
           </tbody>
         </table>
       </div>
     </div>
   );
 }
+
+/**
+ * One rollout: a one-line summary and, while expanded, the episode below it. Memoised on the row
+ * object, so rows appended by the live tail re-render only the new ones.
+ */
+const TrajectoryRowView = memo(function TrajectoryRowView({ row: r, index, expanded, showPhase, columns, onToggle }: { row: TrajectoryRow; index: number; expanded: boolean; showPhase: boolean; columns: number; onToggle: (index: number) => void }) {
+  return (
+    <>
+      <tr className={`cursor-pointer align-top hover:bg-slate-900/60 ${expanded ? "bg-slate-900/60" : ""}`} aria-expanded={expanded} onClick={() => onToggle(index)}>
+        <td className="whitespace-nowrap px-3 py-2 font-mono text-xs">
+          <span className="mr-1 text-slate-600" aria-hidden>
+            {expanded ? "▾" : "▸"}
+          </span>
+          {r.step}
+        </td>
+        {showPhase && <td className="px-3 py-2 text-xs">{r.phase ? <PhasePill phase={r.phase} /> : <span className="text-slate-600">–</span>}</td>}
+        <td className="truncate px-3 py-2 text-xs text-slate-300">{r.prompt}</td>
+        <td className="truncate px-3 py-2 text-xs text-slate-200">{r.response}</td>
+        <td className="px-3 py-2 text-right font-mono text-xs text-slate-400">{r.num_turns}</td>
+        <td className="px-3 py-2 text-center text-xs">
+          {r.success === undefined ? (
+            <span className="text-slate-600">–</span>
+          ) : r.success ? (
+            <span className="text-emerald-300" title="solved: reward reached logging.success_threshold" aria-label="solved">
+              ✓
+            </span>
+          ) : (
+            <span className="text-slate-500" title="not solved" aria-label="not solved">
+              ✗
+            </span>
+          )}
+        </td>
+        <td className={`px-3 py-2 text-right font-mono text-xs ${r.reward > 0 ? "text-emerald-300" : "text-slate-400"}`}>{fmtNum(r.reward, 3)}</td>
+        <td className="px-3 py-2 text-right font-mono text-xs text-slate-500">{r.num_response_tokens}</td>
+      </tr>
+      {expanded && (
+        <tr className="bg-slate-950/40">
+          <td colSpan={columns} className="px-4 py-3">
+            <TranscriptView row={r} />
+          </td>
+        </tr>
+      )}
+    </>
+  );
+});
 
 function LogView({ lines }: { lines: string[] }) {
   const ref = useRef<HTMLPreElement>(null);

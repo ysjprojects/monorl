@@ -9,13 +9,26 @@ export type JsonDict = Record<string, JsonValue>;
 
 export type ContentPart =
   | { type: "text"; text: string }
-  | { type: "image"; image: string }
+  /** `image` is a path, URL or data URL; in saved rollouts it is `null` with a `note` when the image was left out (inline and too large, or neither a path nor a URL). */
+  | { type: "image"; image: string | null; note?: string }
   | { type: "audio"; audio: string }
   | { type: "video"; video: string };
+
+/** A tool call requested by an assistant message. */
+export interface ToolCall {
+  id?: string;
+  name: string;
+  /** Parsed arguments (an object), or the raw string when the backend kept it unparsed. */
+  arguments: JsonValue;
+}
 
 export interface Message {
   role: string;
   content: string | ContentPart[];
+  /** `tool` messages: the tool that produced the content. */
+  name?: string;
+  tool_call_id?: string;
+  tool_calls?: ToolCall[];
 }
 
 /** Text parts of a message joined (mirrors `monorl.core.types.message_text`). */
@@ -72,6 +85,19 @@ export interface DataConfig {
 export type AlgorithmName = "grpo" | "dapo" | "rloo" | "reinforce" | "ppo" | "sft";
 export const ALGORITHMS: AlgorithmName[] = ["grpo", "dapo", "rloo", "reinforce", "ppo", "sft"];
 
+/** Corrections for batches sampled by another policy than the one being updated (`algorithm.off_policy`). */
+export interface OffPolicyConfig {
+  anchor: "auto" | "behavior" | "trainer";
+  importance_weights: "none" | "token" | "sequence";
+  /** `null` = untruncated. */
+  importance_cap: number | null;
+  ratio_mask: "none" | "token" | "sequence" | "sequence_mean";
+  ratio_mask_low: number;
+  ratio_mask_high: number;
+  score_centering: boolean;
+  score_centering_top_k: number;
+}
+
 export interface AlgorithmConfig {
   name: AlgorithmName;
   sft_label_smoothing: number;
@@ -82,7 +108,7 @@ export interface AlgorithmConfig {
   clip_eps_high: number | null;
   advantage_norm: "group" | "batch" | "none";
   advantage_std_norm: boolean;
-  loss_agg: "token" | "sequence";
+  loss_agg: "token" | "sequence" | "rollout";
   entropy_coef: number;
   num_epochs: number;
   dynamic_sampling: boolean;
@@ -90,6 +116,7 @@ export interface AlgorithmConfig {
   gamma: number;
   lam: number;
   value_coef: number;
+  off_policy: OffPolicyConfig;
 }
 
 export type RolloutBackend = "hf" | "vllm" | "sglang";
@@ -109,6 +136,7 @@ export interface RolloutConfig {
   max_model_len: number | null;
   enable_sleep_mode: boolean;
   async_steps_ahead: number;
+  turn_rendering: "tokens" | "template";
   device: string | null;
   extra: JsonDict;
 }
@@ -143,8 +171,8 @@ export interface RewardSpec {
   params: JsonDict;
 }
 
-export type EnvType = "single_turn" | "tool_calling" | "remote" | "openenv" | "hermes";
-export const ENV_TYPES: EnvType[] = ["single_turn", "tool_calling", "remote", "openenv", "hermes"];
+export type EnvType = "single_turn" | "tool_calling" | "remote" | "harness" | "openenv" | "hermes";
+export const ENV_TYPES: EnvType[] = ["single_turn", "tool_calling", "remote", "harness", "openenv", "hermes"];
 
 export interface EnvConfig {
   type: EnvType | string;
@@ -172,6 +200,8 @@ export interface LoggingConfig {
   log_every: number;
   save_trajectories: boolean;
   trajectories_per_step: number;
+  save_transcripts: boolean;
+  success_threshold: number;
   wandb_project: string | null;
   tensorboard: boolean;
 }
@@ -227,6 +257,8 @@ export interface EvalStage {
   data: Partial<DataConfig> | null;
   rollout_overrides: JsonDict;
   max_prompts: number | null;
+  /** Completions per prompt; above 1 the stage samples at the rollout temperature and reports `eval/pass_at_k`. */
+  num_samples: number;
 }
 
 export type Stage = TrainStage | RejectionSampleStage | EvalStage;
@@ -333,6 +365,30 @@ export interface MetricRow {
   [metric: string]: number | string;
 }
 
+export type TrajectoryPhase = "train" | "eval" | "rejection" | "sft";
+export type FinishReason = "stop" | "length" | "tool_call" | "error";
+
+/** A tool call the environment executed for a turn (`turns[i].info.tool_calls`). */
+export interface ExecutedToolCall extends ToolCall {
+  result: JsonValue;
+}
+
+/** One policy turn of a saved rollout. */
+export interface TrajectoryTurn {
+  index: number;
+  /** Index into `TrajectoryRow.threads`. */
+  thread: number;
+  /** Position of this turn's assistant message in its thread; `null` when not recorded. */
+  message_index: number | null;
+  reward: number;
+  finish_reason: FinishReason | null;
+  prompt_tokens: number;
+  response_tokens: number;
+  /** The environment's step info. Tool-calling environments set `tool_calls` (`ExecutedToolCall[]`), `invalid_calls` and `final_answer`. */
+  info: JsonDict;
+}
+
+/** One row of `trajectories.jsonl`. The optional keys are absent on rows of older runs and of backends that do not record them. */
 export interface TrajectoryRow {
   step: number;
   sample_id: string;
@@ -344,6 +400,20 @@ export interface TrajectoryRow {
   num_turns: number;
   num_response_tokens: number;
   reference: JsonValue;
+  phase?: TrajectoryPhase;
+  done?: boolean;
+  /** Finish reason of the last turn. */
+  finish_reason?: FinishReason | null;
+  num_context_tokens?: number;
+  /** `reward >= logging.success_threshold`. */
+  success?: boolean;
+  /** Conversations of the episode: thread 0 is the one it ended in, the others are further contexts
+   * (before a compaction, a sub-agent). Omitted with `logging.save_transcripts: false`. */
+  threads?: Message[][];
+  /** Policy turns in order. Omitted with `logging.save_transcripts: false`. */
+  turns?: TrajectoryTurn[];
+  /** Episode-level details. */
+  info?: JsonDict;
 }
 
 export interface Checkpoint {

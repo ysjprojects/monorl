@@ -29,7 +29,7 @@ export function defaultRejectionStage(name = "rejection_sample"): RejectionSampl
 }
 
 export function defaultEvalStage(name = "eval"): EvalStage {
-  return { type: "eval", name, data: null, rollout_overrides: {}, max_prompts: null };
+  return { type: "eval", name, data: null, rollout_overrides: {}, max_prompts: null, num_samples: 1 };
 }
 
 export function defaultStage(type: StageType, name?: string): Stage {
@@ -94,6 +94,7 @@ export function checkPipeline(p: PipelineConfig): ValidationError[] {
       if (s.max_per_prompt < 1) errors.push({ loc: ["stages", i, "max_per_prompt"], msg: "Input should be greater than or equal to 1", type: "greater_than_equal" });
       if (s.max_per_prompt > s.num_samples) errors.push({ loc: ["stages", i, "max_per_prompt"], msg: "max_per_prompt cannot exceed num_samples", type: "value_error" });
     }
+    if (s.type === "eval" && s.num_samples < 1) errors.push({ loc: ["stages", i, "num_samples"], msg: "Input should be greater than or equal to 1", type: "greater_than_equal" });
   });
   const sameIdx = (loc: (string | number)[], i: number) => loc[0] === "stages" && loc[1] === i;
   // A train stage reading a rejection-sampled dataset should be SFT (or at least not rely on the RL rewards it drops).

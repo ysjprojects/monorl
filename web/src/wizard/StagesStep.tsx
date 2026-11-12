@@ -15,7 +15,7 @@ const STAGE_TONE: Record<StageType, "sky" | "amber" | "green"> = { train: "sky",
 const STAGE_BLURB: Record<StageType, string> = {
   train: "A full run (RL or SFT): the base config merged with overrides. Starts from the previous train stage's final export unless init_from says otherwise.",
   rejection_sample: "Samples N completions per prompt with the current policy, keeps those scoring ≥ min_reward and writes a chat jsonl for the next SFT stage.",
-  eval: "Greedy evaluation of the current policy on a dataset; logs eval/reward_mean.",
+  eval: "Evaluation of the current policy on a dataset: greedy, or several samples per prompt for pass@k. Logs eval/reward_mean and eval/success_rate.",
 };
 
 /** Field description from GET /api/config/pipeline_schema ($defs.<Stage>.properties.<field>). */
@@ -118,7 +118,7 @@ export default function StagesStep({ pipeline, setStages }: StagesStepProps) {
                     </div>
                     {s.type === "train" && <TrainEditor stage={s} index={i} pipeline={pipeline} schema={schema.data} errors={errors} onChange={(next) => update(i, next)} />}
                     {s.type === "rejection_sample" && <RejectionEditor stage={s} index={i} schema={schema.data} errors={errors} onChange={(next) => update(i, next)} />}
-                    {s.type === "eval" && <EvalEditor stage={s} schema={schema.data} onChange={(next) => update(i, next)} />}
+                    {s.type === "eval" && <EvalEditor stage={s} index={i} schema={schema.data} errors={errors} onChange={(next) => update(i, next)} />}
                   </div>
                 )}
               </li>
@@ -139,7 +139,7 @@ function stageSummary(p: PipelineConfig, s: Stage, i: number): string {
     return `${effectiveAlgorithm(p.base, s)} · init ${init}${s.data_from === "previous" ? " · data from previous stage" : ""} · ${describeOverrides(s.overrides, 3)}`;
   }
   if (s.type === "rejection_sample") return `${s.num_samples} samples/prompt · keep reward ≥ ${s.min_reward} · ≤${s.max_per_prompt}/prompt${s.mix.length ? ` · +${s.mix.length} mixed` : ""}`;
-  return `${s.data?.uri ? s.data.uri : "base eval data"}${s.max_prompts ? ` · ${s.max_prompts} prompts` : ""}`;
+  return `${s.data?.uri ? s.data.uri : "base eval data"}${s.max_prompts ? ` · ${s.max_prompts} prompts` : ""}${s.num_samples > 1 ? ` · ${s.num_samples} samples/prompt (pass@${s.num_samples})` : " · greedy"}`;
 }
 
 // ---- train -----------------------------------------------------------------------------------
@@ -274,13 +274,20 @@ function RejectionEditor({ stage: s, index: i, schema, errors, onChange }: { sta
 
 // ---- eval ------------------------------------------------------------------------------------
 
-function EvalEditor({ stage: s, schema, onChange }: { stage: EvalStage; schema: JsonSchema | null; onChange: (s: EvalStage) => void }) {
+function EvalEditor({ stage: s, index: i, schema, errors, onChange }: { stage: EvalStage; index: number; schema: JsonSchema | null; errors: ValidationError[]; onChange: (s: EvalStage) => void }) {
   return (
     <div className="space-y-3">
       <DataOverride value={s.data} onChange={(data) => onChange({ ...s, data })} description={stageDesc(schema, "eval", "data") ?? "Evaluation dataset (defaults to base data.eval_uri or data)."} />
-      <div className="grid gap-3 md:grid-cols-3">
+      <div className="grid gap-3 md:grid-cols-4">
         <Field label="Max prompts" description={stageDesc(schema, "eval", "max_prompts")}>
           <NumberInput value={s.max_prompts} onChange={(v) => onChange({ ...s, max_prompts: v })} nullable min={1} placeholder="all" />
+        </Field>
+        <Field
+          label="Samples / prompt"
+          description={stageDesc(schema, "eval", "num_samples") ?? "1 = greedy. More samples are drawn at the rollout temperature and reported as eval/pass_at_k."}
+          error={firstMsg(errorsFor(errors, i, "num_samples"))}
+        >
+          <NumberInput value={s.num_samples} onChange={(v) => onChange({ ...s, num_samples: v ?? 1 })} min={1} />
         </Field>
         <Field label="Rollout overrides (YAML)" description={stageDesc(schema, "eval", "rollout_overrides")} className="md:col-span-2">
           <YamlEditor<JsonDict> value={s.rollout_overrides} onChange={(v) => onChange({ ...s, rollout_overrides: v })} shape="object" empty={{}} rows={3} placeholder="max_new_tokens: 1024" />

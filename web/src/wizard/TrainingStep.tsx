@@ -1,7 +1,7 @@
 import type { ReactNode } from "react";
 import { Card, Field, NumberInput, Pill, Select, Toggle } from "../components/ui";
 import { PRESETS } from "../defaults";
-import { ALGORITHMS, PIPELINE_BACKENDS, ROLLOUT_BACKENDS, TRAINER_BACKENDS, type AlgorithmName } from "../types";
+import { ALGORITHMS, PIPELINE_BACKENDS, ROLLOUT_BACKENDS, TRAINER_BACKENDS, type AlgorithmConfig, type AlgorithmName, type OffPolicyConfig } from "../types";
 import { backendAvailability, type StepProps } from "./common";
 
 const ALGO_NOTES: Record<AlgorithmName, string> = {
@@ -12,6 +12,11 @@ const ALGO_NOTES: Record<AlgorithmName, string> = {
   ppo: "Clipped surrogate with a value head (GAE). Set lam / value_coef.",
   sft: "Supervised fine-tuning on the dataset responses: no rollouts, no rewards, no environment. Loss = token NLL of the response span.",
 };
+
+const LOSS_AGGS: AlgorithmConfig["loss_agg"][] = ["token", "sequence", "rollout"];
+const ANCHORS: OffPolicyConfig["anchor"][] = ["auto", "behavior", "trainer"];
+const IMPORTANCE_WEIGHTS: OffPolicyConfig["importance_weights"][] = ["none", "token", "sequence"];
+const RATIO_MASKS: OffPolicyConfig["ratio_mask"][] = ["none", "token", "sequence", "sequence_mean"];
 
 export function SftNote({ children }: { children?: ReactNode }) {
   return (
@@ -25,8 +30,13 @@ export default function TrainingStep({ config, set, patch, system }: StepProps) 
   const a = config.algorithm;
   const r = config.rollout;
   const t = config.trainer;
+  const l = config.logging;
   const pipeline = PIPELINE_BACKENDS[t.backend] === true;
   const sft = a.name === "sft";
+  const off = a.off_policy;
+  // The two rules of OffPolicyConfig._check (src/monorl/config/schema.py).
+  const corrects = off.importance_weights !== "none" || off.ratio_mask !== "none";
+  const decoupled = off.anchor === "trainer" || (off.anchor === "auto" && corrects);
   return (
     <div className="space-y-4">
       <Card title="Presets">
@@ -52,8 +62,9 @@ export default function TrainingStep({ config, set, patch, system }: StepProps) 
                 <Field path="algorithm.sft_label_smoothing" label="Label smoothing">
                   <NumberInput value={a.sft_label_smoothing} onChange={(v) => set("algorithm.sft_label_smoothing", v ?? 0)} min={0} max={0.99} step="any" />
                 </Field>
+                {/* `rollout` weighs episodes, which SFT does not have: offered only while it is the configured value. */}
                 <Field path="algorithm.loss_agg" label="Loss aggregation">
-                  <Select value={a.loss_agg} onChange={(v) => set("algorithm.loss_agg", v)} options={["token", "sequence"].map((v) => ({ value: v as typeof a.loss_agg }))} />
+                  <Select value={a.loss_agg} onChange={(v) => set("algorithm.loss_agg", v)} options={LOSS_AGGS.filter((v) => v !== "rollout" || a.loss_agg === v).map((v) => ({ value: v }))} />
                 </Field>
               </div>
               <Toggle path="algorithm.sft_train_on_prompt" checked={a.sft_train_on_prompt} onChange={(v) => set("algorithm.sft_train_on_prompt", v)} label="Train on prompt tokens" />
@@ -106,7 +117,10 @@ export default function TrainingStep({ config, set, patch, system }: StepProps) 
                   <Select value={a.advantage_norm} onChange={(v) => set("algorithm.advantage_norm", v)} options={["group", "batch", "none"].map((v) => ({ value: v as typeof a.advantage_norm }))} />
                 </Field>
                 <Field path="algorithm.loss_agg" label="Loss aggregation">
-                  <Select value={a.loss_agg} onChange={(v) => set("algorithm.loss_agg", v)} options={["token", "sequence"].map((v) => ({ value: v as typeof a.loss_agg }))} />
+                  <Select value={a.loss_agg} onChange={(v) => set("algorithm.loss_agg", v)} options={LOSS_AGGS.map((v) => ({ value: v }))} />
+                </Field>
+                <Field path="rollout.turn_rendering" label="Turn rendering">
+                  <Select value={r.turn_rendering} onChange={(v) => set("rollout.turn_rendering", v)} options={["tokens", "template"].map((v) => ({ value: v as typeof r.turn_rendering }))} />
                 </Field>
               </div>
               <div className="mt-3 space-y-2">
@@ -165,6 +179,62 @@ export default function TrainingStep({ config, set, patch, system }: StepProps) 
         </Card>
       </div>
 
+      {!sft && (
+        <Card title="Off-policy corrections">
+          <div className="mb-3 text-xs text-slate-500">
+            For batches sampled by another policy than the one being updated: rollouts generated ahead of training, engines whose weights or numerics lag. Everything is off by default.
+          </div>
+          <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+            <Field path="rollout.async_steps_ahead" label="Async steps ahead">
+              <NumberInput value={r.async_steps_ahead} onChange={(v) => set("rollout.async_steps_ahead", v ?? 0)} min={0} />
+            </Field>
+            <Field
+              path="algorithm.off_policy.anchor"
+              label="Proximal anchor"
+              error={corrects && off.anchor === "behavior" ? "Importance weights and the ratio mask compare the proximal with the behaviour policy, which are the same policy under 'behavior': use 'trainer' or 'auto'." : null}
+            >
+              <Select value={off.anchor} onChange={(v) => set("algorithm.off_policy.anchor", v)} options={ANCHORS.map((v) => ({ value: v }))} />
+            </Field>
+            <Field path="algorithm.off_policy.importance_weights" label="Importance weights">
+              <Select value={off.importance_weights} onChange={(v) => set("algorithm.off_policy.importance_weights", v)} options={IMPORTANCE_WEIGHTS.map((v) => ({ value: v }))} />
+            </Field>
+            {off.importance_weights !== "none" && (
+              <Field path="algorithm.off_policy.importance_cap" label="Importance cap">
+                <NumberInput value={off.importance_cap} onChange={(v) => set("algorithm.off_policy.importance_cap", v)} nullable min={1} step="any" placeholder="untruncated" />
+              </Field>
+            )}
+            <Field path="algorithm.off_policy.ratio_mask" label="Ratio mask">
+              <Select value={off.ratio_mask} onChange={(v) => set("algorithm.off_policy.ratio_mask", v)} options={RATIO_MASKS.map((v) => ({ value: v }))} />
+            </Field>
+            {off.ratio_mask !== "none" && (
+              <>
+                <Field path="algorithm.off_policy.ratio_mask_low" label="Ratio mask low">
+                  <NumberInput value={off.ratio_mask_low} onChange={(v) => set("algorithm.off_policy.ratio_mask_low", v ?? 0.5)} min={0} max={1} step="any" />
+                </Field>
+                <Field path="algorithm.off_policy.ratio_mask_high" label="Ratio mask high">
+                  <NumberInput value={off.ratio_mask_high} onChange={(v) => set("algorithm.off_policy.ratio_mask_high", v ?? 5)} min={1} step="any" />
+                </Field>
+              </>
+            )}
+          </div>
+          <div className="mt-3 grid items-start gap-3 lg:grid-cols-[1fr_auto]">
+            <div>
+              <Toggle path="algorithm.off_policy.score_centering" checked={off.score_centering} onChange={(v) => set("algorithm.off_policy.score_centering", v)} label="Score centering" />
+              {off.score_centering && decoupled && (
+                <div className="mt-1 text-xs text-rose-400">
+                  Score centering weighs scores by the ratio of the current to the behaviour policy: it needs the 'behavior' anchor, or 'auto' without importance weights and ratio mask.
+                </div>
+              )}
+            </div>
+            {off.score_centering && (
+              <Field path="algorithm.off_policy.score_centering_top_k" label="Score centering top-k" className="lg:w-64">
+                <NumberInput value={off.score_centering_top_k} onChange={(v) => set("algorithm.off_policy.score_centering_top_k", v ?? 128)} min={1} />
+              </Field>
+            )}
+          </div>
+        </Card>
+      )}
+
       <Card title="Backends">
         <div className="grid gap-4 md:grid-cols-2">
           {sft ? (
@@ -206,6 +276,26 @@ export default function TrainingStep({ config, set, patch, system }: StepProps) 
           </Field>
         </div>
         {!system && <div className="mt-2 text-xs text-slate-500">Availability unknown until /api/system responds.</div>}
+      </Card>
+
+      <Card title="Logging">
+        <div className="grid gap-4 md:grid-cols-2">
+          <div className="space-y-2">
+            <Toggle path="logging.save_trajectories" checked={l.save_trajectories} onChange={(v) => set("logging.save_trajectories", v)} label="Save trajectories" />
+            <Toggle path="logging.save_transcripts" checked={l.save_transcripts} onChange={(v) => set("logging.save_transcripts", v)} label="Save transcripts" />
+            {!l.save_trajectories && l.save_transcripts && <div className="text-xs text-slate-500">No effect while trajectories are not saved.</div>}
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            <Field path="logging.trajectories_per_step" label="Trajectories / step">
+              <NumberInput value={l.trajectories_per_step} onChange={(v) => set("logging.trajectories_per_step", v ?? 8)} min={0} disabled={!l.save_trajectories} />
+            </Field>
+            {!sft && (
+              <Field path="logging.success_threshold" label="Success threshold">
+                <NumberInput value={l.success_threshold} onChange={(v) => set("logging.success_threshold", v ?? 1)} step="any" />
+              </Field>
+            )}
+          </div>
+        </div>
       </Card>
     </div>
   );

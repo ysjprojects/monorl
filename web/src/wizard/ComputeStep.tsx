@@ -88,9 +88,6 @@ export default function ComputeStep({ config, set, system }: StepProps) {
           <Field path="rollout.gpu_memory_utilization" label="GPU mem util">
             <NumberInput value={r.gpu_memory_utilization} onChange={(v) => set("rollout.gpu_memory_utilization", v ?? 0.6)} min={0.05} max={1} step="any" />
           </Field>
-          <Field path="rollout.async_steps_ahead" label="Async steps ahead">
-            <NumberInput value={r.async_steps_ahead} onChange={(v) => set("rollout.async_steps_ahead", v ?? 0)} min={0} />
-          </Field>
         </div>
         <div className="mt-3 space-y-2">
           <Toggle path="rollout.enable_sleep_mode" checked={r.enable_sleep_mode} onChange={(v) => set("rollout.enable_sleep_mode", v)} label="Engine sleep mode" />
