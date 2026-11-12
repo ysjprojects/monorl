@@ -127,9 +127,11 @@ is the same as `monorl bench`.
 | Role | engine + trainer | engine | engine | trainer | pipeline | pipeline | pipeline | env | env | env |
 | Pin | transformers 5.22 | 0.33.0 | 0.5.23 | 2026.10.11 | 1.17.1 | 0.9.1 | v0.7.0 (git) | 0.3.0 | 0.19.0 | – |
 | CPU / this repo's tests | ✅ | fakes | fakes | fakes | ✅ | fakes | fakes | ✅ | ✅ | ✅ |
-| GRPO / DAPO / RLOO / REINFORCE / PPO | ✅ | ✅ | ✅ | ✅ | GRPO, DAPO knobs | GRPO, DAPO, PPO | GRPO | – | – | – |
+| RL algorithms (PPO needs verl's critic) | GRPO, DAPO, RLOO, REINFORCE | any (engine) | any (engine) | GRPO, DAPO, RLOO, REINFORCE | GRPO, DAPO | GRPO, DAPO, RLOO, REINFORCE, PPO | GRPO, DAPO, RLOO, REINFORCE | – | – | – |
+| SFT (`algorithm.name: sft`) | ✅ | n/a | n/a | ✅ | ✅ `SFTTrainer` | ✅ `sft_trainer_ray` | ✅ `run_sft.py` | – | – | – |
+| Images (VLM) | ✅ | ✅ | ✅ | text only | ✅ | ✅ | text only | text only | text only | ✅ image refs |
 | LoRA | ✅ | n/a | n/a | ✅ | ✅ | ✅ | ✅ | – | – | – |
-| Multi-turn / tools | ✅ | ✅ | ✅ (prefix cache) | ✅ | single-turn | single-turn | ✅ | ✅ | ✅ | ✅ |
+| Multi-turn / tools | ✅ | ✅ | ✅ (prefix cache) | ✅ | ✅ monorl episodes as `rollout_func` | `tool_calling` env only | ✅ env bridge (the env's reset prompt is not forwarded) | ✅ | ✅ | ✅ |
 | Colocated (sleep) | n/a | ✅ | ✅ | – | vLLM colocate | ✅ | ✅ | – | – | – |
 | Disaggregated / Ray | ✅ | ✅ | ✅ | – | vLLM server | ✅ | ✅ | – | – | – |
 | Weight sync | inprocess | cuda_ipc, broadcast, checkpoint | cuda_ipc, broadcast, checkpoint | inprocess | TRL-native | verl-native | NeMo-native | – | – | – |
@@ -162,20 +164,27 @@ configs/recipes/   example RunConfigs                      third_party/ pins.tom
 ```bash
 scripts/dev/bootstrap.sh          # .venv (uv, Python 3.12) + Go/C++ example envs → envs/bin + web/dist
 scripts/dev/smoke.sh              # CPU end-to-end: 2-step GRPO run, then `monorl serve` + API/UI probes
-docker compose up --build         # UI on :8000 + 4 `env-wordle` MEP/1 replicas (http://env-wordle:8080 inside the stack)
+docker compose up --build         # UI on :8000 + 4 `env-wordle` MEP/1 replicas (`env.params.urls: [http://monorl-env-wordle-1:8080, …-4:8080]` inside the stack)
 docker compose --profile gpu up ray-head   # Ray head on the vLLM image (NVIDIA runtime)
 ```
 
-Images: `docker/Dockerfile.{cpu,vllm,sglang,verl,envs}`. `.github/workflows/ci.yml` runs ruff +
-pytest (CPU), `go vet`/`go test`/example builds for `envs/sdk/go` and the C++ SDK build.
+Images: `docker/Dockerfile.{cpu,vllm,sglang,verl,envs}`. `.github/workflows/ci.yml` runs ruff
+(check + format) and pytest (CPU), `go vet`/`go test`/example builds for `envs/sdk/go`, the C++ SDK
+build, the web build and lint, the MEP/1 conformance tests, hadolint, and builds the `envs` and
+`cpu` images.
 
 ## Status
 
-Verified on macOS (CPU, Python 3.12): the full suite passes (`pytest tests -m "not network"` →
-797 passed); `grpo_gsm8k_smollm_cpu.yaml` trains end to end (3 steps ≈ 75 s); the Go wordle
-environment trains through `grpo_remote_env_go_wordle.yaml`; the web UI launches a run and
-streams live charts in a browser. GPU backends (vLLM, SGLang, Unsloth, verl, NeMo-RL) are
-exercised against fakes only here.
+Verified on macOS (CPU, Python 3.12): `make test` and `make lint` pass;
+`grpo_gsm8k_smollm_cpu.yaml` trains end to end (`scripts/dev/smoke.sh`); the six-stage
+`r1_sft_grpo_loop_cpu.yaml` pipeline runs from the CLI, through a SIGTERM and `--resume`; the Go
+wordle environment trains through `grpo_remote_env_go_wordle.yaml`, over stdio and over http
+against the four replicas of the compose stack; the web UI launches a pipeline on the real server
+and streams its stage table, charts, log and trajectories; `docker/Dockerfile.{cpu,envs}` build,
+`docker compose up` comes up healthy and the five example environments pass `monorl env check`
+from the container. GPU backends (vLLM, SGLang, Unsloth, verl, NeMo-RL) and their images are
+exercised against fakes only here; `pytest -m gpu` runs the real-framework tests on a CUDA
+machine.
 
 ## Development
 
