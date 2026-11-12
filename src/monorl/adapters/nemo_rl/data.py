@@ -11,9 +11,10 @@ Targets NVIDIA-NeMo/RL **v0.7.0** (``81aa43dda4765b0429cf31dab44441e4e4383911``)
   which must return a ``DatumSpec`` (``nemo_rl/data/interfaces.py``).
 * Rows also carry ``input``/``output`` so the file loads with the stock ``ResponseDataset``.
 * SFT (``algorithm.name: sft``) exports ``nemo_rl/sft_train.jsonl`` (+ ``sft_eval.jsonl``) rows of
-  ``{"messages": [prompt..., assistant response]}`` for the stock ``ResponseDataset`` (keeps a
-  ``messages`` column as-is, ``response_dataset.py``) and ``examples/run_sft.py``'s
-  ``sft_processor`` (``nemo_rl/data/processors.py``: ``get_formatted_message_log`` per turn).
+  ``{"messages": [prompt..., assistant response], "tools"?}`` for the stock ``ResponseDataset``
+  (keeps a ``messages`` column and any other as-is, ``response_dataset.py``) and
+  ``examples/run_sft.py``'s ``sft_processor`` (``nemo_rl/data/processors.py``:
+  ``get_formatted_message_log`` per turn, with the row's ``tools``).
 
 The run directory gets ``nemo_rl/train.jsonl`` (+ ``eval.jsonl``) and an importable shim module
 ``monorl_nemo_rl_data.py`` re-exporting :class:`MonorlDataset`; the launcher puts the run dir on
@@ -120,10 +121,12 @@ def export_jsonl(samples: Iterable[Sample], path: str | Path) -> int:
     return count
 
 
-def sft_sample_to_row(sample: Sample, *, response_field: str | None) -> dict[str, Any]:
-    """``{"messages": prompt + assistant response}`` (text only: NeMo-RL's ``sft_processor`` renders
-    each turn through the tokenizer chat template)."""
-    from monorl.orchestrator.sft import sft_messages
+def sft_sample_to_row(sample: Sample, *, response_field: str | None, turns: str = "last") -> dict[str, Any]:
+    """``{"messages": prompt + assistant response, "tools"?}`` (text only: NeMo-RL's
+    ``sft_processor`` renders each turn through the tokenizer chat template, with the row's
+    ``tools`` when it has any). ``turns`` is ``algorithm.sft_turns``: under ``all`` NeMo-RL trains
+    every assistant message, so a conversation that marks one as context is refused."""
+    from monorl.orchestrator.sft import require_every_turn_trained, sft_messages, sft_tools
 
     messages = sft_messages(sample, response_field=response_field)
     if messages_have_media(messages):
@@ -131,19 +134,38 @@ def sft_sample_to_row(sample: Sample, *, response_field: str | None) -> dict[str
             "trainer.backend='nemo_rl' SFT takes text-only chats; NeMo-RL v0.7.0 trains VLMs through its own "
             "datasets (examples/run_vlm_sft.py), not through monorl image parts"
         )
-    return {"messages": [{"role": str(m.get("role", "user")), "content": message_text(m)} for m in messages]}
+    if turns == "all":
+        require_every_turn_trained(messages, backend="nemo_rl", sample_id=sample.id)
+    row: dict[str, Any] = {
+        "messages": [{"role": str(m.get("role", "user")), "content": message_text(m)} for m in messages]
+    }
+    tools = sft_tools(sample)
+    if tools:
+        row["tools"] = tools
+    return row
 
 
-def export_sft_jsonl(samples: Iterable[Sample], path: str | Path, *, response_field: str | None) -> int:
-    """Write SFT chat rows; returns the row count."""
+def export_sft_jsonl(
+    samples: Iterable[Sample], path: str | Path, *, response_field: str | None, turns: str = "last"
+) -> int:
+    """Write SFT chat rows; returns the row count. NeMo-RL loads the file through
+    ``datasets.load_dataset("json")``, i.e. Arrow, so tool schemas it could not hold unchanged are
+    refused."""
+    from monorl.orchestrator.sft import tools_survive_arrow
+
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    count = 0
+    rows = [sft_sample_to_row(sample, response_field=response_field, turns=turns) for sample in samples]
+    tools = [row.get("tools") for row in rows]
+    if any(tools) and not tools_survive_arrow(tools):
+        raise ConfigError(
+            "the tool schemas of the SFT rows differ in shape, which the Arrow table NeMo-RL loads them into "
+            "cannot hold without adding null keys to them; use one set of tools per dataset"
+        )
     with open(path, "w") as f:
-        for sample in samples:
-            f.write(json.dumps(sft_sample_to_row(sample, response_field=response_field)) + "\n")
-            count += 1
-    return count
+        for row in rows:
+            f.write(json.dumps(row) + "\n")
+    return len(rows)
 
 
 @dataclass(frozen=True, slots=True)
@@ -165,18 +187,20 @@ def export_dataset(config: RunConfig, run_dir: str | Path, *, tokenizer: Any = N
     from monorl.data import open_source
 
     paths = data_paths(run_dir)
-    sft = config.is_sft
+    sft, turns = config.is_sft, config.algorithm.sft_turns
     response_field = config.data.response_field
     train = open_source(config.data, tokenizer=tokenizer, seed=config.seed)
     if sft:
-        num_train = export_sft_jsonl(train, paths.sft_train_jsonl, response_field=response_field)
+        num_train = export_sft_jsonl(train, paths.sft_train_jsonl, response_field=response_field, turns=turns)
     else:
         num_train = export_jsonl(train, paths.train_jsonl)
     num_eval = None
     if config.data.eval_uri is not None:
         evaluation = open_source(_eval_config(config.data), tokenizer=tokenizer, seed=config.seed)
         if sft:
-            num_eval = export_sft_jsonl(evaluation, paths.sft_eval_jsonl, response_field=response_field)
+            num_eval = export_sft_jsonl(
+                evaluation, paths.sft_eval_jsonl, response_field=response_field, turns=turns
+            )
         else:
             num_eval = export_jsonl(evaluation, paths.eval_jsonl)
     return ExportedData(paths=paths, num_train=num_train, num_eval=num_eval)

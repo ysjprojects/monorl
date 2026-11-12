@@ -46,7 +46,7 @@ def test_sft_config_snapshot(sft_config: RunConfig, tmp_path: Path) -> None:
         "val_at_start": False,
         "val_at_end": True,
         "seed": 42,
-        "only_unmask_final": False,
+        "only_unmask_final": True,
     }
     policy = cfg["policy"]
     assert policy["train_global_batch_size"] == tr.prompts_per_step == 2

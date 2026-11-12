@@ -16,7 +16,11 @@ Multimodal samples follow ``examples/data_preprocess/geo3k.py``: message ``conte
 with ``<image>`` placeholders (``RLHFDataset._build_messages`` turns them into image parts) and an
 ``images`` column holds ``{"bytes": png, "path": null}`` structs (the ``datasets.Image`` parquet
 encoding ``process_image`` decodes). SFT rows (``verl/utils/dataset/multiturn_sft_dataset.py``
-``MultiTurnSFTDataset``) are ``{messages: [prompt..., assistant response], images?}``.
+``MultiTurnSFTDataset``) are ``{messages: [prompt..., assistant response], images?, tools?}``.
+``MultiTurnSFTDataset`` puts the loss on every assistant message of ``messages`` and has no other
+mode: that is ``algorithm.sft_turns: all``, and ``last`` only for conversations whose prompt holds
+no assistant turn (anything else is a :class:`~monorl.core.errors.ConfigError`). ``tools`` are the
+row's tool schemas (``data.tools_key``), passed to the chat template with the first message.
 """
 
 from __future__ import annotations
@@ -31,6 +35,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from monorl.config.schema import RunConfig
+from monorl.core.errors import ConfigError
 from monorl.core.types import Message, Sample, message_text, messages_have_media
 
 DATA_SOURCE = "monorl"
@@ -44,6 +49,7 @@ TOOL_AGENT = "tool_agent"
 PARQUET_COLUMNS = ("prompt", "data_source", "reward_model", "extra_info", "agent_name")
 IMAGES_KEY = "images"
 MESSAGES_KEY = "messages"
+TOOLS_KEY = "tools"
 IMAGE_PLACEHOLDER = "<image>"
 SFT_TRAIN_FILE = "sft_train.parquet"
 SFT_VAL_FILE = "sft_val.parquet"
@@ -152,14 +158,27 @@ def sample_to_row(
 
 
 def sft_sample_to_row(
-    sample: Sample, *, response_field: str | None, multimodal: bool = False
+    sample: Sample, *, response_field: str | None, multimodal: bool = False, turns: str = "last"
 ) -> dict[str, Any]:
-    """``{messages: prompt + assistant response, images?}`` for ``MultiTurnSFTDataset``; the
-    response comes from :func:`monorl.orchestrator.sft.sft_messages`."""
-    from monorl.orchestrator.sft import sft_messages
+    """``{messages: prompt + assistant response, images?, tools?}`` for ``MultiTurnSFTDataset``;
+    the response comes from :func:`monorl.orchestrator.sft.sft_messages`. ``turns`` is
+    ``algorithm.sft_turns``: the dataset trains every assistant message, so ``last`` is refused
+    for a prompt that holds one and ``all`` for a conversation that marks one as context."""
+    from monorl.orchestrator.sft import require_every_turn_trained, sft_messages, sft_tools
 
     messages = sft_messages(sample, response_field=response_field)
+    if turns == "all":
+        require_every_turn_trained(messages, backend="verl", sample_id=sample.id)
+    elif any(m.get("role") == "assistant" for m in sample.messages):
+        raise ConfigError(
+            f"sample {sample.id!r} has assistant turns before its response: verl's MultiTurnSFTDataset puts "
+            "the loss on every assistant message and cannot train only the last one; set "
+            "algorithm.sft_turns='all' or use trainer.backend='reference'"
+        )
     row: dict[str, Any] = {MESSAGES_KEY: placeholder_messages(messages)}
+    tools = sft_tools(sample)
+    if tools:
+        row[TOOLS_KEY] = tools
     if multimodal:
         row[IMAGES_KEY] = image_structs(messages)
     return row
@@ -193,10 +212,35 @@ def rows_to_table(rows: list[dict[str, Any]], *, multimodal: bool = False) -> pa
     return pa.Table.from_pylist(rows, schema=pa.schema(fields))
 
 
+def _tools_type(rows: list[dict[str, Any]]) -> pa.DataType | None:
+    """Arrow type of the ``tools`` column, ``None`` when no row has tool schemas. The dataset hands
+    the column's value to the chat template as it is, so every row needs schemas and Arrow must
+    hold them unchanged (it fills keys a row's schema lacks with nulls)."""
+    values = [row.get(TOOLS_KEY) for row in rows]
+    if not any(values):
+        return None
+    if not all(values):
+        raise ConfigError(
+            "trainer.backend='verl' reads one tools column for the whole SFT dataset: rows with tool schemas "
+            "cannot be mixed with rows without"
+        )
+    from monorl.orchestrator.sft import tools_survive_arrow
+
+    if not tools_survive_arrow(values):
+        raise ConfigError(
+            "the tool schemas of the SFT rows differ in shape, which the parquet column verl reads cannot "
+            "hold without adding null keys to them; use one set of tools per dataset"
+        )
+    return pa.array(values).type
+
+
 def sft_rows_to_table(rows: list[dict[str, Any]], *, multimodal: bool = False) -> pa.Table:
     fields = [pa.field(MESSAGES_KEY, _MESSAGES_TYPE)]
     if multimodal:
         fields.append(pa.field(IMAGES_KEY, _IMAGES_TYPE))
+    tools_type = _tools_type(rows)
+    if tools_type is not None:
+        fields.append(pa.field(TOOLS_KEY, tools_type))
     return pa.Table.from_pylist(rows, schema=pa.schema(fields))
 
 
@@ -221,7 +265,12 @@ def write_parquet(
 
 
 def write_sft_parquet(
-    samples: Iterable[Sample], path: str | Path, *, response_field: str | None, multimodal: bool | None = None
+    samples: Iterable[Sample],
+    path: str | Path,
+    *,
+    response_field: str | None,
+    multimodal: bool | None = None,
+    turns: str = "last",
 ) -> int:
     """Write SFT ``messages`` rows for ``samples`` to ``path``; returns the number of rows written."""
     path = Path(path)
@@ -230,7 +279,10 @@ def write_sft_parquet(
     if not samples:
         raise ValueError(f"no samples to export to {path}")
     multimodal = has_media(samples) if multimodal is None else multimodal
-    rows = [sft_sample_to_row(s, response_field=response_field, multimodal=multimodal) for s in samples]
+    rows = [
+        sft_sample_to_row(s, response_field=response_field, multimodal=multimodal, turns=turns)
+        for s in samples
+    ]
     pq.write_table(sft_rows_to_table(rows, multimodal=multimodal), path)
     return len(rows)
 
@@ -248,14 +300,16 @@ def export_datasets(config: RunConfig, run_dir: str | Path) -> dict[str, Path]:
     (RL prompt rows, or SFT ``messages`` rows when ``algorithm.name == 'sft'``)."""
     from monorl.data import open_source
 
-    sft = config.is_sft
+    sft, turns = config.is_sft, config.algorithm.sft_turns
     train = list(open_source(config.data, seed=config.seed))
     multimodal = is_multimodal(config, train)
     out = {"train": sft_train_parquet_path(run_dir) if sft else train_parquet_path(run_dir)}
     agent = agent_name_for(config)
     response_field = config.data.response_field
     if sft:
-        write_sft_parquet(train, out["train"], response_field=response_field, multimodal=multimodal)
+        write_sft_parquet(
+            train, out["train"], response_field=response_field, multimodal=multimodal, turns=turns
+        )
     else:
         write_parquet(train, out["train"], agent_name=agent, multimodal=multimodal)
     if config.data.eval_uri:
@@ -265,7 +319,9 @@ def export_datasets(config: RunConfig, run_dir: str | Path) -> dict[str, Path]:
         out["val"] = sft_val_parquet_path(run_dir) if sft else val_parquet_path(run_dir)
         evaluation = list(open_source(eval_cfg, seed=config.seed))
         if sft:
-            write_sft_parquet(evaluation, out["val"], response_field=response_field, multimodal=multimodal)
+            write_sft_parquet(
+                evaluation, out["val"], response_field=response_field, multimodal=multimodal, turns=turns
+            )
         else:
             write_parquet(evaluation, out["val"], agent_name=agent, multimodal=multimodal)
     return out

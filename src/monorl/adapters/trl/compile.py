@@ -144,8 +144,13 @@ def sft_config_kwargs(
 ) -> dict[str, Any]:
     """Keyword arguments for ``SFTConfig`` (TRL 1.17 ``trl/trainer/sft_config.py``).
 
-    ``trainer.prompts_per_step`` sequences per optimizer step, ``max_length = trainer.max_seq_len``,
-    ``completion_only_loss`` unless ``algorithm.sft_train_on_prompt``. ``label_smoothing_factor`` is
+    ``trainer.prompts_per_step`` sequences per optimizer step, ``max_length = trainer.max_seq_len``.
+    ``algorithm.sft_turns`` picks TRL's loss mask: ``last`` trains the ``completion`` of a
+    prompt-completion dataset (``completion_only_loss``), ``all`` every assistant turn of a
+    ``messages`` dataset (``assistant_only_loss``: the assistant mask of a chat template with
+    ``{% generation %}`` markers, which ``SFTTrainer`` swaps in for the templates TRL knows and
+    refuses to train without); :mod:`monorl.adapters.trl.data` builds the matching columns.
+    ``algorithm.sft_train_on_prompt`` turns both masks off. ``label_smoothing_factor`` is
     left at TRL's 0 (deprecated in TRL 1.17): :func:`sft_label_smoothing` routes
     ``algorithm.sft_label_smoothing`` to the trainer subclass instead. ``trainer.extra`` overrides
     any field last.
@@ -159,8 +164,8 @@ def sft_config_kwargs(
         {
             "per_device_eval_batch_size": kwargs["per_device_train_batch_size"],
             "max_length": tr.max_seq_len,
-            "completion_only_loss": not algo.sft_train_on_prompt,
-            "assistant_only_loss": False,
+            "completion_only_loss": algo.sft_turns == "last" and not algo.sft_train_on_prompt,
+            "assistant_only_loss": algo.sft_turns == "all" and not algo.sft_train_on_prompt,
             "packing": False,
             "padding_free": False,
             "loss_type": "nll",

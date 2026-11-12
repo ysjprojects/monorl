@@ -1,9 +1,13 @@
-"""Sampling stages: rejection sampling (policy → scored completions → SFT dataset) and eval.
+"""Sampling stages: rejection sampling (policy → scored episodes → SFT dataset) and eval.
 
 Both build only a rollout engine (no trainer) from the registry, run episodes through the
 orchestrator's parallel episode runner against the configured environment, and score them with the
 configured rewards. The engine is shut down when the stage ends so the next stage can load its own
 policy.
+
+An accepted episode is written as the conversations it consisted of (:func:`conversation_rows`):
+every message in order, the policy's turns as the text it sampled, so that SFT with
+``algorithm.sft_turns: all`` trains exactly what the policy did.
 """
 
 from __future__ import annotations
@@ -21,8 +25,8 @@ from monorl.config.pipeline import EvalStage, RejectionSampleStage
 from monorl.config.schema import DataConfig, RunConfig
 from monorl.core.errors import DataError, EnvironmentError_
 from monorl.core.registry import registry
-from monorl.core.reporting import CONFIG_FILE, RunReporter
-from monorl.core.types import Message, RewardResult, Sample, SamplingParams, Trajectory
+from monorl.core.reporting import CONFIG_FILE, RunReporter, message_indices, num_context_tokens
+from monorl.core.types import Message, RewardResult, Sample, SamplingParams, Trajectory, Turn
 from monorl.orchestrator import loop as _loop
 from monorl.orchestrator.episodes import EpisodeAborted, EpisodeFailure, EpisodeSpec, run_episodes
 from monorl.orchestrator.metrics import eval_metrics, reward_metrics
@@ -222,31 +226,144 @@ class RejectionOutcome:
 
 @dataclass
 class _Accepted:
-    rows: list[dict[str, Any]] = field(default_factory=list)
+    rows: int = 0
     reward_sum: float = 0.0
 
 
-def prompt_messages(trajectory: Trajectory) -> list[Message]:
-    """The conversation up to the policy's first turn (what ``env.reset`` produced)."""
-    for i, m in enumerate(trajectory.messages):
-        if m.get("role") == "assistant":
-            return list(trajectory.messages[:i])
-    return list(trajectory.sample.messages)
-
-
 def chat_row(
-    messages: Sequence[Message], response: str, *, reference: Any, reward: float | None, source: str
+    messages: Sequence[Message],
+    response: str,
+    *,
+    reference: Any,
+    reward: float | None,
+    source: str,
+    tools: Sequence[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    return {
-        "messages": [*messages, {"role": "assistant", "content": response}],
-        "reference": reference,
-        "reward": reward,
-        "source": source,
-    }
+    """A prompt and its target response as a chat row (mixed-in samples)."""
+    row: dict[str, Any] = {"messages": [*messages, {"role": "assistant", "content": response}]}
+    if tools:
+        row["tools"] = list(tools)
+    row.update(reference=reference, reward=reward, source=source)
+    return row
+
+
+def _policy_turns(trajectory: Trajectory) -> dict[int, dict[int, Turn]]:
+    """``{thread: {message index: turn}}``: where every policy turn's assistant message sits."""
+    threads = trajectory.threads
+    placed: dict[int, dict[int, Turn]] = {}
+    for i, (turn, index) in enumerate(
+        zip(trajectory.turns, message_indices(trajectory, threads), strict=True)
+    ):
+        thread = int(turn.thread)
+        if (
+            index is None
+            or not 0 <= thread < len(threads)
+            or not 0 <= index < len(threads[thread])
+            or threads[thread][index].get("role") != "assistant"
+        ):
+            raise DataError(
+                f"episode {trajectory.group_id}: turn {i} has no assistant message in conversation {thread}"
+            )
+        placed.setdefault(thread, {})[index] = turn
+    return placed
+
+
+def _openai_tool_calls(calls: Sequence[Any]) -> list[dict[str, Any]]:
+    """monorl ``{id, name, arguments}`` tool calls in the shape chat templates and chat datasets
+    use (``{id, type: function, function: {name, arguments}}``); calls already in it are kept."""
+    out: list[dict[str, Any]] = []
+    for call in calls:
+        if isinstance(call, dict) and "function" not in call:
+            entry: dict[str, Any] = {
+                "type": "function",
+                "function": {"name": call.get("name"), "arguments": call.get("arguments", {})},
+            }
+            if call.get("id") is not None:
+                entry = {"id": call["id"], **entry}
+            out.append(entry)
+        else:
+            out.append(call)
+    return out
+
+
+def conversation_rows(trajectory: Trajectory, *, source: str = ROW_SOURCE_SAMPLED) -> list[dict[str, Any]]:
+    """The episode as chat rows: one per conversation that holds policy turns (thread 0 first).
+
+    A row's ``messages`` are the conversation up to its last policy turn; what the environment
+    appended after it is dropped. Every policy turn is ``{"role": "assistant", "content":
+    <Turn.completion.text>}``, i.e. the text as sampled, whatever parsed form (``tool_calls``) the
+    conversation stores. Tool results keep ``name`` and ``tool_call_id``. An assistant message that
+    is not one of the row's policy turns is context and carries ``"weight": 0``: a turn the
+    conversation shares with another one of the episode (written as sampled; it is trained in
+    that conversation's row) or a message the agent supplied. ``tools`` are the schemas the
+    prompts were rendered with (``Trajectory.info["tools"]``, absent without any).
+    ``sample_id``, ``thread``, ``num_turns`` (policy turns of the row), ``reward`` and
+    ``reference`` trace the row back to its episode.
+    """
+    threads = trajectory.threads
+    placed = _policy_turns(trajectory)
+    tools = trajectory.info.get("tools")
+    rows: list[dict[str, Any]] = []
+    for thread in sorted(placed):
+        own = placed[thread]
+        conversation = threads[thread]
+        messages: list[dict[str, Any]] = []
+        for i, message in enumerate(conversation[: max(own) + 1]):
+            if i in own:
+                messages.append({"role": "assistant", "content": own[i].completion.text})
+            elif message.get("role") != "assistant":
+                messages.append(dict(message))
+            else:
+                shared = next(
+                    (
+                        turns[i]
+                        for other, turns in placed.items()
+                        if other != thread and i in turns and threads[other][: i + 1] == conversation[: i + 1]
+                    ),
+                    None,
+                )
+                if shared is not None:
+                    context: dict[str, Any] = {"role": "assistant", "content": shared.completion.text}
+                else:
+                    context = dict(message)
+                    if context.get("tool_calls"):
+                        context["tool_calls"] = _openai_tool_calls(context["tool_calls"])
+                messages.append({**context, "weight": 0})
+        row: dict[str, Any] = {"messages": messages}
+        if tools:
+            row["tools"] = tools
+        row.update(
+            reference=trajectory.sample.reference,
+            reward=float(trajectory.reward),
+            source=source,
+            sample_id=trajectory.sample.id,
+            thread=thread,
+            num_turns=len(own),
+        )
+        rows.append(row)
+    return rows
+
+
+def _conversation_key(trajectory: Trajectory) -> str:
+    """Identity of an episode for ``dedupe``: its conversations, with surrounding whitespace of
+    assistant text and the ids of tool results (often random) left out."""
+    conversations = []
+    for row in conversation_rows(trajectory):
+        messages = []
+        for message in row["messages"]:
+            message = {k: v for k, v in message.items() if k != "tool_call_id"}
+            if message.get("role") == "assistant" and isinstance(message.get("content"), str):
+                message["content"] = message["content"].strip()
+            messages.append(message)
+        conversations.append(messages)
+    return json.dumps(conversations, sort_keys=True, default=str)
 
 
 def select_accepted(stage: RejectionSampleStage, trajectories: Sequence[Trajectory]) -> list[Trajectory]:
-    """Apply the stage filters per prompt: reward threshold, finish, length, dedupe, cap."""
+    """Apply the stage filters per prompt, best reward first: reward threshold, finish, length,
+    dedupe, cap. They judge the episode as a conversation: ``require_finish`` and
+    ``max_response_tokens`` look at every policy turn, ``max_context_tokens`` at the longest
+    context a turn reached, and ``dedupe`` compares whole conversations."""
     by_sample: dict[str, list[Trajectory]] = {}
     for t in trajectories:
         by_sample.setdefault(t.sample.id, []).append(t)
@@ -257,15 +374,20 @@ def select_accepted(stage: RejectionSampleStage, trajectories: Sequence[Trajecto
         for t in sorted(group, key=lambda x: -float(x.reward)):
             if taken >= stage.max_per_prompt:
                 break
-            if float(t.reward) < stage.min_reward:
+            if not t.turns or float(t.reward) < stage.min_reward:
                 continue
-            finish = t.turns[-1].completion.finish_reason if t.turns else "error"
-            if stage.require_finish and finish in ("length", "error"):
+            if stage.require_finish and any(
+                turn.completion.finish_reason in ("length", "error") for turn in t.turns
+            ):
                 continue
-            if stage.max_response_tokens is not None and t.num_response_tokens > stage.max_response_tokens:
+            if stage.max_response_tokens is not None and any(
+                len(turn.completion.token_ids) > stage.max_response_tokens for turn in t.turns
+            ):
                 continue
-            key = t.response_text.strip()
+            if stage.max_context_tokens is not None and num_context_tokens(t) > stage.max_context_tokens:
+                continue
             if stage.dedupe:
+                key = _conversation_key(t)
                 if key in seen:
                     continue
                 seen.add(key)
@@ -331,9 +453,10 @@ def run_rejection_sampling(
     output: Path | None = None,
     known_data: Sequence[DataConfig] = (),
 ) -> RejectionOutcome:
-    """Sample ``num_samples`` completions per prompt, keep the ones passing the filters, append
-    ``mix`` datasets and write ``dataset.jsonl`` (chat rows). Writes ``status.json``,
-    ``metrics.jsonl`` (one row per prompt chunk) and ``trajectories.jsonl`` in ``run_dir``."""
+    """Sample ``num_samples`` episodes per prompt, keep the ones passing the filters, append
+    ``mix`` datasets and write ``dataset.jsonl`` (chat rows, one per conversation of an accepted
+    episode). Writes ``status.json``, ``metrics.jsonl`` (one row per prompt chunk) and
+    ``trajectories.jsonl`` in ``run_dir``."""
     reporter = RunReporter(run_dir)
     config.to_yaml(reporter.run_dir / CONFIG_FILE)
     target = Path(output) if output is not None else reporter.run_dir / DATASET_FILE
@@ -374,15 +497,9 @@ def run_rejection_sampling(
                 sampler.score(trajectories)
                 kept = select_accepted(stage, trajectories)
                 for t in kept:
-                    row = chat_row(
-                        prompt_messages(t),
-                        t.response_text,
-                        reference=t.sample.reference,
-                        reward=float(t.reward),
-                        source=ROW_SOURCE_SAMPLED,
-                    )
-                    out.write(json.dumps(row, default=str) + "\n")
-                    accepted.rows.append(row)
+                    for row in conversation_rows(t):
+                        out.write(json.dumps(row, default=str) + "\n")
+                        accepted.rows += 1
                     accepted.reward_sum += float(t.reward)
                 outcome.sampled += len(trajectories)
                 outcome.accepted += len(kept)
@@ -417,7 +534,7 @@ def run_rejection_sampling(
             reporter.set_status("cancelled", f"cancelled after chunk {outcome.steps}", step=outcome.steps)
             return outcome
         os.replace(tmp, target)
-        outcome.rows = outcome.accepted + outcome.mixed
+        outcome.rows = accepted.rows + outcome.mixed
         outcome.reward_mean = accepted.reward_sum / outcome.accepted if outcome.accepted else 0.0
         if outcome.rows == 0:
             raise DataError(
@@ -457,7 +574,12 @@ def _append_mix(out: Any, sampler: PolicySampler, data: DataConfig) -> int:
         if response is None:
             continue
         row = chat_row(
-            sample.messages, response, reference=sample.reference, reward=None, source=ROW_SOURCE_MIX
+            sample.messages,
+            response,
+            reference=sample.reference,
+            reward=None,
+            source=ROW_SOURCE_MIX,
+            tools=sample.metadata.get("tools"),
         )
         out.write(json.dumps(row, default=str) + "\n")
         added += 1
@@ -557,9 +679,9 @@ __all__ = [
     "PolicySampler",
     "RejectionOutcome",
     "chat_row",
+    "conversation_rows",
     "eval_data_config",
     "mix_data_config",
-    "prompt_messages",
     "run_eval",
     "run_rejection_sampling",
     "sample_response",

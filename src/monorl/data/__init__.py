@@ -41,6 +41,8 @@ def open_source(
     * ``image_field`` column(s) → ``{"type": "image", "image": <path|uri>}`` parts on the user
       turn (``'<image>'`` in ``prompt_template`` positions them; default before the text); chat
       rows with OpenAI-style parts are normalised the same way (:mod:`monorl.data.media`)
+    * ``tools_field`` (default: a chat dataset's ``tools`` column holding schemas) →
+      ``metadata["tools"]``, the tool schemas the row's prompts are rendered with
     * ``#### answer`` extraction into ``Sample.reference`` (raw under ``metadata["answer_raw"]``);
       the SFT target under ``metadata["response"]`` (``response_field`` → ``answer_field`` →
       trailing assistant turn, else ``None``)

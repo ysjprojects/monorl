@@ -32,6 +32,7 @@ from monorl.adapters.verl.data import (
     MESSAGES_KEY,
     PROMPT_KEY,
     TOOL_AGENT,
+    TOOLS_KEY,
     sft_train_parquet_path,
     sft_val_parquet_path,
     train_parquet_path,
@@ -387,6 +388,11 @@ def compile_sft_config(
     never end before ``trainer.total_training_steps`` (the trainer returns at the last step).
     ``checkpoint.save_contents`` adds ``hf_model`` so every ``global_step_<n>/huggingface`` is a
     loadable export (the run's ``final/`` hand-off).
+
+    ``algorithm.sft_turns`` has no key here: ``MultiTurnSFTDataset`` always puts the loss on every
+    assistant message of a row (``all``), which equals ``last`` for a single assistant turn; the
+    data export (:func:`monorl.adapters.verl.data.sft_sample_to_row`) refuses ``last`` for other
+    rows. ``data.tools_key`` names the column the export writes a row's tool schemas to.
     """
     run_dir = Path(run_dir).expanduser().resolve()
     trainer, model, cluster, data, logging = (
@@ -408,6 +414,7 @@ def compile_sft_config(
             "train_files": str(sft_train_parquet_path(run_dir)),
             "val_files": str(sft_val_parquet_path(run_dir)) if data.eval_uri else None,
             "messages_key": MESSAGES_KEY,
+            "tools_key": TOOLS_KEY,
             "max_length": trainer.max_seq_len,
             "truncation": "right",
             "train_batch_size": trainer.prompts_per_step,

@@ -11,12 +11,13 @@ Stage kinds:
 * ``train`` — a full run (RL or SFT) whose config is the base merged with ``overrides``. The
   policy starts from the previous train stage's ``final/`` export (``init_from: previous``), the
   base model (``base``), or an explicit path. ``data_from: previous`` points ``data.uri`` at the
-  dataset written by the preceding ``rejection_sample`` stage.
-* ``rejection_sample`` — samples ``num_samples`` completions per prompt with the current policy,
-  scores them with the configured rewards, keeps completions with reward >= ``min_reward``
+  dataset written by the preceding ``rejection_sample`` stage; an SFT stage then trains every
+  policy turn of those conversations (``algorithm.sft_turns: all``).
+* ``rejection_sample`` — samples ``num_samples`` episodes per prompt with the current policy,
+  scores them with the configured rewards, keeps episodes with reward >= ``min_reward``
   (at most ``max_per_prompt`` per prompt, optionally deduplicated / length-filtered), optionally
-  mixes in extra SFT datasets, and writes a chat-format jsonl (prompt + chosen response) for the
-  next SFT stage.
+  mixes in extra SFT datasets, and writes a chat-format jsonl (the conversations of the kept
+  episodes: prompt, policy turns as sampled, tool results) for the next SFT stage.
 * ``eval`` — evaluation of the current policy on a dataset: greedy by default, or ``num_samples``
   sampled completions per prompt (adds ``eval/pass_at_k``); logs ``eval/reward_mean`` and the
   other ``eval/*`` metrics.
@@ -51,7 +52,10 @@ class TrainStage(_Model):
     )
     data_from: Literal["previous", "config"] = Field(
         "config",
-        description="'previous' uses the dataset written by the preceding rejection_sample stage as data.uri.",
+        description=(
+            "'previous' uses the dataset written by the preceding rejection_sample stage as data.uri; an "
+            "SFT stage then trains every policy turn of its conversations (algorithm.sft_turns: all)."
+        ),
     )
 
 
@@ -61,16 +65,26 @@ class RejectionSampleStage(_Model):
     data: DataConfig | None = Field(
         None, description="Prompts to sample from (defaults to the base data config)."
     )
-    num_samples: int = Field(4, ge=1, description="Completions sampled per prompt.")
-    min_reward: float = Field(1.0, description="Keep completions whose total reward is >= this value.")
-    max_per_prompt: int = Field(
-        1, ge=1, description="Keep at most this many accepted completions per prompt."
-    )
+    num_samples: int = Field(4, ge=1, description="Episodes sampled per prompt.")
+    min_reward: float = Field(1.0, description="Keep episodes whose total reward is >= this value.")
+    max_per_prompt: int = Field(1, ge=1, description="Keep at most this many accepted episodes per prompt.")
     max_response_tokens: int | None = Field(
-        None, ge=1, description="Drop accepted completions longer than this."
+        None, ge=1, description="Drop episodes in which a policy turn is longer than this many tokens."
     )
-    require_finish: bool = Field(True, description="Drop completions truncated by max_new_tokens.")
-    dedupe: bool = Field(True, description="Drop duplicate responses for the same prompt.")
+    max_context_tokens: int | None = Field(
+        None,
+        ge=1,
+        description=(
+            "Drop episodes whose context (prompt plus completion of their longest turn) exceeds this many "
+            "tokens, e.g. the trainer.max_seq_len of the SFT stage that follows."
+        ),
+    )
+    require_finish: bool = Field(
+        True, description="Drop episodes in which a policy turn was cut off by the token limit or failed."
+    )
+    dedupe: bool = Field(
+        True, description="Drop episodes whose conversation repeats one already kept for the same prompt."
+    )
     mix: list[str] = Field(
         default_factory=list, description="Extra chat/prompt_answer dataset URIs appended to the output."
     )

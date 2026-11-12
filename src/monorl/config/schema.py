@@ -77,6 +77,13 @@ class DataConfig(_Model):
         None,
         description="Column holding the target response for SFT (defaults to answer_field / the trailing assistant turn).",
     )
+    tools_field: str | None = Field(
+        None,
+        description=(
+            "Column holding the tool schemas (a list of OpenAI-style function schemas, or its JSON string) a "
+            "chat row's prompts are rendered with. Default: a 'tools' column of a chat dataset when it holds one."
+        ),
+    )
     system_prompt: str | None = Field(None, description="System prompt prepended to every sample.")
     prompt_template: str | None = Field(
         None,
@@ -170,6 +177,14 @@ class AlgorithmConfig(_Model):
     sft_label_smoothing: float = Field(0.0, ge=0.0, lt=1.0, description="Label smoothing for sft.")
     sft_train_on_prompt: bool = Field(
         False, description="sft: include prompt tokens in the loss (default: response only)."
+    )
+    sft_turns: Literal["last", "all"] = Field(
+        "last",
+        description=(
+            "sft: assistant turns of a conversation that carry the loss. 'last': only the final one, earlier "
+            "turns are context. 'all': every assistant turn (multi-turn and tool-using conversations), except "
+            "those a row marks with 'weight': 0."
+        ),
     )
     kl_coef: float = Field(
         0.0, ge=0.0, description="Coefficient of the KL penalty to the reference policy (0 disables)."

@@ -1,0 +1,89 @@
+# Distil a tool-using policy into itself on CPU (rejection-sampling fine-tuning) with
+# Qwen2.5-0.5B-Instruct, GSM8K and the built-in calculator tool: sample 4 multi-turn episodes per
+# problem in the `tool_calling` environment → keep the solved ones (exact match on the final
+# answer, every turn finished) → SFT on those episodes as they happened (each row of
+# dataset.jsonl is a whole conversation: prompt, the tool calls exactly as the policy wrote them,
+# the tool results, the final answer; `data_from: previous` makes the SFT stage train every policy
+# turn, `algorithm.sft_turns: all`, and render the prompts with the same tool schemas) → greedy
+# eval on the test split. `monorl pipeline --config configs/recipes/distill_tool_calling_cpu.yaml`.
+name: distill-tool-calling-qwen-cpu
+base:
+  seed: 42
+  model:
+    name_or_path: Qwen/Qwen2.5-0.5B-Instruct
+    dtype: float32
+    lora:
+      enabled: true
+      r: 16
+      alpha: 32
+  data:
+    uri: hf://openai/gsm8k
+    hf_config_name: main
+    split: train
+    format: prompt_answer
+    prompt_field: question
+    answer_field: answer
+    max_prompt_tokens: 512
+    limit: 64
+    eval_uri: hf://openai/gsm8k
+    eval_split: test
+  algorithm:
+    name: grpo          # only the SFT stage trains; sampling and eval stages ignore the algorithm
+  rollout:
+    backend: hf
+    group_size: 2
+    max_new_tokens: 192
+    temperature: 1.0
+    device: cpu
+  trainer:
+    backend: reference
+    learning_rate: 1.0e-4
+    prompts_per_step: 4
+    micro_batch_size: 2
+    max_steps: 20
+    precision: fp32
+    save_every: 10
+    max_seq_len: 1024   # also the context budget of an episode: nothing sampled is cut in training
+    device: cpu
+  rewards:
+    - type: exact_match
+      weight: 1.0
+      params:
+        extract: last_number
+        scope: last
+  env:
+    type: tool_calling
+    max_turns: 4
+    params:
+      tools: [calculator]
+      # the chat template already lists the tool schemas, so the prompt only says how to work
+      system_prompt: "Solve the problem. Use the calculator tool for the arithmetic, then state the final numeric answer."
+  cluster:
+    mode: local
+  logging:
+    run_root: ~/.monorl/runs
+    trajectories_per_step: 4
+stages:
+  # 1. sample tool-using episodes with the base policy; keep the solved ones
+  - type: rejection_sample
+    name: sample_episodes
+    num_samples: 4
+    min_reward: 1.0
+    max_per_prompt: 1
+    require_finish: true
+    dedupe: true
+    max_prompts: 32
+    rollout_overrides:
+      temperature: 0.8
+  # 2. SFT on the accepted conversations (all policy turns; tool results are context)
+  - type: train
+    name: sft_on_episodes
+    init_from: base
+    data_from: previous
+    overrides:
+      algorithm:
+        name: sft
+  # 3. greedy evaluation in the same environment on the GSM8K test split
+  - type: eval
+    name: eval
+    max_prompts: 16

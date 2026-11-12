@@ -2,10 +2,19 @@
 ``TrainBatch`` → trainer → checkpoints. No rollout engine, rewards or environments are built.
 
 Every sample is encoded as ``messages + {"role": "assistant", "content": response}`` with the
-trainer tokenizer's chat template. The response span is found by token-exact prefix chaining
-(the ``add_generation_prompt=True`` rendering of the prompt must be a prefix of the full chat);
-when the template breaks that invariant the response is tokenised on its own and appended, which
-is counted under ``tokens/prefix_mismatch``. Batches are deterministic in ``(seed, step)`` through
+trainer tokenizer's chat template (and the row's tool schemas, ``metadata["tools"]``, when it has
+any). ``algorithm.sft_turns`` picks the assistant turns that carry the loss: ``last`` (the final
+one) or ``all`` (every assistant message not marked ``"weight": 0``); everything else is context.
+
+A turn's loss span is found by token-exact prefix chaining: the ``add_generation_prompt=True``
+rendering of the chat before the turn must be a prefix of the rendering that ends with the turn,
+and the remainder is the span. Several turns share one sequence as long as each turn's prompt
+starts with the sequence built so far, i.e. the template renders the earlier turns the same way
+once more messages follow. Where it does not (a template that rewrites history), the turn starts
+a sequence of its own, with the earlier turns as context only; where the prompt is not a prefix of
+the closed turn at all, the turn's text is tokenised on its own and appended. Either way every
+trained turn is a loss span in exactly one sequence, and the conversation counts under
+``tokens/prefix_mismatch``. Batches are deterministic in ``(seed, step)`` through
 :class:`~monorl.orchestrator.sampler.PromptSampler`, so resume only needs the step counter.
 """
 
@@ -18,20 +27,21 @@ import shutil
 import threading
 import time
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import torch
 
 from monorl.core.batch import TrainBatch
-from monorl.core.errors import DataError
+from monorl.core.errors import ConfigError, DataError
 from monorl.core.registry import registry
 from monorl.core.reporting import list_checkpoints
 from monorl.core.types import Completion, Message, RunResult, Sample, Trajectory, Turn, message_text
 from monorl.orchestrator.loop import _checkpoint_complete
 from monorl.orchestrator.sampler import PromptSampler
 from monorl.orchestrator.sinks import MetricSinks
+from monorl.rollout.render import render_chat
 
 if TYPE_CHECKING:
     from monorl.config.schema import DataConfig, RunConfig
@@ -72,27 +82,99 @@ def sft_messages(sample: Sample, response_field: str | None = None) -> list[Mess
     return [*sample.messages, {"role": "assistant", "content": sft_response(sample, response_field)}]
 
 
+def sft_tools(sample: Sample) -> list[dict[str, Any]] | None:
+    """Tool schemas the sample's prompts are rendered with (``metadata["tools"]``, set by the data
+    layer from the row's tools column), or ``None``."""
+    return sample.metadata.get("tools") or None
+
+
+def is_context_turn(message: Message) -> bool:
+    """An assistant message a row excludes from training with ``"weight": 0`` (the OpenAI
+    fine-tuning convention): it is context under ``algorithm.sft_turns: all``."""
+    weight = message.get("weight")  # type: ignore[typeddict-item]
+    return message.get("role") == "assistant" and weight is not None and float(weight) == 0.0
+
+
+def trained_turns(messages: Sequence[Message], turns: str = "last") -> list[int]:
+    """Indices of the assistant messages of ``messages`` that carry the loss: the final message
+    (``last``), or every assistant message not marked ``"weight": 0`` plus the final one (``all``)."""
+    if turns not in ("last", "all"):
+        raise ValueError(f"unknown sft_turns {turns!r}; expected 'last' or 'all'")
+    if not messages or messages[-1].get("role") != "assistant":
+        raise DataError("SFT examples must end with an assistant message")
+    last = len(messages) - 1
+    if turns == "last":
+        return [last]
+    return [
+        i
+        for i, m in enumerate(messages)
+        if m.get("role") == "assistant" and (i == last or not is_context_turn(m))
+    ]
+
+
+def require_every_turn_trained(messages: Sequence[Message], *, backend: str, sample_id: str) -> None:
+    """For pipeline backends whose own mechanism puts the loss on every assistant message of a
+    conversation: fail on a conversation that marks one as context."""
+    if any(is_context_turn(m) for m in messages[:-1]):
+        raise ConfigError(
+            f"sample {sample_id!r} marks an assistant turn as context ('weight': 0), which trainer.backend="
+            f"{backend!r} cannot honour: its SFT loss covers every assistant turn of a conversation; use "
+            "trainer.backend='reference' or drop the weights"
+        )
+
+
+def tools_survive_arrow(tools: Sequence[Any]) -> bool:
+    """Whether per-row tool schemas (``None`` for a row without) read back unchanged from an Arrow
+    column. Arrow gives all rows one struct type and fills the keys a row's schemas lack with
+    nulls, which would reach the chat template; pipeline backends that load their SFT rows through
+    Arrow check this before exporting a ``tools`` column."""
+    import pyarrow as pa
+
+    values = list(tools)
+    try:
+        return pa.array(values).to_pylist() == values
+    except (pa.ArrowInvalid, pa.ArrowTypeError):
+        return False
+
+
 # -- encoding ---------------------------------------------------------------------------------
 
 
 @dataclass(slots=True)
+class LossSpan:
+    """Token range ``[start, end)`` of one trained assistant turn in a sequence (clipped to the
+    sequence when ``max_seq_len`` cut it; ``start == end`` when nothing of the turn is left)."""
+
+    message_index: int
+    start: int
+    end: int
+
+
+@dataclass(slots=True)
 class EncodedExample:
+    """One training sequence of a conversation."""
+
     input_ids: list[int]
     response_mask: list[int]
     prompt_len: int
+    """Tokens before the first loss span (before truncation)."""
     prefix_mismatch: bool
+    """A turn of this sequence was tokenised on its own instead of taken from the template."""
     truncated: bool
+    spans: list[LossSpan] = field(default_factory=list)
+    truncated_turns: int = 0
+    """Trained turns that lost tokens to ``max_seq_len``."""
 
     @property
     def response_ids(self) -> list[int]:
         return [t for t, m in zip(self.input_ids, self.response_mask, strict=True) if m]
 
 
-def _render(tokenizer: Any, messages: Sequence[Message], *, add_generation_prompt: bool) -> str:
+def _render(
+    tokenizer: Any, messages: Sequence[Message], *, add_generation_prompt: bool, tools: Any = None
+) -> str:
     if getattr(tokenizer, "chat_template", None):
-        return tokenizer.apply_chat_template(
-            list(messages), add_generation_prompt=add_generation_prompt, tokenize=False
-        )
+        return render_chat(tokenizer, messages, tools, add_generation_prompt=add_generation_prompt)
     text = "\n".join(message_text(m) for m in messages)
     return text + "\n" if add_generation_prompt else text
 
@@ -101,49 +183,105 @@ def _ids(tokenizer: Any, text: str) -> list[int]:
     return [int(t) for t in tokenizer(text, add_special_tokens=False)["input_ids"]]
 
 
+def encode_sft_conversation(
+    tokenizer: Any,
+    messages: Sequence[Message],
+    *,
+    turns: str = "last",
+    tools: Sequence[dict[str, Any]] | None = None,
+    train_on_prompt: bool = False,
+    max_seq_len: int | None = None,
+) -> list[EncodedExample]:
+    """Training sequences for a chat whose last message is an assistant turn (module docstring).
+
+    For every trained turn (:func:`trained_turns`) the chat before it is rendered with
+    ``add_generation_prompt=True`` exactly like a rollout prompt, and the chat up to and including
+    it without one; ``tools`` go through the chat template in both. When the prompt ids are a
+    token-exact prefix of the closed ids the remainder is the turn's loss span; otherwise the
+    turn's text (plus EOS) is tokenised alone and appended to the prompt ids
+    (``prefix_mismatch=True``). A turn extends the current sequence when its prompt starts with
+    it and opens a new one otherwise, so the result is one sequence wherever the template allows.
+    ``train_on_prompt`` marks every position that has a prediction (all but the first token);
+    ``max_seq_len`` truncates from the right.
+    """
+    tools = list(tools) if tools else None
+    sequences: list[tuple[list[int], list[LossSpan], bool]] = []
+    ids: list[int] | None = None
+    spans: list[LossSpan] = []
+    mismatch = False
+    for index in trained_turns(messages, turns):
+        prompt_ids = _ids(
+            tokenizer, _render(tokenizer, messages[:index], add_generation_prompt=True, tools=tools)
+        )
+        closed_ids = _ids(
+            tokenizer, _render(tokenizer, messages[: index + 1], add_generation_prompt=False, tools=tools)
+        )
+        exact = closed_ids[: len(prompt_ids)] == prompt_ids and len(closed_ids) > len(prompt_ids)
+        if not exact:
+            response_ids = _ids(tokenizer, message_text(messages[index]))
+            eos = getattr(tokenizer, "eos_token_id", None)
+            if eos is not None and (not response_ids or response_ids[-1] != int(eos)):
+                response_ids.append(int(eos))
+            closed_ids = prompt_ids + response_ids
+        if ids is None or prompt_ids[: len(ids)] != ids:
+            if ids is not None:
+                sequences.append((ids, spans, mismatch))
+            spans, mismatch = [], False
+        ids = closed_ids
+        spans.append(LossSpan(message_index=index, start=len(prompt_ids), end=len(closed_ids)))
+        mismatch = mismatch or not exact
+    assert ids is not None  # trained_turns never returns an empty list
+    sequences.append((ids, spans, mismatch))
+
+    examples: list[EncodedExample] = []
+    for full_ids, full_spans, fallback in sequences:
+        if train_on_prompt:
+            mask = [0] + [1] * (len(full_ids) - 1)
+        else:
+            mask = [0] * len(full_ids)
+            for span in full_spans:
+                mask[span.start : span.end] = [1] * (span.end - span.start)
+        limit = len(full_ids)
+        truncated = max_seq_len is not None and limit > max_seq_len
+        if truncated:
+            limit = int(max_seq_len)  # type: ignore[arg-type]
+            full_ids, mask = full_ids[:limit], mask[:limit]
+        examples.append(
+            EncodedExample(
+                input_ids=full_ids,
+                response_mask=mask,
+                prompt_len=full_spans[0].start,
+                prefix_mismatch=fallback,
+                truncated=truncated,
+                spans=[
+                    LossSpan(message_index=s.message_index, start=min(s.start, limit), end=min(s.end, limit))
+                    for s in full_spans
+                ],
+                truncated_turns=sum(1 for s in full_spans if s.end > limit),
+            )
+        )
+    return examples
+
+
 def encode_sft_example(
     tokenizer: Any,
     messages: Sequence[Message],
     *,
+    tools: Sequence[dict[str, Any]] | None = None,
     train_on_prompt: bool = False,
     max_seq_len: int | None = None,
 ) -> EncodedExample:
-    """Token ids and loss mask for a chat whose last message is the assistant target.
-
-    The prompt (everything before the final assistant turn) is rendered with
-    ``add_generation_prompt=True`` exactly like rollout prompts; the full chat is rendered without
-    a generation prompt. When the prompt ids are a token-exact prefix of the full ids the
-    remainder is the response span; otherwise the response text (plus EOS) is tokenised alone and
-    appended to the prompt ids (``prefix_mismatch=True``). ``train_on_prompt`` marks every
-    position that has a prediction (all but the first token); ``max_seq_len`` truncates from the
-    right.
-    """
-    if not messages or messages[-1].get("role") != "assistant":
-        raise DataError("SFT examples must end with an assistant message")
-    prompt_ids = _ids(tokenizer, _render(tokenizer, messages[:-1], add_generation_prompt=True))
-    full_ids = _ids(tokenizer, _render(tokenizer, messages, add_generation_prompt=False))
-    mismatch = full_ids[: len(prompt_ids)] != prompt_ids or len(full_ids) <= len(prompt_ids)
-    if mismatch:
-        response_ids = _ids(tokenizer, message_text(messages[-1]))
-        eos = getattr(tokenizer, "eos_token_id", None)
-        if eos is not None and (not response_ids or response_ids[-1] != int(eos)):
-            response_ids.append(int(eos))
-        full_ids = prompt_ids + response_ids
-    prompt_len = len(prompt_ids)
-    if train_on_prompt:
-        mask = [0] + [1] * (len(full_ids) - 1)
-    else:
-        mask = [0] * prompt_len + [1] * (len(full_ids) - prompt_len)
-    truncated = False
-    if max_seq_len is not None and len(full_ids) > max_seq_len:
-        full_ids, mask, truncated = full_ids[:max_seq_len], mask[:max_seq_len], True
-    return EncodedExample(
-        input_ids=full_ids,
-        response_mask=mask,
-        prompt_len=prompt_len,
-        prefix_mismatch=mismatch,
-        truncated=truncated,
+    """Token ids and loss mask for a chat whose last message is the assistant target
+    (``sft_turns: last``: one sequence, the final turn is the response span)."""
+    (example,) = encode_sft_conversation(
+        tokenizer,
+        messages,
+        turns="last",
+        tools=tools,
+        train_on_prompt=train_on_prompt,
+        max_seq_len=max_seq_len,
     )
+    return example
 
 
 def build_sft_batch(
@@ -153,7 +291,11 @@ def build_sft_batch(
     group_ids: Sequence[str],
     meta: dict[str, Any] | None = None,
 ) -> tuple[TrainBatch, dict[str, float]]:
-    """Right-padded :class:`TrainBatch` (zero advantages/rewards) plus ``tokens/*`` statistics."""
+    """Right-padded :class:`TrainBatch` (zero advantages/rewards) plus ``tokens/*`` statistics.
+
+    ``tokens/sequences`` is the row count, ``sft/turns`` the assistant turns that carry the loss,
+    ``tokens/truncated`` the sequences cut at ``max_seq_len`` and ``tokens/truncated_turns`` the
+    trained turns that lost tokens to it."""
     if not examples:
         raise ValueError("cannot build a batch from zero examples")
     batch_size = len(examples)
@@ -184,6 +326,9 @@ def build_sft_batch(
         "tokens/seq_mean": float(attention_mask.sum(dim=-1).to(torch.float32).mean().item()),
         "tokens/prefix_mismatch": float(sum(1 for e in examples if e.prefix_mismatch)),
         "tokens/truncated": float(sum(1 for e in examples if e.truncated)),
+        "tokens/truncated_turns": float(sum(e.truncated_turns for e in examples)),
+        "tokens/sequences": float(batch_size),
+        "sft/turns": float(sum(len(e.spans) for e in examples)),
     }
     return batch, stats
 
@@ -203,6 +348,7 @@ class SFTLoop:
         self._eval_samples: list[Sample] | None = None
         self._sinks: MetricSinks | None = None
         self.trainer: Trainer | None = None
+        self._truncation_logged = False
 
     # -- lifecycle ------------------------------------------------------------------------
     def run(self) -> RunResult:
@@ -257,7 +403,14 @@ class SFTLoop:
         self.max_seq_len = int(getattr(self.trainer, "max_seq_len", None) or config.trainer.max_seq_len)
         reporter.log(f"sft: trainer backend {config.trainer.backend!r}, max_seq_len={self.max_seq_len}")
 
-        self.samples = list(_open_source()(config.data, tokenizer=tokenizer, seed=seed))
+        source = _open_source()(config.data, tokenizer=tokenizer, seed=seed)
+        self.samples = list(source)
+        dropped = int(getattr(getattr(source, "mapper", None), "dropped", 0) or 0)
+        if dropped:
+            reporter.log(
+                f"data: dropped {dropped} samples whose prompt exceeds data.max_prompt_tokens="
+                f"{config.data.max_prompt_tokens}"
+            )
         if not self.samples:
             raise DataError(f"no usable samples in {config.data.uri}")
         self.sampler = PromptSampler(
@@ -266,7 +419,10 @@ class SFTLoop:
             seed=seed,
             shuffle=config.data.shuffle,
         )
-        reporter.log(f"data: {len(self.samples)} samples from {config.data.uri}")
+        reporter.log(
+            f"data: {len(self.samples)} samples from {config.data.uri} "
+            f"(loss on {config.algorithm.sft_turns} assistant turn(s))"
+        )
         self._sinks = MetricSinks(config, reporter.run_dir, reporter)
 
     def _teardown(self) -> None:
@@ -336,42 +492,68 @@ class SFTLoop:
     def _encode(
         self, samples: Sequence[Sample], step: int
     ) -> tuple[TrainBatch, dict[str, float], list[Trajectory]]:
+        """One or more training sequences per sample (:func:`encode_sft_conversation`); the rows
+        of a sample share its group id. ``tokens/prefix_mismatch`` counts the samples that are not
+        one token-exact sequence."""
         config = self.config
         examples: list[EncodedExample] = []
+        group_ids: list[str] = []
+        sample_ids: list[str] = []
         trajectories: list[Trajectory] = []
+        mismatched = 0
         for i, sample in enumerate(samples):
             messages = sft_messages(sample, config.data.response_field)
-            example = encode_sft_example(
+            encoded = encode_sft_conversation(
                 self.tokenizer,
                 messages,
+                turns=config.algorithm.sft_turns,
+                tools=sft_tools(sample),
                 train_on_prompt=config.algorithm.sft_train_on_prompt,
                 max_seq_len=self.max_seq_len,
             )
-            examples.append(example)
-            response_ids = example.input_ids[example.prompt_len :]
-            completion = Completion(
-                text=message_text(messages[-1]), token_ids=response_ids, finish_reason="stop"
-            )
+            group_id = f"s{step}-p{i}"
+            examples.extend(encoded)
+            group_ids.extend([group_id] * len(encoded))
+            sample_ids.extend([sample.id] * len(encoded))
+            mismatched += len(encoded) > 1 or any(e.prefix_mismatch for e in encoded)
             trajectories.append(
                 Trajectory(
                     sample=sample,
-                    group_id=f"s{step}-p{i}",
+                    group_id=group_id,
                     messages=messages,
                     turns=[
-                        Turn(prompt_token_ids=example.input_ids[: example.prompt_len], completion=completion)
+                        Turn(
+                            prompt_token_ids=example.input_ids[: span.start],
+                            completion=Completion(
+                                text=message_text(messages[span.message_index]),
+                                token_ids=example.input_ids[span.start : span.end],
+                                finish_reason="stop",
+                            ),
+                            message_index=span.message_index,
+                        )
+                        for example in encoded
+                        for span in example.spans
                     ],
                 )
             )
         batch, stats = build_sft_batch(
             examples,
             pad_token_id=self.pad_token_id,
-            group_ids=[t.group_id for t in trajectories],
-            meta={"step": step, "sample_ids": [s.id for s in samples]},
+            group_ids=group_ids,
+            meta={"step": step, "sample_ids": sample_ids},
         )
+        stats["tokens/prefix_mismatch"] = float(mismatched)
         if batch.num_response_tokens == 0:
             raise DataError(
                 f"step {step}: no response tokens left after truncation to max_seq_len={self.max_seq_len}; "
                 "raise trainer.max_seq_len or data.max_prompt_tokens"
+            )
+        if stats["tokens/truncated"] and not self._truncation_logged:
+            self._truncation_logged = True
+            self.reporter.log(
+                f"step {step}: {int(stats['tokens/truncated'])} sequence(s) exceed trainer.max_seq_len="
+                f"{self.max_seq_len} and were cut from the right ({int(stats['tokens/truncated_turns'])} "
+                "assistant turn(s) lost loss tokens); see tokens/truncated and tokens/truncated_turns"
             )
         return batch, stats, trajectories
 

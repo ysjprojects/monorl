@@ -526,6 +526,9 @@ def compile_sft_config(config: RunConfig, run_dir: str | Path) -> dict[str, Any]
     ``max_num_epochs = max_steps`` so the step bound always governs (upstream trains
     ``min(max_num_epochs * len(dataloader), max_num_steps)`` steps); validation every
     ``trainer.eval_every`` steps on ``data.eval_uri`` (``val_loss`` → ``eval/loss``).
+    ``algorithm.sft_turns`` is ``sft.only_unmask_final`` (``nemo_rl/data/llm_message_utils.py``
+    ``add_loss_mask_to_message_log``): ``last`` unmasks only the final message of a conversation,
+    ``all`` every assistant message.
     """
     _check_supported(config)
     run_dir = Path(run_dir).expanduser().resolve()
@@ -550,7 +553,7 @@ def compile_sft_config(config: RunConfig, run_dir: str | Path) -> dict[str, Any]
         "val_at_start": False,
         "val_at_end": eval_enabled,
         "seed": config.seed,
-        "only_unmask_final": False,
+        "only_unmask_final": config.algorithm.sft_turns == "last",
     }
     data: dict[str, Any] = {
         "max_input_seq_length": tr.max_seq_len,

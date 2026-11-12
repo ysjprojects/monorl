@@ -6,8 +6,8 @@
 :class:`StreamingSource` (lazy, ``len()`` raises :class:`DataError` unless the count is known).
 
 Pipeline per row: layout → messages (+ ``system_prompt``, ``prompt_template``) → image parts
-(``image_field``) → reference (``#### answer`` extraction) + SFT ``metadata["response"]`` →
-``max_prompt_tokens`` filter (text tokens only) → shuffle/limit.
+(``image_field``) → tool schemas (``tools_field``) → reference (``#### answer`` extraction) + SFT
+``metadata["response"]`` → ``max_prompt_tokens`` filter (text tokens only) → shuffle/limit.
 """
 
 from __future__ import annotations
@@ -38,7 +38,10 @@ _SHAREGPT_ROLES = {
     "function": "tool",
     "observation": "tool",
 }
-_MESSAGE_KEYS = ("role", "content", "tool_calls", "tool_call_id", "name")
+_MESSAGE_KEYS = ("role", "content", "tool_calls", "tool_call_id", "name", "weight")
+TOOLS_COLUMN = "tools"
+"""Column a chat dataset keeps its tool schemas in when ``data.tools_field`` is not set."""
+_JSON_FORMATS = ("jsonl", "json")
 
 
 class _RowFormatMap(dict):
@@ -95,6 +98,40 @@ def extract_reference(answer: Any) -> tuple[Any, bool]:
     return answer, False
 
 
+def normalize_tools(
+    value: Any, *, where: str, strict: bool, drop_nulls: bool = False
+) -> list[dict[str, Any]] | None:
+    """Tool schemas of a row: a list of objects, or its JSON string (how CSV and many Hub datasets
+    store them). ``None`` for a missing or empty value. Anything else is a :class:`DataError` when
+    the column was named in the config (``strict``) and is left alone (``None``) when the column is
+    only a chat dataset's conventional ``tools``. ``drop_nulls`` removes ``null``-valued keys at
+    every depth: columnar stores fill struct keys a row does not have with ``null``."""
+    if isinstance(value, str) and value.strip():
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError as e:
+            if strict:
+                raise DataError(f"{where}: tools column is a string that is not JSON") from e
+            return None
+    if value is None or value == "":
+        return None
+    if not isinstance(value, (list, tuple)) or not all(isinstance(t, dict) for t in value):
+        if strict:
+            raise DataError(f"{where}: tools must be a list of tool schema objects")
+        return None
+    if not value:
+        return None
+    return [_without_nulls(t) if drop_nulls else dict(t) for t in value]
+
+
+def _without_nulls(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {k: _without_nulls(v) for k, v in value.items() if v is not None}
+    if isinstance(value, (list, tuple)):
+        return [_without_nulls(v) for v in value]
+    return value
+
+
 @dataclass(slots=True)
 class Layout:
     format: str  # chat | prompt_answer | text
@@ -105,6 +142,9 @@ class Layout:
     image_fields: list[str] = field(default_factory=list)
     """Columns attached to the user turn as image parts (``DataConfig.image_field``; explicit opt-in,
     ``sniff_format`` only reports candidates)."""
+    tools_field: str | None = None
+    """Column holding the row's tool schemas (``DataConfig.tools_field``). ``None``: a chat row's
+    :data:`TOOLS_COLUMN` is used when it holds schemas."""
 
     @classmethod
     def resolve(cls, config: DataConfig, columns: dict[str, str], sample_rows: list[dict]) -> Layout:
@@ -126,6 +166,7 @@ class Layout:
             answer_field=config.answer_field or sniffed["answer_field"],
             messages_field=config.messages_field or sniffed["messages_field"],
             response_field=config.response_field,
+            tools_field=config.tools_field,
             image_fields=[f for f in image_fields if f],
         )
         if layout.format not in ("chat", "prompt_answer", "text"):
@@ -141,6 +182,7 @@ class Layout:
             layout.answer_field,
             layout.messages_field,
             layout.response_field,
+            layout.tools_field,
             *layout.image_fields,
         ):
             if name and columns and name not in columns:
@@ -154,6 +196,7 @@ class Layout:
             "answer_field": self.answer_field,
             "messages_field": self.messages_field,
             "response_field": self.response_field,
+            "tools_field": self.tools_field,
             "image_fields": list(self.image_fields),
         }
 
@@ -167,6 +210,9 @@ class SampleMapper:
     max_prompt_tokens: int | None = None
     media_base: Callable[[str], str | None] | None = None
     """``row_id -> base location`` for relative image paths (``RowSource.media_base``)."""
+    null_filled: bool = False
+    """Rows come from a columnar store (parquet, arrow, Hub datasets), where a struct column holds
+    ``null`` for every key a row does not have: such keys are dropped from tool schemas."""
     dropped: int = 0
     """Rows dropped by the token filter so far (diagnostic)."""
     _resolvers: dict[str | None, MediaResolver] = field(default_factory=dict)
@@ -182,6 +228,7 @@ class SampleMapper:
             tokenizer=tokenizer,
             max_prompt_tokens=config.max_prompt_tokens if tokenizer is not None else None,
             media_base=rows.media_base if rows is not None else None,
+            null_filled=rows is not None and getattr(rows, "format", None) not in _JSON_FORMATS,
         )
 
     def resolver_for(self, row_id: str) -> MediaResolver:
@@ -244,6 +291,17 @@ class SampleMapper:
                 messages.insert(0, {"role": "system", "content": self.system_prompt})
 
         skip = {consumed, *lay.image_fields}
+        tools_field = lay.tools_field or (TOOLS_COLUMN if lay.format == "chat" else None)
+        if tools_field is not None:
+            tools = normalize_tools(
+                row.get(tools_field),
+                where=f"{row_id}.{tools_field}",
+                strict=lay.tools_field is not None,
+                drop_nulls=self.null_filled,
+            )
+            if tools is not None:
+                metadata["tools"] = tools
+                skip.add(tools_field)
         metadata["row"] = {k: v for k, v in row.items() if k not in skip}
         sample_id = str(row["id"]) if row.get("id") not in (None, "") else row_id
         return Sample(id=sample_id, messages=messages, reference=reference, metadata=metadata)
@@ -279,13 +337,15 @@ class SampleMapper:
             raise DataError(f"invalid prompt_template {self.prompt_template!r}: {e}") from e
 
     # -- filtering
-    def prompt_tokens(self, messages: list[Message]) -> int:
-        """Text tokens of the prompt (media parts are dropped: image placeholder tokens are
-        model-specific and only known to the processor, so ``max_prompt_tokens`` bounds text)."""
+    def prompt_tokens(self, messages: list[Message], tools: list[dict[str, Any]] | None = None) -> int:
+        """Text tokens of the prompt, rendered with the row's ``tools`` when it has any (media
+        parts are dropped: image placeholder tokens are model-specific and only known to the
+        processor, so ``max_prompt_tokens`` bounds text)."""
         tok = self.tokenizer
         text_only = [{**m, "content": message_text(m)} for m in messages]
         if getattr(tok, "chat_template", None):
-            text = tok.apply_chat_template(text_only, tokenize=False, add_generation_prompt=True)
+            kwargs = {"tools": tools} if tools else {}
+            text = tok.apply_chat_template(text_only, tokenize=False, add_generation_prompt=True, **kwargs)
         else:
             text = "\n".join(m["content"] for m in text_only)
         return len(tok(text, add_special_tokens=False)["input_ids"])
@@ -293,7 +353,7 @@ class SampleMapper:
     def keep(self, sample: Sample) -> bool:
         if self.max_prompt_tokens is None:
             return True
-        n = self.prompt_tokens(sample.messages)
+        n = self.prompt_tokens(sample.messages, sample.metadata.get("tools"))
         sample.metadata["prompt_tokens"] = n
         if n > self.max_prompt_tokens:
             self.dropped += 1

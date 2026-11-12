@@ -287,7 +287,7 @@ def trajectory_row(
     if save_transcripts:
         threads = t.threads
         row["threads"] = [[_message_row(m) for m in thread] for thread in threads]
-        indices = _message_indices(t, threads)
+        indices = message_indices(t, threads)
         row["turns"] = [
             {
                 "index": i,
@@ -304,7 +304,7 @@ def trajectory_row(
     return row
 
 
-def _message_indices(trajectory: Trajectory, threads: Sequence[Sequence[Message]]) -> list[int | None]:
+def message_indices(trajectory: Trajectory, threads: Sequence[Sequence[Message]]) -> list[int | None]:
     """Position of every turn's assistant message in its thread. Recorded indices win; otherwise
     the turns of a thread map, in order, onto that thread's last N assistant messages."""
     by_thread: dict[int, list[int]] = {}

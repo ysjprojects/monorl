@@ -154,11 +154,16 @@ PREVIOUS_MODEL = "previous"
 PREVIOUS_DATASET = "previous"
 
 
-def previous_dataset_config(data: DataConfig, dataset: str | os.PathLike[str]) -> DataConfig:
+def previous_dataset_config(
+    data: DataConfig, dataset: str | os.PathLike[str], *, max_prompt_tokens: int | None = None
+) -> DataConfig:
     """Data config for a train stage reading a rejection-sampling ``dataset.jsonl``: chat format,
-    the trailing assistant turn becomes the SFT target (``metadata["assistant_turn"]``) and the
-    row's ``reference`` column the verifier reference. Prompts were already rendered, so the
-    template/field mapping of the base data config does not apply."""
+    the trailing assistant turn becomes the SFT target (``metadata["assistant_turn"]``), the row's
+    ``tools`` its tool schemas and its ``reference`` column the verifier reference. The rows are
+    the conversations as the policy had them, system prompt included, so the template, field
+    mapping and ``system_prompt`` of the base data config do not apply. ``max_prompt_tokens``
+    widens the prompt filter (to the context budget the episodes were sampled under), so that no
+    conversation is dropped for the length of what precedes its final turn."""
     return data.model_copy(
         update={
             "uri": str(dataset),
@@ -170,7 +175,10 @@ def previous_dataset_config(data: DataConfig, dataset: str | os.PathLike[str]) -
             "answer_field": None,
             "response_field": None,
             "image_field": None,
+            "tools_field": None,
+            "system_prompt": None,
             "prompt_template": None,
+            "max_prompt_tokens": max(data.max_prompt_tokens, max_prompt_tokens or 0),
             "streaming": False,
         }
     )
@@ -188,13 +196,24 @@ def build_train_config(
 
     ``overrides`` are deep-merged over the base; ``init_from`` picks the policy
     (``previous`` falls back to the merged model when no train stage ran yet); ``data_from:
-    previous`` swaps the data section for the preceding rejection-sampling output; ``run_name``
-    and ``logging.run_root`` place the run under ``<pipeline>/stages/``.
+    previous`` swaps the data section for the preceding rejection-sampling output and, for an SFT
+    stage, sets ``algorithm.sft_turns: all`` (unless the stage's overrides set it), so that every
+    policy turn of those conversations is trained; ``run_name`` and ``logging.run_root`` place the
+    run under ``<pipeline>/stages/``. An SFT stage builds no environment: an ``env`` inherited
+    from the base is reset to the default single-turn one.
     """
     stage = config.stages[index]
     if not isinstance(stage, TrainStage):
         raise TypeError(f"stage {index} ({stage.name!r}) is {stage.type}, not train")
     merged = deep_merge(config.base.to_dict(), stage.overrides)
+    algorithm = merged.setdefault("algorithm", {})
+    if algorithm.get("name") == "sft":
+        inherited_env = (merged.get("env") or {}).get("type", "single_turn")
+        if "env" not in stage.overrides and inherited_env != "single_turn":
+            merged["env"] = {}
+        overridden = stage.overrides.get("algorithm") or {}
+        if stage.data_from == PREVIOUS_DATASET and "sft_turns" not in overridden:
+            algorithm["sft_turns"] = "all"
     model = merged.setdefault("model", {})
     if stage.init_from == "base":
         model["name_or_path"] = config.base.model.name_or_path
@@ -211,8 +230,13 @@ def build_train_config(
             raise ValueError(
                 f"stage {stage.name!r}: data_from='previous' but no rejection_sample output exists"
             )
+        sampling = build_sampling_config(config, index - 1, previous_model=None)
         run_config = run_config.model_copy(
-            update={"data": previous_dataset_config(run_config.data, previous_dataset)}
+            update={
+                "data": previous_dataset_config(
+                    run_config.data, previous_dataset, max_prompt_tokens=sampling.context_budget
+                )
+            }
         )
     return run_config
 

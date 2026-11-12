@@ -56,7 +56,29 @@ rows (`sniff_format`):
 | `prompt_answer` | prompt column (`prompt`, `question`, `instruction`, `input`, `problem`, `query`) + answer column (`answer`, `solution`, `response`, `output`, `target`, `label`, …) | `messages = [user: prompt]`, `reference = answer` |
 | `text` | a lone prompt/text column | `messages = [user: text]`, `reference = None` |
 
-Override the guess with `messages_field`, `prompt_field`, `answer_field`. Processing per row:
+Override the guess with `messages_field`, `prompt_field`, `answer_field`.
+
+### Agent conversations: tool results, context turns, tool schemas
+
+Chat rows may hold whole agent conversations; `algorithm.sft_turns: all` trains every assistant
+turn of them ([`PIPELINES.md`](PIPELINES.md), which also describes the rows rejection sampling
+writes in this layout).
+
+- Messages keep `tool_calls` (assistant), `name` and `tool_call_id` (`tool` results) and `weight`.
+  An assistant message with `"weight": 0` is context that SFT does not train (the OpenAI
+  fine-tuning convention).
+- Tool schemas come from the column named by `data.tools_field`; without it, from a chat
+  dataset's `tools` column when that holds a list of schema objects. The value is a list of
+  OpenAI-style function schemas or its JSON string (CSV, many Hub datasets). It becomes
+  `metadata["tools"]`, which SFT passes to the chat template and `max_prompt_tokens` counts. A
+  column named in `tools_field` that holds something else is an error; a chat dataset's own
+  `tools` column that does not hold schemas is left in `metadata["row"]`.
+- jsonl, parquet, arrow and Hub datasets read the same. Parquet, arrow and Hub datasets give all
+  rows one struct type and fill the keys a row lacks with nulls: null message keys are ignored and
+  null keys are removed from tool schemas at every depth. Keep schemas as a JSON string column
+  if a `null` inside one matters.
+
+Processing per row:
 
 1. `prompt_template` — Python format string over the row's columns plus `{prompt}`:
    `"{prompt}\nThink step by step and end with '#### <answer>'."`

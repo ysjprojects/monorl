@@ -13,9 +13,9 @@ from monorl.config.schema import DataConfig
 from monorl.core.types import Completion, Sample, Trajectory, Turn
 from monorl.pipeline.rejection import (
     chat_row,
+    conversation_rows,
     eval_data_config,
     mix_data_config,
-    prompt_messages,
     sample_response,
     select_accepted,
 )
@@ -101,7 +101,8 @@ def test_build_train_config_overrides_and_handoff(tmp_path: Path) -> None:
         and third.data.answer_field is None
         and third.data.response_field is None
     )
-    assert third.data.system_prompt == "sys" and third.data.limit == 3  # overrides apply before the swap
+    assert third.data.limit == 3  # overrides apply before the swap
+    assert third.data.system_prompt is None  # the rows already hold the system prompt they were sampled with
     assert third.trainer.max_steps == 5
 
     fourth = build_train_config(cfg, 3, stages_root=root, previous_model="/prev/final", previous_dataset=None)
@@ -267,24 +268,29 @@ def test_select_accepted_filters() -> None:
     assert len(select_accepted(loose, trajectories)) == len(trajectories)
 
 
-def test_prompt_messages_and_chat_row() -> None:
+def test_single_turn_episode_row_is_the_prompt_and_response_row() -> None:
     t = _traj("p", "resp", 1.0, reference="42")
     t.messages = [
         {"role": "system", "content": "s"},
         {"role": "user", "content": "q"},
         {"role": "assistant", "content": "resp"},
     ]
-    assert prompt_messages(t) == t.messages[:2]
-    row = chat_row(
-        prompt_messages(t), t.response_text, reference=t.sample.reference, reward=t.reward, source="sampled"
+    prompt_and_response = chat_row(
+        t.messages[:2], t.response_text, reference=t.sample.reference, reward=t.reward, source="sampled"
     )
-    assert row == {
+    assert prompt_and_response == {
         "messages": [*t.messages[:2], {"role": "assistant", "content": "resp"}],
         "reference": "42",
         "reward": 1.0,
         "source": "sampled",
     }
+    (row,) = conversation_rows(t)
+    # the row a single-turn episode always produced, plus where it came from
+    assert row == {**prompt_and_response, "sample_id": "p", "thread": 0, "num_turns": 1}
+    assert "tools" not in row
     json.dumps(row)
+    with_tools = chat_row(t.messages[:2], "resp", reference=None, reward=None, source="mix", tools=[{"a": 1}])
+    assert with_tools["tools"] == [{"a": 1}] and with_tools["messages"] == prompt_and_response["messages"]
 
 
 def test_sample_response_precedence() -> None:
