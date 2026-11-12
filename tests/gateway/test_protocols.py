@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 from collections.abc import Callable, Iterator, Sequence
 from typing import Any
 
@@ -509,6 +510,32 @@ def test_a_stream_opens_at_once_and_is_kept_alive_until_the_generation_is_done(
         rest = "\n".join(lines)
     (record,) = session.calls
     assert record.completion.text == "ABC" and '"ABC"' in rest
+
+
+def test_a_client_that_hangs_up_mid_stream_still_leaves_its_turn(
+    make_config: Callable[..., Any], quick_gateway: Gateway
+) -> None:
+    """An agent that gives up on a stream does not take the generation with it: the call is
+    recorded when the engine answers, as for a request that was not streamed."""
+    engine = _echo_engine(make_config, GatedEngine)
+    session = quick_gateway.open_session(
+        engine=engine, tokenizer=engine.tokenizer, params=SamplingParams(n=1, max_new_tokens=32)
+    )
+    url = f"{quick_gateway.session_url(session)}/v1/chat/completions"
+    payload = {"messages": [{"role": "user", "content": "abc"}], "stream": True}
+    with (
+        httpx.Client(trust_env=False, timeout=60) as http,
+        http.stream("POST", url, json=payload) as response,
+    ):
+        assert response.status_code == 200
+        assert next(response.iter_lines()).startswith("data: ")  # the stream is open; now the client leaves
+    assert session.calls == []
+    engine.release.set()
+    deadline = time.monotonic() + 30
+    while not session.calls and time.monotonic() < deadline:
+        time.sleep(0.01)
+    (record,) = session.calls
+    assert record.completion.text == "ABC"
 
 
 def test_sdk_streams_outlive_a_generation_longer_than_the_read_timeout(
