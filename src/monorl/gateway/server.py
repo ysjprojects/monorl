@@ -131,6 +131,7 @@ class Gateway:
         turn_rendering: str = "tokens",
         model: str = "monorl",
         max_calls: int | None = None,
+        max_context_tokens: int | None = None,
     ) -> Session:
         """A new session (one episode) served with ``engine`` under ``params``. Its id is also
         its API key."""
@@ -142,6 +143,7 @@ class Gateway:
             turn_rendering=turn_rendering,
             model=model,
             max_calls=max_calls,
+            max_context_tokens=max_context_tokens,
         )
         with self._lock:
             self._sessions[session.id] = session

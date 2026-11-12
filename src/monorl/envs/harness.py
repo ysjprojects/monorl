@@ -62,7 +62,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from monorl.core.errors import ConfigError, EnvironmentError_
+from monorl.core.errors import ConfigError, EnvironmentError_, EpisodeAborted, GenerationFailed
 from monorl.core.types import Sample, SamplingParams, Trajectory
 from monorl.envs.protocol import encode_sample
 
@@ -149,6 +149,7 @@ class HarnessEnv:
         params: SamplingParams,
         abort: threading.Event | None = None,
         turn_rendering: str = "tokens",
+        max_context_tokens: int | None = None,
     ) -> Trajectory:
         from monorl.gateway import build_trajectory, get_gateway
 
@@ -158,6 +159,7 @@ class HarnessEnv:
             tokenizer=tokenizer,
             params=params,
             turn_rendering=turn_rendering,
+            max_context_tokens=max_context_tokens,
             model=self.model,
             max_calls=self.max_turns,
         )
@@ -207,6 +209,8 @@ class HarnessEnv:
             )
         trajectory = build_trajectory(session.calls, sample, group_id)
         trajectory.done = not timed_out and not session.refused
+        if session.context_exceeded:
+            trajectory.info["context_exceeded_calls"] = session.context_exceeded
         trajectory.info.update(
             exit_code=exit_code, timed_out=timed_out, stdout_tail=_tail(stdout), stderr_tail=_tail(stderr)
         )
@@ -365,11 +369,10 @@ class HarnessEnv:
             _kill_group(proc)  # the process, and whatever it left running in its group
             self._proc = None
         if session is not None and session.failure is not None:
-            raise session.failure
+            raise GenerationFailed(
+                f"episode {group_id}: the rollout engine failed: {session.failure}"
+            ) from session.failure
         if stopped():
-            # imported here: the orchestrator package imports torch, environments stay torch-free
-            from monorl.orchestrator.episodes import EpisodeAborted
-
             raise EpisodeAborted(f"episode {group_id} aborted while its harness {what} was running")
         return proc.returncode, timed_out
 

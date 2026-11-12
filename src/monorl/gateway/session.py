@@ -70,8 +70,12 @@ class CallRecord:
 
 class Session:
     """See module docstring. ``max_calls`` caps the answered calls; ``model`` is the name the
-    session reports. ``cancelled`` is set when a generation was cancelled (the episode is being
-    aborted), ``failure`` holds the first engine error; the episode's owner watches both."""
+    session reports. ``max_context_tokens`` is the episode's context budget: a call whose prompt
+    leaves no room for a completion is refused the way OpenAI refuses it
+    (``context_length_exceeded``), so an agent that compacts its history can react, and every
+    completion is capped to the room that is left. ``cancelled`` is set when a generation was
+    cancelled (the episode is being aborted), ``failure`` holds the first engine error; the
+    episode's owner watches both."""
 
     def __init__(
         self,
@@ -83,6 +87,7 @@ class Session:
         turn_rendering: str = "tokens",
         model: str = "monorl",
         max_calls: int | None = None,
+        max_context_tokens: int | None = None,
     ) -> None:
         if turn_rendering not in ("tokens", "template"):
             raise ValueError(
@@ -95,9 +100,12 @@ class Session:
         self.turn_rendering = turn_rendering
         self.model = model
         self.max_calls = max_calls
+        self.max_context_tokens = max_context_tokens
         self.calls: list[CallRecord] = []
         self.refused = 0
         """Calls turned away because ``max_calls`` was reached."""
+        self.context_exceeded = 0
+        """Calls turned away because their prompt did not fit ``max_context_tokens``."""
         self.reward: float | None = None
         """Sum of the rewards posted to the session; ``None`` when none was posted."""
         self.cancelled = threading.Event()
@@ -140,7 +148,8 @@ class Session:
         try:
             parent = _find_parent(earlier, request)
             prompt_ids, bridged = self._prompt(parent, request)
-            completion = self._generate(prompt_ids, request)
+            room = self._room(len(prompt_ids))
+            completion = self._generate(prompt_ids, request, room)
             calls, invalid, text = (
                 split_tool_calls(completion.text) if request.parse_tool_calls else ([], 0, completion.text)
             )
@@ -212,13 +221,30 @@ class Session:
                 code="template_error",
             ) from e
 
-    def _generate(self, prompt_ids: Sequence[int], request: ChatRequest) -> Completion:
-        """One sample under the run's sampling parameters; the request may only shorten it."""
+    def _room(self, prompt_tokens: int) -> int | None:
+        """Tokens left for the completion under the context budget (``None``: no budget). Raises
+        OpenAI's ``context_length_exceeded`` when the prompt leaves none."""
+        if self.max_context_tokens is None:
+            return None
+        room = self.max_context_tokens - prompt_tokens
+        if room < 1:
+            with self._lock:
+                self.context_exceeded += 1
+            raise GatewayError(
+                400,
+                f"This model's maximum context length is {self.max_context_tokens} tokens. However, your "
+                f"messages resulted in {prompt_tokens} tokens. Please reduce the length of the messages.",
+                param="messages",
+                code="context_length_exceeded",
+            )
+        return room
+
+    def _generate(self, prompt_ids: Sequence[int], request: ChatRequest, room: int | None) -> Completion:
+        """One sample under the run's sampling parameters; the request and the context budget
+        (``room``) may only shorten it."""
         params = self.params
-        if request.max_tokens is not None:
-            max_new_tokens = min(params.max_new_tokens, request.max_tokens)
-        else:
-            max_new_tokens = params.max_new_tokens
+        limits = [params.max_new_tokens, request.max_tokens, room]
+        max_new_tokens = min(limit for limit in limits if limit is not None)
         stop = [*params.stop, *(s for s in request.stop if s not in params.stop)]
         params = dataclasses.replace(params, n=1, max_new_tokens=max_new_tokens, stop=stop)
         try:

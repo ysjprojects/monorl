@@ -34,3 +34,13 @@ class WeightSyncError(MonorlError):
 class GenerationCancelled(MonorlError):
     """A ``RolloutEngine.generate`` call was aborted through the engine's ``cancel()`` before it
     finished."""
+
+
+class GenerationFailed(MonorlError):
+    """The rollout engine failed while generating for an episode. Unlike an environment's failure
+    this is never tolerated (``env.max_failed_frac``): the engine serves every episode."""
+
+
+class EpisodeAborted(MonorlError):
+    """Raised inside an episode when the abort event is set (async producer shutdown, cancelled
+    sampling stage) or its ``generate`` call was cancelled."""

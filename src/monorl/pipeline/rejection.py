@@ -19,12 +19,12 @@ from typing import Any
 
 from monorl.config.pipeline import EvalStage, RejectionSampleStage
 from monorl.config.schema import DataConfig, RunConfig
-from monorl.core.errors import DataError
+from monorl.core.errors import DataError, EnvironmentError_
 from monorl.core.registry import registry
 from monorl.core.reporting import CONFIG_FILE, RunReporter
 from monorl.core.types import Message, RewardResult, Sample, SamplingParams, Trajectory
 from monorl.orchestrator import loop as _loop
-from monorl.orchestrator.episodes import EpisodeAborted, EpisodeSpec, run_episodes
+from monorl.orchestrator.episodes import EpisodeAborted, EpisodeFailure, EpisodeSpec, run_episodes
 from monorl.orchestrator.metrics import eval_metrics, reward_metrics
 from monorl.pipeline.stages import DATASET_FILE
 
@@ -56,6 +56,10 @@ class PolicySampler:
         self.reward_fn = _loop._resolve_build_reward()(specs, config=config) if specs else None
         make_env = _loop._resolve_make_env()
         self.env_factory: Callable[[], Any] = lambda: make_env(config)
+        self.attempted = 0
+        """Episodes started so far."""
+        self.failed = 0
+        """Episodes that failed for good and were left out (``env.max_failed_frac``)."""
 
     # -- data ---------------------------------------------------------------------------------
     def load_samples(self, data: DataConfig, *, limit: int | None = None) -> list[Sample]:
@@ -74,12 +78,17 @@ class PolicySampler:
         group_prefix: str,
         abort: threading.Event | None = None,
     ) -> list[Trajectory]:
+        """``n`` episodes per sample under the run's episode policy (context budget,
+        ``env.retries``, ``env.max_failed_frac``). Episodes that failed for good are missing from
+        the result and counted in :attr:`failed`; more of them than tolerated fail the stage."""
         specs = [
             EpisodeSpec(sample=s, group_id=f"{group_prefix}-{s.id}", engine=self.engine)
             for s in samples
             for _ in range(n)
         ]
-        return run_episodes(
+        env_cfg = self.config.env
+        failures: list[EpisodeFailure] | None = [] if env_cfg.max_failed_frac > 0 else None
+        trajectories = run_episodes(
             specs,
             env_factory=self.env_factory,
             tokenizer=self.tokenizer,
@@ -87,7 +96,21 @@ class PolicySampler:
             max_parallel=self.max_parallel,
             abort=abort,
             turn_rendering=self.config.rollout.turn_rendering,
+            max_context_tokens=self.config.context_budget,
+            retries=env_cfg.retries,
+            failures=failures,
         )
+        self.attempted += len(specs)
+        if failures:
+            first = failures[0].error
+            if len(failures) > env_cfg.max_failed_frac * len(specs):
+                raise EnvironmentError_(
+                    f"{group_prefix}: {len(failures)} of {len(specs)} episodes failed, more than "
+                    f"env.max_failed_frac={env_cfg.max_failed_frac:g} allows; first failure: "
+                    f"{type(first).__name__}: {first}"
+                ) from first
+            self.failed += len(failures)
+        return trajectories
 
     def score(self, trajectories: Sequence[Trajectory]) -> None:
         """Total reward = reward-function score + (discounted) env return, as in the RL loop."""
@@ -409,6 +432,7 @@ def run_rejection_sampling(
                 "rs/total_accept_rate": outcome.accepted / outcome.sampled if outcome.sampled else 0.0,
                 "rs/mixed": float(outcome.mixed),
                 "rs/rows": float(outcome.rows),
+                "rs/failed_episodes": float(sampler.failed),
             },
             phase="summary",
         )
@@ -510,6 +534,8 @@ def run_eval(
             reporter.set_status("cancelled", f"cancelled after chunk {outcome.steps}", step=outcome.steps)
             return outcome
         metrics = eval_metrics(scored, success_threshold=config.logging.success_threshold)
+        if config.env.max_failed_frac > 0:
+            metrics["eval/failed_frac"] = sampler.failed / max(1, sampler.attempted)
         metrics["eval/time"] = time.perf_counter() - t_start
         outcome.metrics = metrics
         outcome.num_samples = len(scored)

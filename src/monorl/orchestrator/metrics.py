@@ -80,6 +80,12 @@ def episode_metrics(trajectories: Sequence[Trajectory], *, success_threshold: fl
             metrics[f"{key}_mean"] = total / n
     if any(t.extra_threads for t in trajectories):
         metrics["threads_mean"] = sum(len(t.threads) for t in trajectories) / n
+    # stepped episodes that ran out of context, and agents that were refused a call for it
+    exhausted = sum(
+        1 for t in trajectories if t.info.get("context_exhausted") or t.info.get("context_exceeded_calls")
+    )
+    if exhausted:
+        metrics["context_exhausted_frac"] = exhausted / n
     return metrics
 
 

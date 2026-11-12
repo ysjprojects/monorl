@@ -157,11 +157,35 @@ over trajectories, through `TrainBatch.loss_weights`; on backends that train one
 rollout it equals `sequence`). Multimodal trajectories stay a single sequence (the final turn's
 chain) because the media tensors belong to the final prompt.
 
+#### Episodes that fail, episodes that run out of context
+`monorl.orchestrator.episodes.run_episodes` is the one place episodes run (native loop, loop and
+pipeline evaluation, rejection sampling, the TRL rollout). Two policies apply there:
+
+- **Failures.** An abort (`EpisodeAborted`) and an engine failure (`GenerationFailed`) always end
+  the batch. Anything else an episode raises is a failure of its environment: a crashing
+  `reset`/`step`, an agent that dies before calling the policy, a conversation the chat template
+  rejects, a first prompt over the context budget. Such an episode is started again `env.retries`
+  times with a fresh environment. What still fails ends the run by default; with
+  `env.max_failed_frac > 0` up to that share of a rollout batch is left out instead
+  (`rollout/failed_episodes`, `rollout/failed_frac`, `eval/failed_frac`, `rs/failed_episodes`), and
+  a prompt group left with a single member is dropped when the estimator needs a group baseline
+  (`rollout/groups_incomplete`). Pipeline backends take one result per rollout and reject
+  `env.max_failed_frac`.
+- **Context budget.** `RunConfig.context_budget` is `rollout.max_context_tokens`, by default
+  `trainer.max_seq_len` (and `rollout.max_model_len` when set): no prompt plus completion of a turn
+  may exceed it, so nothing an episode samples is cut off in training. A turn's generation is
+  capped to the room left; a stepped episode whose next prompt leaves no room ends with the turns
+  it has (`Trajectory.info["context_exhausted"]`, `done=False`); an agent behind the gateway gets
+  OpenAI's `context_length_exceeded` error and may compact its history, which starts a new
+  conversation thread (`info["context_exceeded_calls"]`). `episode/context_exhausted_frac` counts
+  both. A budget above `trainer.max_seq_len` is a config error. Multimodal prompts are tokenised
+  by the engine and are not budgeted.
+
 Metric names (used by the UI): `reward/mean`, `reward/std`, `reward/<name>` per reward,
 `loss/policy`, `loss/kl`, `loss/entropy`, `policy/clipfrac`, `policy/approx_kl`,
 `policy/staleness`, `tokens/response_mean`, `tokens/prompt_mean`, `tokens/sequences`,
-`tokens/prefix_mismatch`, `time/rollout`, `time/train`, `time/sync`, `lr`, and `offpolicy/*` when
-`algorithm.off_policy` is active.
+`tokens/prefix_mismatch`, `time/rollout`, `time/train`, `time/sync`, `lr`, `offpolicy/*` when
+`algorithm.off_policy` is active, and `rollout/failed_*` when `env.max_failed_frac > 0`.
 
 Agent metrics (`monorl.orchestrator.metrics.episode_metrics(trajectories, *, success_threshold)`,
 reported per step as `reward/success_rate`, `reward/pass_at_k` and `episode/<key>`, and by every

@@ -21,12 +21,12 @@ from typing import TYPE_CHECKING, Any
 
 import torch
 
-from monorl.core.errors import ConfigError, DataError
+from monorl.core.errors import ConfigError, DataError, EnvironmentError_
 from monorl.core.registry import registry
 from monorl.core.reporting import list_checkpoints
 from monorl.core.types import RewardResult, RunResult, Sample, SamplingParams, Trajectory
 from monorl.orchestrator.batching import build_train_batch
-from monorl.orchestrator.episodes import EpisodeAborted, EpisodeSpec, run_episodes
+from monorl.orchestrator.episodes import EpisodeAborted, EpisodeFailure, EpisodeSpec, run_episodes
 from monorl.orchestrator.metrics import eval_metrics, step_metrics
 from monorl.orchestrator.sampler import PromptSampler
 from monorl.orchestrator.sinks import MetricSinks
@@ -315,8 +315,9 @@ class ComponentLoop:
     # -- one step --------------------------------------------------------------------------
     def _rollout_step(self, step: int, *, abort: threading.Event | None = None) -> RolloutBatch:
         config = self.config
+        tally = {"attempted": 0, "failed": 0, "incomplete": 0}
         t0 = time.perf_counter()
-        trajectories = self._episodes(self.sampler.batch(step), step, round=0, abort=abort)
+        trajectories = self._episodes(self.sampler.batch(step), step, round=0, abort=abort, tally=tally)
         time_rollout = time.perf_counter() - t0
         t1 = time.perf_counter()
         self._score(trajectories)
@@ -331,7 +332,7 @@ class ComponentLoop:
                 rounds += 1
                 t0 = time.perf_counter()
                 extra = self._episodes(
-                    self.sampler.batch(step, round=rounds), step, round=rounds, abort=abort
+                    self.sampler.batch(step, round=rounds), step, round=rounds, abort=abort, tally=tally
                 )
                 time_rollout += time.perf_counter() - t0
                 t1 = time.perf_counter()
@@ -342,6 +343,10 @@ class ComponentLoop:
                 kept.extend(_take_groups(extra_kept, config.trainer.prompts_per_step - _num_groups(kept)))
             metrics["rollout/resample_rounds"] = float(rounds)
             trajectories = kept
+        if config.env.max_failed_frac > 0:
+            metrics["rollout/failed_episodes"] = float(tally["failed"])
+            metrics["rollout/failed_frac"] = tally["failed"] / max(1, tally["attempted"])
+            metrics["rollout/groups_incomplete"] = float(tally["incomplete"])
         metrics["time/rollout"] = time_rollout
         metrics["time/reward"] = time_reward
         return RolloutBatch(
@@ -349,7 +354,13 @@ class ComponentLoop:
         )
 
     def _episodes(
-        self, prompts: Sequence[Sample], step: int, *, round: int, abort: threading.Event | None
+        self,
+        prompts: Sequence[Sample],
+        step: int,
+        *,
+        round: int,
+        abort: threading.Event | None,
+        tally: dict[str, int],
     ) -> list[Trajectory]:
         group_size = self.config.rollout.group_size
         specs: list[EpisodeSpec] = []
@@ -358,15 +369,51 @@ class ComponentLoop:
             for _ in range(group_size):
                 engine = self.engines[len(specs) % len(self.engines)]
                 specs.append(EpisodeSpec(sample=sample, group_id=group_id, engine=engine))
-        return run_episodes(
+        trajectories, failed = self._run_specs(specs, self.sampling, abort=abort, what=f"step {step}")
+        tally["attempted"] += len(specs)
+        tally["failed"] += failed
+        if failed and _needs_group_baseline(self.config):
+            # A group left with one member has no baseline: its advantage would be 0 or the raw reward.
+            trajectories, incomplete = _drop_incomplete_groups(trajectories)
+            tally["incomplete"] += incomplete
+        return trajectories
+
+    def _run_specs(
+        self,
+        specs: Sequence[EpisodeSpec],
+        params: SamplingParams,
+        *,
+        abort: threading.Event | None = None,
+        what: str,
+    ) -> tuple[list[Trajectory], int]:
+        """Run ``specs`` under the run's episode policy (context budget, ``env.retries``,
+        ``env.max_failed_frac``): the trajectories of the episodes that finished and the number
+        that failed for good. More failures than tolerated fail the run."""
+        env_cfg = self.config.env
+        failures: list[EpisodeFailure] | None = [] if env_cfg.max_failed_frac > 0 else None
+        trajectories = run_episodes(
             specs,
             env_factory=self.env_factory,
             tokenizer=self.tokenizer,
-            params=self.sampling,
+            params=params,
             max_parallel=self.max_parallel,
             abort=abort,
             turn_rendering=self.config.rollout.turn_rendering,
+            max_context_tokens=self.config.context_budget,
+            retries=env_cfg.retries,
+            failures=failures,
         )
+        if not failures:
+            return trajectories, 0
+        first = failures[0].error
+        summary = f"{what}: {len(failures)} of {len(specs)} episodes failed"
+        cause = f"first failure: {type(first).__name__}: {first}"
+        if len(failures) > env_cfg.max_failed_frac * len(specs):
+            raise EnvironmentError_(
+                f"{summary}, more than env.max_failed_frac={env_cfg.max_failed_frac:g} allows; {cause}"
+            ) from first
+        self.reporter.log(f"{summary} and were left out; {cause}")
+        return trajectories, len(failures)
 
     def _score(self, trajectories: Sequence[Trajectory]) -> None:
         if not trajectories:
@@ -567,17 +614,12 @@ class ComponentLoop:
                 )
                 for i, s in enumerate(self._eval_samples)
             ]
-            trajectories = run_episodes(
-                specs,
-                env_factory=self.env_factory,
-                tokenizer=self.tokenizer,
-                params=self.eval_sampling,
-                max_parallel=self.max_parallel,
-                turn_rendering=config.rollout.turn_rendering,
-            )
+            trajectories, failed = self._run_specs(specs, self.eval_sampling, what=f"eval step {step}")
         self._score(trajectories)
         log_cfg = config.logging
         metrics = eval_metrics(trajectories, success_threshold=log_cfg.success_threshold)
+        if config.env.max_failed_frac > 0:
+            metrics["eval/failed_frac"] = failed / len(specs)
         metrics["eval/time"] = time.perf_counter() - t0
         self.reporter.log_metrics(step, metrics, phase="eval")
         if self._sinks is not None:
@@ -605,6 +647,24 @@ def _checkpoint_complete(path: Path) -> bool:
 
 def _num_groups(trajectories: Sequence[Trajectory]) -> int:
     return len({t.group_id for t in trajectories})
+
+
+def _needs_group_baseline(config: RunConfig) -> bool:
+    """The advantage of an episode is taken relative to the other episodes of its prompt group."""
+    algo = config.algorithm
+    return algo.name == "rloo" or (algo.name in ("grpo", "dapo") and algo.advantage_norm == "group")
+
+
+def _drop_incomplete_groups(trajectories: Sequence[Trajectory]) -> tuple[list[Trajectory], int]:
+    """Drop the groups that failed episodes left with a single member; ``(kept, groups dropped)``."""
+    kept: list[Trajectory] = []
+    dropped = 0
+    for members in _groups(trajectories).values():
+        if len(members) < 2:
+            dropped += 1
+            continue
+        kept.extend(members)
+    return kept, dropped
 
 
 def _drop_uniform_groups(trajectories: Sequence[Trajectory]) -> tuple[list[Trajectory], int]:

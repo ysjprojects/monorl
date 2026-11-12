@@ -7,10 +7,9 @@ run concurrently on a thread pool; their ``generate`` calls go through a
 :class:`monorl.rollout.BatchingEngine`, so many concurrent single-prompt requests coalesce into a
 few batched engine calls.
 
-Turn 0 hands the chat to the engine (which applies the chat template and records the resulting
-ids in ``Completion.prompt_token_ids``), or renders it here with :func:`chat_prompt_ids` when the
-environment exposes tool schemas. Every later turn is sent as raw token ids built by
-:func:`monorl.rollout.render.continue_prompt_ids`: with ``rollout.turn_rendering: tokens`` the
+Text prompts are sent to the engine as token ids: turn 0 is rendered with :func:`chat_prompt_ids`
+(with the environment's tool schemas, if any), every later turn is built by
+:func:`monorl.rollout.render.continue_prompt_ids`. With ``rollout.turn_rendering: tokens`` the
 previous prompt and the sampled completion stay in the context token for token and only the new
 messages are rendered, so a turn's prompt is an exact extension of the tokens the policy was
 sampled on and the batch builder trains the whole episode as one sequence. ``template`` re-renders
@@ -22,11 +21,25 @@ and placeholder expansion included) each turn and records the ids it conditioned
 one processor pass per turn and forgoes prefix caching. Tool schemas cannot be passed through
 ``RolloutEngine.generate``, so multimodal episodes against tool-exposing environments are
 rejected.
+
+Context budget (``max_context_tokens``): no prompt plus completion of a turn may exceed it. A
+turn's generation is capped to the room that is left; an episode whose next prompt leaves no room
+ends there with what it has (``Trajectory.info["context_exhausted"]``, ``done=False``); a first
+prompt that does not fit is a failure of the episode. Multimodal prompts are tokenised by the
+engine, so the budget is not applied to them.
+
+Failures. An abort (:class:`EpisodeAborted`) and an engine failure
+(:class:`~monorl.core.errors.GenerationFailed`) always end the batch. Anything else an episode
+raises is a failure of its environment — a crashing ``reset``/``step``, an agent that dies, a
+conversation the chat template rejects — and is retried ``retries`` times with a fresh
+environment. What still fails is raised, or, when the caller passes a ``failures`` list, recorded
+there and left out of the result.
 """
 
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import logging
 import threading
 from collections.abc import Callable, Iterator, Sequence
@@ -34,7 +47,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any
 
-from monorl.core.errors import GenerationCancelled, MonorlError
+from monorl.core.errors import DataError, EpisodeAborted, GenerationCancelled, GenerationFailed, MonorlError
 from monorl.core.interfaces import Environment, EpisodeDriver, RolloutEngine
 from monorl.core.types import (
     Completion,
@@ -54,17 +67,21 @@ CANCEL_INTERVAL_S = 0.05
 """How often ``run_episodes`` re-issues ``engine.cancel()`` while an abort is being carried out."""
 
 
-class EpisodeAborted(MonorlError):
-    """Raised inside an episode when the abort event is set (async producer shutdown, cancelled
-    sampling stage) or its ``generate`` call was cancelled."""
-
-
 @dataclass(slots=True)
 class EpisodeSpec:
     sample: Sample
     group_id: str
     engine: RolloutEngine
     """Engine (normally a ``BatchingEngine``) this episode generates with."""
+
+
+@dataclass(slots=True)
+class EpisodeFailure:
+    """An episode whose environment failed on every attempt."""
+
+    spec: EpisodeSpec
+    error: Exception
+    attempts: int
 
 
 def run_episode(
@@ -75,6 +92,48 @@ def run_episode(
     params: SamplingParams,
     abort: threading.Event | None = None,
     turn_rendering: str = "tokens",
+    max_context_tokens: int | None = None,
+    retries: int = 0,
+) -> Trajectory:
+    """One episode; an environment failure is retried ``retries`` times, each time with a fresh
+    environment, and raised when the last attempt fails too (module docstring)."""
+    attempt = 0
+    while True:
+        try:
+            return _run_once(
+                spec,
+                env_factory=env_factory,
+                tokenizer=tokenizer,
+                params=params,
+                abort=abort,
+                turn_rendering=turn_rendering,
+                max_context_tokens=max_context_tokens,
+            )
+        except (EpisodeAborted, GenerationFailed):
+            raise
+        except Exception as e:
+            if attempt >= retries or (abort is not None and abort.is_set()):
+                raise
+            attempt += 1
+            log.warning(
+                "episode %s failed (%s: %s); retry %d of %d",
+                spec.group_id,
+                type(e).__name__,
+                e,
+                attempt,
+                retries,
+            )
+
+
+def _run_once(
+    spec: EpisodeSpec,
+    *,
+    env_factory: Callable[[], Environment | EpisodeDriver],
+    tokenizer: Any,
+    params: SamplingParams,
+    abort: threading.Event | None,
+    turn_rendering: str,
+    max_context_tokens: int | None,
 ) -> Trajectory:
     env = env_factory()
     try:
@@ -87,9 +146,16 @@ def run_episode(
                 params=params,
                 abort=abort,
                 turn_rendering=turn_rendering,
+                max_context_tokens=max_context_tokens,
             )
         return _step_episode(
-            env, spec, tokenizer=tokenizer, params=params, abort=abort, turn_rendering=turn_rendering
+            env,
+            spec,
+            tokenizer=tokenizer,
+            params=params,
+            abort=abort,
+            turn_rendering=turn_rendering,
+            max_context_tokens=max_context_tokens,
         )
     finally:
         env.close()
@@ -103,6 +169,7 @@ def _step_episode(
     params: SamplingParams,
     abort: threading.Event | None,
     turn_rendering: str,
+    max_context_tokens: int | None,
 ) -> Trajectory:
     messages: list[Message] = list(env.reset(spec.sample))
     # ``[]`` (remote/OpenEnv environments without tools) means no tool schemas, like ``None``.
@@ -110,37 +177,55 @@ def _step_episode(
     max_turns = max(1, int(getattr(env, "max_turns", 1)))
     turns: list[Turn] = []
     done = False
+    context_exhausted = False
     answered_at = 0  # index of the previous turn's assistant message in ``messages``
     for _ in range(max_turns):
         if abort is not None and abort.is_set():
             raise EpisodeAborted(f"episode {spec.group_id} aborted")
         prompt: PromptInput
+        turn_params = params
         multimodal = messages_have_media(messages)
         if multimodal and tools is not None:
             raise MonorlError(
                 f"episode {spec.group_id}: multimodal chats cannot be combined with environment tool schemas"
             )
-        if multimodal or (not turns and tools is None):
+        if multimodal:
             prompt = list(messages)
-        elif not turns:
-            prompt = chat_prompt_ids(tokenizer, messages, tools)
         else:
-            prompt = continue_prompt_ids(
-                tokenizer,
-                previous_messages=messages[:answered_at],
-                previous_prompt_ids=turns[-1].prompt_token_ids,
-                completion=turns[-1].completion,
-                new_messages=messages[answered_at + 1 :],
-                tools=tools,
-                mode=turn_rendering,
-            ).ids
+            if not turns:
+                prompt = chat_prompt_ids(tokenizer, messages, tools)
+            else:
+                prompt = continue_prompt_ids(
+                    tokenizer,
+                    previous_messages=messages[:answered_at],
+                    previous_prompt_ids=turns[-1].prompt_token_ids,
+                    completion=turns[-1].completion,
+                    new_messages=messages[answered_at + 1 :],
+                    tools=tools,
+                    mode=turn_rendering,
+                ).ids
+            if max_context_tokens is not None:
+                room = max_context_tokens - len(prompt)
+                if room < 1:
+                    if not turns:
+                        raise DataError(
+                            f"episode {spec.group_id}: the prompt has {len(prompt)} tokens but the context budget "
+                            f"is {max_context_tokens} (rollout.max_context_tokens, by default "
+                            "trainer.max_seq_len); shorten the prompt (data.max_prompt_tokens) or raise the budget"
+                        )
+                    context_exhausted = True
+                    break
+                if room < params.max_new_tokens:
+                    turn_params = dataclasses.replace(params, max_new_tokens=room)
         try:
-            completion = spec.engine.generate([prompt], params)[0][0]
+            completion = spec.engine.generate([prompt], turn_params)[0][0]
         except GenerationCancelled as e:
             raise EpisodeAborted(f"episode {spec.group_id} aborted during generation") from e
+        except Exception as e:
+            raise GenerationFailed(f"episode {spec.group_id}: the rollout engine failed: {e}") from e
         if completion.prompt_token_ids is not None:
             prompt_ids = list(completion.prompt_token_ids)
-        elif isinstance(prompt[0], dict):
+        elif multimodal:
             prompt_ids = chat_prompt_ids(tokenizer, messages, None)
         else:
             prompt_ids = list(prompt)  # type: ignore[arg-type]
@@ -158,15 +243,22 @@ def _step_episode(
         )
         messages.extend(result.messages)
         done = bool(result.done)
+        if completion.finish_reason == "length" and turn_params is not params:
+            context_exhausted = True  # cut short by the budget, not by rollout.max_new_tokens
         if done or completion.finish_reason in ("length", "error"):
             break
+    info: dict[str, Any] = {"finish_reason": turns[-1].completion.finish_reason, "num_turns": len(turns)}
+    if context_exhausted:
+        info["context_exhausted"] = True
+    if tools is not None:
+        info["tools"] = tools
     return Trajectory(
         sample=spec.sample,
         group_id=spec.group_id,
         messages=messages,
         turns=turns,
-        done=done,
-        info={"finish_reason": turns[-1].completion.finish_reason, "num_turns": len(turns)},
+        done=done and not context_exhausted,
+        info=info,
     )
 
 
@@ -179,10 +271,16 @@ def run_episodes(
     max_parallel: int,
     abort: threading.Event | None = None,
     turn_rendering: str = "tokens",
+    max_context_tokens: int | None = None,
+    retries: int = 0,
+    failures: list[EpisodeFailure] | None = None,
 ) -> list[Trajectory]:
     """Run every spec to completion, ``max_parallel`` episodes at a time; order is preserved.
 
-    The first episode failure is re-raised after the other in-flight episodes finish.
+    Without ``failures`` the first episode failure is re-raised after the other in-flight episodes
+    finish. With a ``failures`` list, an episode whose environment failed on all ``retries + 1``
+    attempts is appended to it and missing from the result; aborts and engine failures are still
+    raised (module docstring).
 
     Once ``abort`` is set the episodes raise :class:`EpisodeAborted`: at their next turn boundary,
     or straight out of a ``generate`` call in flight when the spec's engine implements ``cancel()``
@@ -194,24 +292,41 @@ def run_episodes(
     if not specs:
         return []
     workers = max(1, min(int(max_parallel), len(specs)))
-    kwargs = {
-        "env_factory": env_factory,
-        "tokenizer": tokenizer,
-        "params": params,
-        "abort": abort,
-        "turn_rendering": turn_rendering,
-    }
+
+    def attempt(spec: EpisodeSpec) -> Trajectory | None:
+        try:
+            return run_episode(
+                spec,
+                env_factory=env_factory,
+                tokenizer=tokenizer,
+                params=params,
+                abort=abort,
+                turn_rendering=turn_rendering,
+                max_context_tokens=max_context_tokens,
+                retries=retries,
+            )
+        except (EpisodeAborted, GenerationFailed):
+            raise
+        except Exception as e:
+            if failures is None:
+                raise
+            failures.append(EpisodeFailure(spec=spec, error=e, attempts=retries + 1))
+            log.warning("episode %s failed for good (%s: %s)", spec.group_id, type(e).__name__, e)
+            return None
+
     with _cancel_generation_on_abort(specs, abort):
         if workers == 1:
-            return [run_episode(spec, **kwargs) for spec in specs]
-        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="monorl-episode") as pool:
-            futures = [pool.submit(run_episode, spec, **kwargs) for spec in specs]
-            try:
-                return [f.result() for f in futures]
-            except BaseException:
-                for f in futures:
-                    f.cancel()
-                raise
+            results = [attempt(spec) for spec in specs]
+        else:
+            with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="monorl-episode") as pool:
+                futures = [pool.submit(attempt, spec) for spec in specs]
+                try:
+                    results = [f.result() for f in futures]
+                except BaseException:
+                    for f in futures:
+                        f.cancel()
+                    raise
+    return [trajectory for trajectory in results if trajectory is not None]
 
 
 @contextlib.contextmanager
@@ -250,3 +365,13 @@ def _cancel_generation_on_abort(
 
 def _assistant_message(completion: Completion) -> Message:
     return {"role": "assistant", "content": completion.text}
+
+
+__all__ = [
+    "EpisodeAborted",
+    "EpisodeFailure",
+    "EpisodeSpec",
+    "chat_prompt_ids",
+    "run_episode",
+    "run_episodes",
+]

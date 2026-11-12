@@ -217,6 +217,17 @@ class RolloutConfig(_Model):
     data_parallel_size: int = Field(1, ge=1, description="Number of independent engine replicas.")
     gpu_memory_utilization: float = Field(0.6, gt=0.0, le=1.0)
     max_model_len: int | None = None
+    max_context_tokens: int | None = Field(
+        None,
+        ge=2,
+        description=(
+            "Context budget of an episode in tokens: no prompt plus completion of a turn may exceed it. A "
+            "turn's generation is capped to the room that is left, an episode without room for another "
+            "turn ends, and an agent behind the gateway gets a context_length_exceeded error. Default: "
+            "trainer.max_seq_len (and rollout.max_model_len when set), so that nothing an episode "
+            "samples is cut off in training."
+        ),
+    )
     enable_sleep_mode: bool = Field(True, description="Offload engine memory while training (colocated).")
     async_steps_ahead: int = Field(
         0,
@@ -275,6 +286,20 @@ class EnvConfig(_Model):
         "single_turn", description="Environment: 'single_turn', 'tool_calling', 'openenv', 'hermes', ..."
     )
     max_turns: int = Field(1, ge=1)
+    retries: int = Field(
+        0,
+        ge=0,
+        description="Times an episode whose environment failed (a crashed agent, a failing step) is started again.",
+    )
+    max_failed_frac: float = Field(
+        0.0,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Share of a rollout batch's episodes that may fail for good; they are left out of the batch. "
+            "Above it the run fails. 0 (default): any failed episode fails the run."
+        ),
+    )
     params: dict[str, Any] = Field(default_factory=dict, description="Environment-specific parameters.")
 
 
@@ -350,6 +375,24 @@ class RunConfig(_Model):
                 raise ValueError(f"rollout_gpus + trainer_gpus = {r + t} exceeds {total} GPUs")
         if not self.rewards and self.env.type == "single_turn":
             raise ValueError("single_turn env needs at least one reward in `rewards`")
+        budget = self.rollout.max_context_tokens
+        if budget is not None and budget > self.trainer.max_seq_len:
+            raise ValueError(
+                f"rollout.max_context_tokens={budget} exceeds trainer.max_seq_len={self.trainer.max_seq_len}: "
+                "training would cut such episodes off; raise trainer.max_seq_len or lower the budget"
+            )
+        if self.trainer.backend in PIPELINE_BACKENDS:
+            # TRL takes one result per requested rollout; verl and NeMo-RL run their own rollouts.
+            if self.env.max_failed_frac > 0:
+                raise ValueError(
+                    f"env.max_failed_frac is not supported by trainer.backend={self.trainer.backend!r}: failed "
+                    "episodes can only be left out of a batch by the native loop ('reference', 'unsloth')"
+                )
+            if self.trainer.backend != "trl" and (self.env.retries > 0 or budget is not None):
+                raise ValueError(
+                    f"env.retries and rollout.max_context_tokens are not honoured by trainer.backend="
+                    f"{self.trainer.backend!r}, which runs its own rollouts; use its own length limits"
+                )
         off, ro = self.algorithm.off_policy, self.rollout
         if off.score_centering and (
             ro.temperature <= 0.0
@@ -398,6 +441,16 @@ class RunConfig(_Model):
     @property
     def is_pipeline_backend(self) -> bool:
         return self.trainer.backend in PIPELINE_BACKENDS
+
+    @property
+    def context_budget(self) -> int:
+        """Tokens the context of an episode may hold: ``rollout.max_context_tokens``, else what
+        both the trainer (``trainer.max_seq_len``) and the engine (``rollout.max_model_len``)
+        accept."""
+        ro = self.rollout
+        if ro.max_context_tokens is not None:
+            return ro.max_context_tokens
+        return min(self.trainer.max_seq_len, ro.max_model_len or self.trainer.max_seq_len)
 
     def sequences_per_step(self) -> int:
         return self.trainer.prompts_per_step * self.rollout.group_size

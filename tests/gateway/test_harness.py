@@ -15,7 +15,7 @@ import fakes
 import pytest
 
 from monorl.config.schema import RunConfig
-from monorl.core.errors import ConfigError, EnvironmentError_
+from monorl.core.errors import ConfigError, EnvironmentError_, GenerationFailed
 from monorl.core.reporting import iter_metrics, iter_trajectories
 from monorl.core.types import Sample, SamplingParams, Trajectory
 from monorl.envs import make_env
@@ -263,8 +263,9 @@ def test_engine_failure_is_the_episode_error(make_config: Callable[..., RunConfi
             raise RuntimeError("CUDA out of memory")
 
     config = _config(make_config, ["{python}", str(write_agent(tmp_path, 'chat(task["messages"])\n'))])
-    with pytest.raises(RuntimeError, match="CUDA out of memory"):
+    with pytest.raises(GenerationFailed, match="CUDA out of memory") as failure:
         _episodes(config, BrokenEngine(config), [_sample()])
+    assert isinstance(failure.value.__cause__, RuntimeError)
 
 
 def test_verifier_exit_status_is_the_reward(make_config: Callable[..., RunConfig], tmp_path: Path) -> None:

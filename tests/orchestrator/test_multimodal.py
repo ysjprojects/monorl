@@ -202,7 +202,7 @@ def test_multimodal_episode_sends_chat_every_turn(make_config: Any) -> None:
     assert traj.messages[0]["content"][0] == {"type": "image", "image": "/tmp/x.png"}
 
 
-def test_text_episode_still_sends_ids_after_turn_zero(make_config: Any) -> None:
+def test_text_episode_sends_token_ids_on_every_turn(make_config: Any) -> None:
     cfg = make_config(
         env={"type": "fake_multi", "max_turns": 2}, rollout={"extra": {"fake_mode": "always_right"}}
     )
@@ -217,7 +217,7 @@ def test_text_episode_still_sends_ids_after_turn_zero(make_config: Any) -> None:
         tokenizer=engine.tokenizer,
         params=SamplingParams(n=1),
     )
-    assert engine.prompt_kinds == ["chat", "ids"]
+    assert engine.prompt_kinds == ["ids", "ids"]
 
 
 def test_multimodal_episode_rejects_tool_schemas(make_config: Any) -> None:

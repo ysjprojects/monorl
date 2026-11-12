@@ -173,8 +173,12 @@ class EpisodeDriver(Protocol):
 
     ``run_episode`` returns the finished :class:`Trajectory` (unscored: rewards are applied by the
     caller, per-turn environment rewards go in ``Turn.reward``). It must honour ``abort`` by
-    raising ``monorl.orchestrator.episodes.EpisodeAborted``. ``turn_rendering`` is
-    ``rollout.turn_rendering`` (``"tokens"`` or ``"template"``).
+    raising :class:`~monorl.core.errors.EpisodeAborted` and report an engine failure as
+    :class:`~monorl.core.errors.GenerationFailed`; any other exception counts as a failure of the
+    episode's environment, which a run may tolerate (``env.max_failed_frac``). ``turn_rendering``
+    is ``rollout.turn_rendering`` (``"tokens"`` or ``"template"``) and ``max_context_tokens`` the
+    episode's context budget in tokens (``None``: unlimited): no prompt plus completion may exceed
+    it.
     """
 
     def run_episode(
@@ -187,6 +191,7 @@ class EpisodeDriver(Protocol):
         params: SamplingParams,
         abort: threading.Event | None = None,
         turn_rendering: str = "tokens",
+        max_context_tokens: int | None = None,
     ) -> Trajectory: ...
 
     def close(self) -> None: ...
