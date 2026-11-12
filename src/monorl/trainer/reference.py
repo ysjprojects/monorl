@@ -5,6 +5,19 @@ they are directly comparable with the rollout engines' temperature-scaled sampli
 (importance ratio 1 on-policy). The loss is any callable with the
 ``monorl.algorithms.policy_loss`` signature; by default that function is imported lazily.
 
+Value baseline
+--------------
+``algorithm.name: ppo`` adds a critic: a zero-initialised linear value head on the policy's final
+hidden states (the input of its output embedding), read at the positions
+``TrainBatch.value_mask`` marks, i.e. the last prompt token before a turn's completion.
+:meth:`ReferenceTrainer.compute_values` is the no-grad pass the orchestrator computes advantages
+from; ``train_step`` adds ``algorithm.value_coef`` times the clipped value loss
+(:func:`monorl.algorithms.value_loss`) of the batch's ``returns``, averaged over all value
+positions of the batch. The head trains with the policy (its gradient reaches the policy's
+trainable parameters) at ``VALUE_LR_SCALE`` times the learning rate, is part of the gradient
+all-reduce and of ``trainer_state.pt``, and is never exported: ``export_weights`` and
+``save_pretrained`` are the policy alone.
+
 Data parallelism
 ----------------
 With ``world_size > 1`` (``rank``/``world_size`` kwargs, else ``RANK``/``WORLD_SIZE`` env) every
@@ -43,6 +56,7 @@ from transformers import get_scheduler
 
 from monorl.config.schema import RunConfig
 from monorl.core.batch import TrainBatch
+from monorl.core.errors import ConfigError
 from monorl.rollout.hf_engine import iter_hf_weights, load_tokenizer, resolve_device
 from monorl.rollout.media import auto_model_class, collate_media
 
@@ -51,6 +65,9 @@ log = logging.getLogger(__name__)
 CHECKPOINT_STATE = "trainer_state.pt"
 CHECKPOINT_MODEL = "model"
 CHECKPOINT_ADAPTER = "adapter"
+#: Learning rate of the value head relative to ``trainer.learning_rate`` (the verl compilation of
+#: ``ppo`` gives its critic the same factor).
+VALUE_LR_SCALE = 10.0
 GRAD_BUCKET_BYTES = 64 << 20
 
 
@@ -241,6 +258,10 @@ class ReferenceTrainer:
         self.model.train()
 
         self.trainable_params = [p for p in self.model.parameters() if p.requires_grad]
+        self.value_head: nn.Linear | None = None
+        if config.algorithm.name == "ppo":
+            self.value_head = self._build_value_head()
+            self.trainable_params += list(self.value_head.parameters())
         if self._dist is not None:
             self._dist.broadcast_params(self.trainable_params)
         self.optimizer = self._build_optimizer()
@@ -277,13 +298,37 @@ class ReferenceTrainer:
         )
         return get_peft_model(model, peft_config)
 
+    def _output_embedding(self) -> nn.Module:
+        module = self.hf_model.get_output_embeddings()
+        if module is None:
+            raise ConfigError(
+                "algorithm.name='ppo' reads the value head's input at the model's output embedding (lm_head), "
+                f"which {type(self.hf_model).__name__} does not expose"
+            )
+        return module
+
+    def _build_value_head(self) -> nn.Linear:
+        """``hidden -> 1`` in float32, zero-initialised: the first advantages are plain returns and
+        the policy's parameters get no value gradient before the head has moved."""
+        head = nn.Linear(self._output_embedding().weight.shape[-1], 1)
+        nn.init.zeros_(head.weight)
+        nn.init.zeros_(head.bias)
+        return head.to(self.device)
+
     def _build_optimizer(self) -> torch.optim.Optimizer:
         tc = self.config.trainer
+        params: Any = self.trainable_params
+        if self.value_head is not None:
+            head = list(self.value_head.parameters())
+            params = [
+                {"params": self.trainable_params[: -len(head)]},
+                {"params": head, "lr": tc.learning_rate * VALUE_LR_SCALE},
+            ]
         if tc.optimizer == "adamw":
-            return torch.optim.AdamW(self.trainable_params, lr=tc.learning_rate, weight_decay=tc.weight_decay)
+            return torch.optim.AdamW(params, lr=tc.learning_rate, weight_decay=tc.weight_decay)
         if tc.optimizer == "adam":
-            return torch.optim.Adam(self.trainable_params, lr=tc.learning_rate, weight_decay=tc.weight_decay)
-        return torch.optim.SGD(self.trainable_params, lr=tc.learning_rate, weight_decay=tc.weight_decay)
+            return torch.optim.Adam(params, lr=tc.learning_rate, weight_decay=tc.weight_decay)
+        return torch.optim.SGD(params, lr=tc.learning_rate, weight_decay=tc.weight_decay)
 
     def _build_scheduler(self) -> torch.optim.lr_scheduler.LRScheduler:
         tc = self.config.trainer
@@ -313,17 +358,25 @@ class ReferenceTrainer:
         local_scored = int((batch.response_mask.sum(dim=1) > 0).sum().item())
         # With per-token loss weights (loss_agg="rollout") a micro-batch counts by its weight mass.
         local_mass = float(batch.loss_weights.sum().item()) if batch.loss_weights is not None else 0.0
-        total_tokens, total_seqs, total_scored, total_mass = (
+        # The value loss is a mean over the batch's value positions, whatever loss_agg says.
+        critic = self.value_head is not None and batch.value_mask is not None and batch.returns is not None
+        local_states = int(batch.value_mask.sum().item()) if critic else 0
+        total_tokens, total_seqs, total_scored, total_mass, total_states = (
             local_tokens,
             local_seqs,
             local_scored,
             local_mass,
+            local_states,
         )
         if (
             self._dist is not None
         ):  # weights use global counts so the summed gradient is the full-batch gradient
-            counts = self._dist.all_gather_object((local_tokens, local_seqs, local_scored, local_mass))
-            total_tokens, total_seqs, total_scored, total_mass = (sum(c[i] for c in counts) for i in range(4))
+            counts = self._dist.all_gather_object(
+                (local_tokens, local_seqs, local_scored, local_mass, local_states)
+            )
+            total_tokens, total_seqs, total_scored, total_mass, total_states = (
+                sum(c[i] for c in counts) for i in range(5)
+            )
         total_tokens = max(total_tokens, 1)
         total_scored = max(total_scored, 1)
         mbs = self.config.trainer.micro_batch_size
@@ -333,17 +386,22 @@ class ReferenceTrainer:
 
         sums: dict[str, float] = {}
         weights_total = 0.0
+        value_sums: dict[str, float] = {}
+        value_weights_total = 0.0
         for start in range(0, local_seqs, mbs):
             micro = batch.slice(start, start + mbs)
             micro_tokens = int(micro.response_mask.sum().item())
             micro_scored = int((micro.response_mask.sum(dim=1) > 0).sum().item())
+            micro_states = int(micro.value_mask.sum().item()) if critic else 0
             if micro.loss_weights is not None:
                 weight = float(micro.loss_weights.sum().item()) / max(total_mass, 1e-8)
             else:
                 weight = micro_tokens / total_tokens if token_agg else micro_scored / total_scored
-            if micro_tokens == 0:
+            if micro_tokens == 0 and micro_states == 0:
                 continue
-            with self._autocast():
+            with contextlib.ExitStack() as stack:
+                stack.enter_context(self._autocast())
+                hidden = stack.enter_context(self._final_hidden()) if micro_states else None
                 logits = self._forward(self.model, micro)
             logprobs, entropy, top_logprobs = sequence_logprobs_and_entropy(
                 logits, micro.input_ids, self.temperature, entropy=True, top_ids=micro.behavior_top_ids
@@ -374,6 +432,22 @@ class ReferenceTrainer:
                 **loss_kwargs,
             )
             scaled = out.loss * weight
+            if hidden is not None:
+                from monorl.algorithms import value_loss
+
+                states = micro.value_mask.bool()
+                value_out = value_loss(
+                    self._values(hidden, micro, states),
+                    micro.returns[states],
+                    None if micro.values is None else micro.values[states],
+                    self.config.algorithm.value_clip or 0.0,
+                )
+                value_weight = micro_states / total_states
+                scaled = scaled + self.config.algorithm.value_coef * value_out.loss * value_weight
+                for k, v in value_out.metrics.items():
+                    value_sums[k] = value_sums.get(k, 0.0) + float(v) * value_weight
+                value_weights_total += value_weight
+            del hidden
             if self.scaler is not None:
                 self.scaler.scale(scaled).backward()
             else:
@@ -389,12 +463,15 @@ class ReferenceTrainer:
 
         if self._dist is not None:
             self._dist.all_reduce_grads(self.trainable_params)
-            gathered = self._dist.all_gather_object((sums, weights_total))
-            sums, weights_total = {}, 0.0
-            for other_sums, other_total in gathered:
+            gathered = self._dist.all_gather_object((sums, weights_total, value_sums, value_weights_total))
+            sums, weights_total, value_sums, value_weights_total = {}, 0.0, {}, 0.0
+            for other_sums, other_total, other_value_sums, other_value_total in gathered:
                 for k, v in other_sums.items():
                     sums[k] = sums.get(k, 0.0) + v
                 weights_total += other_total
+                for k, v in other_value_sums.items():
+                    value_sums[k] = value_sums.get(k, 0.0) + v
+                value_weights_total += other_value_total
         if self.scaler is not None:
             self.scaler.unscale_(self.optimizer)
         grad_norm = torch.nn.utils.clip_grad_norm_(self.trainable_params, self.config.trainer.max_grad_norm)
@@ -408,6 +485,11 @@ class ReferenceTrainer:
         self._step += 1
 
         result = {k: v / weights_total for k, v in sums.items()} if weights_total > 0 else {}
+        if value_weights_total > 0:
+            result.update({k: v / value_weights_total for k, v in value_sums.items()})
+            result["loss/total"] = (
+                result.get("loss/total", 0.0) + self.config.algorithm.value_coef * result["loss/value"]
+            )
         result["grad_norm"] = float(grad_norm.item())
         result["lr"] = float(self.scheduler.get_last_lr()[0])
         result["tokens/response_mean"] = float(total_tokens / total_seqs)
@@ -431,6 +513,29 @@ class ReferenceTrainer:
                 )
                 out[start : start + len(micro)] = lp * micro.response_mask.float()
             model.train(was_training)
+        return out.to(src_device)
+
+    @torch.no_grad()
+    def compute_values(self, batch: TrainBatch) -> torch.Tensor:
+        """``[B, T]`` estimates of the value head (``algorithm.name: ppo``), no gradient: entry
+        ``t`` values the state after ``input_ids[:, : t + 1]``, so a turn's value is the entry at
+        its last prompt token (``TrainBatch.value_mask``). Zero at padding."""
+        if self.value_head is None:
+            raise ConfigError(
+                f"the trainer has no value head: algorithm.name={self.config.algorithm.name!r}, not 'ppo'"
+            )
+        src_device = batch.input_ids.device
+        prepared = self._prepare(batch)
+        mbs = self.config.trainer.micro_batch_size
+        out = torch.zeros(prepared.input_ids.shape, dtype=torch.float32, device=self.device)
+        was_training = self.model.training
+        self.model.eval()
+        for start in range(0, len(prepared), mbs):
+            micro = prepared.slice(start, start + mbs)
+            with self._autocast(), self._final_hidden() as hidden:
+                self._forward(self.model, micro)
+            out[start : start + len(micro)] = self._values(hidden, micro) * micro.attention_mask
+        self.model.train(was_training)
         return out.to(src_device)
 
     def export_weights(self) -> Iterator[tuple[str, torch.Tensor]]:
@@ -478,6 +583,7 @@ class ReferenceTrainer:
                 "optimizer": self.optimizer.state_dict(),
                 "scheduler": self.scheduler.state_dict(),
                 "scaler": self.scaler.state_dict() if self.scaler is not None else None,
+                "value_head": self.value_head.state_dict() if self.value_head is not None else None,
                 "rng": {
                     "python": random.getstate(),
                     "numpy": np.random.get_state(),
@@ -504,6 +610,12 @@ class ReferenceTrainer:
                 for name, tensor in iter_hf_weights(path / CHECKPOINT_MODEL):
                     state[name].copy_(tensor.to(device=state[name].device, dtype=state[name].dtype))
         state = torch.load(path / CHECKPOINT_STATE, map_location="cpu", weights_only=False)
+        if self.value_head is not None:
+            if state.get("value_head") is None:
+                raise RuntimeError(
+                    f"checkpoint {path} holds no value head: it was not written by an algorithm.name='ppo' run"
+                )
+            self.value_head.load_state_dict(state["value_head"])
         self.optimizer.load_state_dict(state["optimizer"])
         self.scheduler.load_state_dict(state["scheduler"])
         if self.scaler is not None and state.get("scaler") is not None:
@@ -564,6 +676,9 @@ class ReferenceTrainer:
                 behavior_logprobs=cut(batch.behavior_logprobs),
                 behavior_top_ids=cut(batch.behavior_top_ids),
                 behavior_top_logprobs=cut(batch.behavior_top_logprobs),
+                values=cut(batch.values),
+                returns=cut(batch.returns),
+                value_mask=cut(batch.value_mask),
                 meta=batch.meta,
                 extra={
                     k: v[:, : self.max_seq_len]
@@ -594,6 +709,34 @@ class ReferenceTrainer:
             position_ids=position_ids,
             **kwargs,
         ).logits
+
+    @contextlib.contextmanager
+    def _final_hidden(self) -> Iterator[list[torch.Tensor]]:
+        """Collects the input of the policy's output embedding, i.e. the final hidden states
+        ``[B, T, H]``, of every forward pass run inside the block. Reading it there costs no
+        memory beyond the pass itself, unlike ``output_hidden_states``, which keeps every layer's
+        output alive (also under gradient checkpointing)."""
+        captured: list[torch.Tensor] = []
+        handle = self._output_embedding().register_forward_pre_hook(
+            lambda _module, args: captured.append(args[0])
+        )
+        try:
+            yield captured
+        finally:
+            handle.remove()
+
+    def _values(
+        self, hidden: list[torch.Tensor], micro: TrainBatch, positions: torch.Tensor | None = None
+    ) -> torch.Tensor:
+        """Value-head estimates from the hidden states :meth:`_final_hidden` collected for
+        ``micro``: ``[B, T]``, or one per ``True`` entry of ``positions`` (``[B, T]`` bool)."""
+        if len(hidden) != 1 or hidden[0].shape[:2] != micro.input_ids.shape:
+            raise RuntimeError(
+                "the value head reads the input of the model's output embedding, but the forward pass called "
+                f"it {len(hidden)} time(s) and not once on the whole {tuple(micro.input_ids.shape)} batch"
+            )
+        states = hidden[0] if positions is None else hidden[0][positions]
+        return self.value_head(states.float()).squeeze(-1)
 
     def _autocast(self) -> Any:
         if self.autocast_dtype is None:

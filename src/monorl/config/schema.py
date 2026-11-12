@@ -197,9 +197,31 @@ class AlgorithmConfig(_Model):
     overlong_penalty: float = Field(
         0.0, ge=0.0, description="Reward penalty for truncated (length) completions."
     )
+    credit_assignment: Literal["episode", "turn"] = Field(
+        "episode",
+        description=(
+            "Which rewards a response token is credited with. 'episode': the reward of its whole episode, "
+            "the same advantage for every token. 'turn': the return from its own turn on (later per-turn "
+            "rewards discounted by gamma; the reward-function score arrives at the final turn), compared "
+            "with the same turn of the other episodes of its prompt group. See docs/CREDIT_ASSIGNMENT.md."
+        ),
+    )
     gamma: float = Field(1.0, ge=0.0, le=1.0, description="Discount for multi-turn per-turn rewards.")
-    lam: float = Field(1.0, ge=0.0, le=1.0, description="GAE lambda (ppo only).")
+    lam: float = Field(
+        1.0,
+        ge=0.0,
+        le=1.0,
+        description="GAE lambda (ppo only): 1 = returns minus the value baseline, 0 = one-step TD error.",
+    )
     value_coef: float = Field(0.5, ge=0.0, description="Value loss weight (ppo only).")
+    value_clip: float | None = Field(
+        0.5,
+        gt=0.0,
+        description=(
+            "ppo only: the value loss also penalises a value estimate clipped to this distance from the "
+            "estimate the advantages were computed with (null = plain squared error)."
+        ),
+    )
     off_policy: OffPolicyConfig = Field(
         default_factory=OffPolicyConfig, description="Off-policy corrections (off by default)."
     )
@@ -357,11 +379,6 @@ class RunConfig(_Model):
             if self.env.type != "single_turn":
                 raise ValueError("sft trains on dataset responses; env.type must be 'single_turn'")
             return self
-        if self.algorithm.name == "ppo" and self.trainer.backend not in PIPELINE_BACKENDS:
-            raise ValueError(
-                "algorithm 'ppo' needs a critic (GAE/value loss), which only the verl pipeline backend provides; "
-                "use grpo/dapo/rloo/reinforce with trainer.backend='reference'"
-            )
         if self.algorithm.name in {"grpo", "dapo", "rloo"} and self.rollout.group_size < 2:
             raise ValueError(f"{self.algorithm.name} needs rollout.group_size >= 2")
         if self.algorithm.advantage_norm == "group" and self.rollout.group_size < 2:

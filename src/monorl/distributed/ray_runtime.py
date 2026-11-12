@@ -248,6 +248,15 @@ class TrainerActor:
     def compute_logprobs(self, batch: TrainBatch, reference: bool) -> torch.Tensor:
         return self._trainer().compute_logprobs(batch, reference=reference).detach().cpu()
 
+    def compute_values(self, batch: TrainBatch) -> torch.Tensor:
+        compute = getattr(self._trainer(), "compute_values", None)
+        if compute is None:
+            raise ConfigError(
+                f"trainer {type(self._trainer()).__name__} has no value head (compute_values), which "
+                "algorithm.name='ppo' needs"
+            )
+        return compute(batch).detach().cpu()
+
     def save_checkpoint(self, path: str) -> None:
         self._trainer().save_checkpoint(Path(path))
 
@@ -426,6 +435,14 @@ class RayTrainer:
         parts = ray.get(
             [a.compute_logprobs.remote(s, reference) for a, s in zip(self.actors, shards, strict=True)]
         )
+        return torch.cat(parts, dim=0)
+
+    def compute_values(self, batch: TrainBatch) -> torch.Tensor:
+        """Value-head estimates (``algorithm.name: ppo``), sharded like :meth:`compute_logprobs`."""
+        import ray
+
+        shards = self._shards(batch)
+        parts = ray.get([a.compute_values.remote(s) for a, s in zip(self.actors, shards, strict=True)])
         return torch.cat(parts, dim=0)
 
     def export_weights(self) -> Iterator[tuple[str, torch.Tensor]]:

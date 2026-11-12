@@ -209,6 +209,12 @@ def grpo_config_kwargs(
             f"trainer.backend='trl' supports algorithm.name in {{'grpo', 'dapo', 'sft'}}, got {algo.name!r}; "
             "use trainer.backend='reference' for rloo/reinforce (ppo needs a critic: trainer.backend='verl')"
         )
+    if algo.credit_assignment == "turn":
+        raise ConfigError(
+            "algorithm.credit_assignment='turn' is not supported with trainer.backend='trl': TRL's GRPOTrainer "
+            "computes one advantage per completion from the rewards of its prompt group; use "
+            "trainer.backend='reference'"
+        )
 
     if algo.advantage_norm == "group":
         scale_rewards = "group" if algo.advantage_std_norm else "none"

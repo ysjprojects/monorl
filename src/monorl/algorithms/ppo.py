@@ -1,4 +1,10 @@
-"""PPO-specific pieces: generalised advantage estimation and the clipped value loss."""
+"""PPO-specific pieces: generalised advantage estimation, the clipped value loss and diagnostics
+of the value baseline.
+
+The reference trainer's critic is a value head read at the state of every credited step (the last
+prompt token before a turn's completion); the orchestrator runs :func:`gae` over ``[N, K]`` tables
+of per-turn rewards and values (:mod:`monorl.algorithms.credit`), one step per turn.
+"""
 
 from __future__ import annotations
 
@@ -20,12 +26,13 @@ def gae(
     gamma: float,
     lam: float,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Generalised advantage estimation over right-padded ``[B, T]`` token sequences.
+    """Generalised advantage estimation over right-padded ``[B, T]`` sequences of steps (the
+    tokens of a response, or the turns of an episode).
 
-    ``rewards[b, t]`` is the reward received *after* emitting token ``t`` (typically zero
-    everywhere except the final response token), ``values[b, t]`` the critic's estimate at
-    that position, and ``mask`` the response positions. Positions outside the mask have zero
-    advantage/return and are treated as terminal (``V_{t+1} = 0``) by their predecessor.
+    ``rewards[b, t]`` is the reward received *after* step ``t`` (for tokens typically zero
+    everywhere except the final response token), ``values[b, t]`` the critic's estimate of the
+    state step ``t`` was taken in, and ``mask`` the steps that exist. Positions outside the mask
+    have zero advantage/return and are treated as terminal (``V_{t+1} = 0``) by their predecessor.
 
     Returns ``(advantages, returns)``, both ``[B, T]`` and detached, with ``returns = adv + values``.
     """
@@ -76,3 +83,41 @@ def value_loss(
     return ValueLossOutput(
         loss=loss, metrics={"loss/value": float(loss.item()), "value/clipfrac": float(clipfrac.item())}
     )
+
+
+def explained_variance(
+    values: torch.Tensor, returns: torch.Tensor, mask: torch.Tensor | None = None
+) -> float:
+    """``1 - Var(returns - values) / Var(returns)`` over ``mask`` (everything without it): 1 for a
+    perfect value estimate, 0 for one that does no better than a constant, negative for one that
+    does worse. ``nan`` when the returns do not vary (fewer than two entries included)."""
+    values = values.detach().to(torch.float32)
+    returns = returns.detach().to(torch.float32)
+    if mask is not None:
+        keep = mask.to(torch.bool)
+        values, returns = values[keep], returns[keep]
+    if returns.numel() < 2:
+        return float("nan")
+    variance = returns.var(unbiased=False)
+    if float(variance.item()) <= 0.0:
+        return float("nan")
+    return float((1.0 - (returns - values).var(unbiased=False) / variance).item())
+
+
+def value_metrics(
+    values: torch.Tensor, returns: torch.Tensor, mask: torch.Tensor | None = None
+) -> dict[str, float]:
+    """``value/mean``, ``value/return_mean`` and, when it is defined, ``value/explained_variance``
+    of value estimates against their targets over ``mask``."""
+    keep = torch.ones_like(values, dtype=torch.bool) if mask is None else mask.to(torch.bool)
+    count = int(keep.sum().item())
+    if count == 0:
+        return {}
+    metrics = {
+        "value/mean": float(values.detach()[keep].to(torch.float32).mean().item()),
+        "value/return_mean": float(returns.detach()[keep].to(torch.float32).mean().item()),
+    }
+    explained = explained_variance(values, returns, keep)
+    if explained == explained:  # not nan
+        metrics["value/explained_variance"] = explained
+    return metrics

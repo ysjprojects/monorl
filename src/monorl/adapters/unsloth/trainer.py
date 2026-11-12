@@ -314,6 +314,13 @@ class UnslothTrainer:
         pin_logits_env()
         return self.inner.compute_logprobs(batch, reference=reference)
 
+    def compute_values(self, batch: TrainBatch) -> torch.Tensor:
+        """The reference trainer's value head (``algorithm.name: ppo``). It reads the input of
+        ``lm_head``, which Unsloth's forward calls as a module whenever it returns logits
+        (``CausalLM_fast_forward`` with ``UNSLOTH_RETURN_LOGITS=1`` and no labels)."""
+        pin_logits_env()
+        return self.inner.compute_values(batch)
+
     def export_weights(self) -> Iterator[tuple[str, torch.Tensor]]:
         return iter_merged_weights(self.hf_model)
 

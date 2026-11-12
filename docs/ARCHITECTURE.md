@@ -181,11 +181,20 @@ pipeline evaluation, rejection sampling, the TRL rollout). Two policies apply th
   both. A budget above `trainer.max_seq_len` is a config error. Multimodal prompts are tokenised
   by the engine and are not budgeted.
 
+#### Credit assignment
+By default every response token of an episode carries the episode's advantage
+(`algorithm.credit_assignment: episode`). `turn` credits the tokens of a turn with the return from
+that turn on, compared per turn index within the prompt group; `algorithm.name: ppo` replaces the
+group baseline with a value head in the reference trainer and turn-level GAE (`gamma`, `lam`,
+`value_coef`, `value_clip`; `TrainBatch.values` / `returns` / `value_mask`). Formulas, the
+treatment of groups with unequal turn counts and the costs: [`CREDIT_ASSIGNMENT.md`](CREDIT_ASSIGNMENT.md).
+
 Metric names (used by the UI): `reward/mean`, `reward/std`, `reward/<name>` per reward,
 `loss/policy`, `loss/kl`, `loss/entropy`, `policy/clipfrac`, `policy/approx_kl`,
 `policy/staleness`, `tokens/response_mean`, `tokens/prompt_mean`, `tokens/sequences`,
 `tokens/prefix_mismatch`, `time/rollout`, `time/train`, `time/sync`, `lr`, `offpolicy/*` when
-`algorithm.off_policy` is active, and `rollout/failed_*` when `env.max_failed_frac > 0`.
+`algorithm.off_policy` is active, `rollout/failed_*` when `env.max_failed_frac > 0`,
+`advantage/turn_*` with `credit_assignment: turn`, and `loss/value`, `value/*` for `ppo`.
 
 Agent metrics (`monorl.orchestrator.metrics.episode_metrics(trajectories, *, success_threshold)`,
 reported per step as `reward/success_rate`, `reward/pass_at_k` and `episode/<key>`, and by every

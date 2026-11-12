@@ -31,6 +31,12 @@ class TrainBatch:
     span several rows: each of its tokens weighs one over its total number of response tokens, so
     every trajectory counts equally. ``None`` means the plain token or per-sequence mean.
 
+    ``values``/``returns``/``value_mask`` (``[B, T]``) carry the learned value baseline of
+    ``algorithm.name="ppo"``. ``value_mask`` marks the positions whose hidden state is the state of
+    a credited step: the last prompt token before a turn's completion. There ``values`` holds the
+    value head's estimate when the batch was built (the anchor of the clipped value loss) and
+    ``returns`` its regression target; all three are zero elsewhere and ``None`` without a critic.
+
     ``extra`` carries additional model inputs (multimodal processor tensors). Every value is
     batch-aligned so :meth:`slice` stays correct: a tensor is indexed along dim 0 (e.g.
     ``mm_token_type_ids`` ``[B, T]``), a list is indexed like ``group_ids`` (e.g.
@@ -53,6 +59,9 @@ class TrainBatch:
     behavior_logprobs: torch.Tensor | None = None
     behavior_top_ids: torch.Tensor | None = None
     behavior_top_logprobs: torch.Tensor | None = None
+    values: torch.Tensor | None = None
+    returns: torch.Tensor | None = None
+    value_mask: torch.Tensor | None = None
     meta: dict[str, Any] = field(default_factory=dict)
     extra: dict[str, Any] = field(default_factory=dict)
 
@@ -77,6 +86,9 @@ class TrainBatch:
             behavior_logprobs=mv(self.behavior_logprobs),
             behavior_top_ids=mv(self.behavior_top_ids),
             behavior_top_logprobs=mv(self.behavior_top_logprobs),
+            values=mv(self.values),
+            returns=mv(self.returns),
+            value_mask=mv(self.value_mask),
             meta=dict(self.meta),
             extra={k: _move_extra(v, device) for k, v in self.extra.items()},
         )
@@ -101,6 +113,9 @@ class TrainBatch:
             behavior_logprobs=sl(self.behavior_logprobs),
             behavior_top_ids=sl(self.behavior_top_ids),
             behavior_top_logprobs=sl(self.behavior_top_logprobs),
+            values=sl(self.values),
+            returns=sl(self.returns),
+            value_mask=sl(self.value_mask),
             meta=dict(self.meta),
             extra={k: _slice_extra(v, start, stop) for k, v in self.extra.items()},
         )

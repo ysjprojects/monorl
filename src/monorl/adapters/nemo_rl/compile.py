@@ -98,6 +98,12 @@ def _check_supported(config: RunConfig) -> None:
             "through its EnvironmentInterface, while a harness agent runs the whole episode itself; use "
             "trainer.backend='reference' or 'trl'"
         )
+    if algo.credit_assignment == "turn":
+        raise ConfigError(
+            "algorithm.credit_assignment='turn' is not supported with trainer.backend='nemo_rl': NeMo-RL's "
+            "advantage estimators credit every token of a rollout with the rollout's reward against its "
+            "prompt group; use trainer.backend='reference'"
+        )
     if algo.num_epochs != 1:
         raise ConfigError(
             "algorithm.num_epochs > 1 has no NeMo-RL equivalent (one optimizer pass per rollout batch)"

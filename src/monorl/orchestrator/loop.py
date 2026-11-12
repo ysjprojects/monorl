@@ -25,7 +25,7 @@ from monorl.core.errors import ConfigError, DataError, EnvironmentError_
 from monorl.core.registry import registry
 from monorl.core.reporting import list_checkpoints
 from monorl.core.types import RewardResult, RunResult, Sample, SamplingParams, Trajectory
-from monorl.orchestrator.batching import build_train_batch
+from monorl.orchestrator.batching import build_train_batch, build_turn_batch
 from monorl.orchestrator.episodes import EpisodeAborted, EpisodeFailure, EpisodeSpec, run_episodes
 from monorl.orchestrator.metrics import eval_metrics, step_metrics
 from monorl.orchestrator.sampler import PromptSampler
@@ -33,6 +33,7 @@ from monorl.orchestrator.sinks import MetricSinks
 
 if TYPE_CHECKING:
     from monorl.config.schema import DataConfig, RunConfig
+    from monorl.core.batch import TrainBatch
     from monorl.core.interfaces import Environment, RewardFunction, RolloutEngine, Trainer, WeightSync
     from monorl.core.reporting import RunReporter
 
@@ -428,7 +429,7 @@ class ComponentLoop:
         else:
             results = [RewardResult(score=0.0) for _ in trajectories]
         for traj, res in zip(trajectories, results, strict=True):
-            env_return = sum((algo.gamma**k) * float(turn.reward) for k, turn in enumerate(traj.turns))
+            env_return = _env_return(traj, algo.gamma)
             breakdown = {k: float(v) for k, v in res.breakdown.items()}
             reward = float(res.score) + env_return
             if any(turn.reward != 0.0 for turn in traj.turns):
@@ -462,23 +463,39 @@ class ComponentLoop:
             return metrics
         metrics.update(step_metrics(trajectories, success_threshold=config.logging.success_threshold))
 
-        rewards = torch.tensor([t.reward for t in trajectories], dtype=torch.float32)
-        advantages = _resolve_compute_advantages()(
-            rewards, [t.group_id for t in trajectories], algorithm=algo
-        )
-        batch, token_stats = build_train_batch(
-            trajectories,
-            advantages,
-            pad_token_id=self.pad_token_id,
-            max_seq_len=self.max_seq_len,
-            meta={
+        group_ids = [t.group_id for t in trajectories]
+        batch_args: dict[str, Any] = {
+            "pad_token_id": self.pad_token_id,
+            "max_seq_len": self.max_seq_len,
+            "meta": {
                 "step": step,
                 "policy_version": item.policy_version,
                 "sample_ids": [t.sample.id for t in trajectories],
             },
-            processor=self.processor,
-            loss_agg=algo.loss_agg,
-        )
+            "processor": self.processor,
+            "loss_agg": algo.loss_agg,
+        }
+        if algo.name == "ppo":
+            batch, token_stats = self._critic_batch(trajectories, batch_args, metrics)
+        else:
+            if algo.credit_assignment == "turn":
+                # Every turn is credited with the return from that turn on and compared with the
+                # same turn of its prompt group (docs/CREDIT_ASSIGNMENT.md).
+                credit = _resolve_algorithms()
+                turn_rewards, turn_mask = credit.turn_table(
+                    [_turn_rewards(t, algo.gamma) for t in trajectories]
+                )
+                advantages = credit.turn_advantages(
+                    credit.turn_returns(turn_rewards, turn_mask, algo.gamma),
+                    turn_mask,
+                    group_ids,
+                    algorithm=algo,
+                )
+                metrics.update(credit.turn_metrics(advantages, turn_mask))
+            else:
+                rewards = torch.tensor([t.reward for t in trajectories], dtype=torch.float32)
+                advantages = _resolve_compute_advantages()(rewards, group_ids, algorithm=algo)
+            batch, token_stats = build_train_batch(trajectories, advantages, **batch_args)
         metrics.update(token_stats)
         metrics["advantage/mean"] = float(batch.advantages.sum().item() / max(1, batch.num_response_tokens))
         metrics["advantage/abs_mean"] = float(
@@ -530,6 +547,46 @@ class ComponentLoop:
         metrics.update({k: float(v) for k, v in sync_metrics.items() if isinstance(v, (int, float))})
         metrics["time/sync"] = time.perf_counter() - t0
         return metrics
+
+    def _critic_batch(
+        self, trajectories: Sequence[Trajectory], batch_args: dict[str, Any], metrics: dict[str, float]
+    ) -> tuple[TrainBatch, dict[str, float]]:
+        """The batch of ``algorithm.name: ppo``: one no-grad pass of the trainer's value head over
+        the batch, GAE over the steps of every episode (its turns with ``credit_assignment: turn``,
+        otherwise the episode as a single step valued at the state of its first turn), and the
+        values and returns the value loss trains on."""
+        algo = self.config.algorithm
+        compute_values = getattr(self.trainer, "compute_values", None)
+        if compute_values is None:
+            raise ConfigError(
+                "algorithm.name='ppo' needs a trainer with a value head (compute_values), which "
+                f"trainer.backend={self.config.trainer.backend!r} does not have; use trainer.backend='reference'"
+            )
+        credit = _resolve_algorithms()
+        batch, token_stats, layout = build_turn_batch(trajectories, **batch_args)
+        t0 = time.perf_counter()
+        values = layout.state_values(compute_values(batch))
+        metrics["time/values"] = time.perf_counter() - t0
+        turns = layout.turn_mask
+        per_turn = algo.credit_assignment == "turn"
+        if per_turn:
+            rewards, steps = credit.turn_table([_turn_rewards(t, algo.gamma) for t in trajectories])
+        else:
+            rewards = torch.zeros(turns.shape, dtype=torch.float32)
+            rewards[:, 0] = torch.tensor([t.reward for t in trajectories], dtype=torch.float32)
+            steps = torch.zeros_like(turns)
+            steps[:, 0] = True
+        advantages, returns = credit.gae(rewards, values, steps, algo.gamma, algo.lam)
+        if per_turn:
+            metrics.update(credit.turn_metrics(advantages, turns))
+        else:
+            advantages = advantages[:, :1] * turns
+        batch.advantages = layout.per_token(advantages)
+        batch.values = layout.per_state(values, steps)
+        batch.returns = layout.per_state(returns, steps)
+        batch.value_mask = layout.state_mask(steps)
+        metrics.update(credit.value_metrics(batch.values, batch.returns, batch.value_mask))
+        return batch, token_stats
 
     def _engine_logprobs_match_trainer(self) -> bool:
         ro = self.config.rollout
@@ -639,6 +696,19 @@ def _groups(trajectories: Sequence[Trajectory]) -> dict[str, list[Trajectory]]:
     return groups
 
 
+def _env_return(trajectory: Trajectory, gamma: float) -> float:
+    """Discounted sum of an episode's per-turn environment rewards (turn 0 undiscounted)."""
+    return sum((gamma**k) * float(turn.reward) for k, turn in enumerate(trajectory.turns))
+
+
+def _turn_rewards(trajectory: Trajectory, gamma: float) -> list[float]:
+    """The reward of every turn of a scored trajectory: its environment reward and, at the final
+    turn, what ``_score`` gave the episode as a whole (reward-function score, overlong penalty)."""
+    rewards = [float(turn.reward) for turn in trajectory.turns]
+    rewards[-1] += trajectory.reward - _env_return(trajectory, gamma)
+    return rewards
+
+
 def _checkpoint_complete(path: Path) -> bool:
     """Checkpoints are written to ``step-N.tmp`` and renamed, so any non-empty ``step-N`` is complete
     (a crash mid-save leaves only the ``.tmp`` directory, which ``list_checkpoints`` ignores)."""
@@ -729,6 +799,12 @@ def _resolve_compute_advantages() -> Callable[..., Any]:
     from monorl.algorithms import compute_advantages
 
     return compute_advantages
+
+
+def _resolve_algorithms() -> Any:
+    import monorl.algorithms as algorithms
+
+    return algorithms
 
 
 def _resolve_offpolicy() -> Any:

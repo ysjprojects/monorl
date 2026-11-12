@@ -8,7 +8,12 @@
 * ``rloo``: leave-one-out baseline — each reward minus the mean of the *other* members of its
   group (0 baseline for singleton groups).
 * ``reinforce``: raw rewards.
-* ``ppo``: raw rewards; per-token advantages come from :func:`monorl.algorithms.ppo.gae`.
+* ``ppo``: raw rewards; the advantages come from :func:`monorl.algorithms.ppo.gae` over the
+  value head's estimates.
+
+This is the estimator of ``algorithm.credit_assignment: episode``, where every token of an episode
+carries its episode's advantage. :mod:`monorl.algorithms.credit` applies the same estimators per
+turn (``credit_assignment: turn``).
 """
 
 from __future__ import annotations

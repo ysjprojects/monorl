@@ -12,9 +12,13 @@ exactly once: a turn shared by several branches is a loss position in one of the
 in the others. ``tokens/prefix_mismatch`` counts the trajectories that needed more than one
 sequence.
 
-Every sequence of a trajectory carries that trajectory's advantage, reward and group id. With
-``algorithm.loss_agg: rollout`` the batch also gets ``loss_weights`` under which each trajectory
-counts equally, however many sequences and response tokens it has.
+Every sequence of a trajectory carries that trajectory's reward and group id, and every response
+token the advantage of its trajectory or, with per-turn advantages
+(``algorithm.credit_assignment: turn``), of its own turn, whichever sequence that turn is a loss
+position in. :class:`TurnLayout` records where the turns sit: the response tokens of each and its
+*state*, the last prompt token before its completion, where the value head of ``algorithm.name:
+ppo`` is read. With ``algorithm.loss_agg: rollout`` the batch also gets ``loss_weights`` under
+which each trajectory counts equally, however many sequences and response tokens it has.
 
 Multimodal trajectories (image parts in the chat, ``processor`` given) are re-encoded through the
 model's processor with the engine's recipe (:func:`monorl.rollout.media.vlm_encode`); the
@@ -29,7 +33,7 @@ positions.
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import torch
@@ -51,6 +55,8 @@ class FlatSequence:
     top_logprobs: list[tuple[int, TopLogprobs]] | None = None
     """``(start position, top-k)`` of every trained completion span; ``None`` when a span lacks
     the sampler's top-k."""
+    spans: list[tuple[int, int, int]] = field(default_factory=list)
+    """``(turn index, start, end)`` of every trained completion span (positions before truncation)."""
 
     def truncate(self, max_len: int) -> bool:
         if len(self.input_ids) <= max_len:
@@ -107,11 +113,13 @@ def _flatten(
     logprobs: list[float] = [0.0] * len(input_ids)
     have_logprobs = True
     top: list[tuple[int, TopLogprobs]] | None = []
+    spans: list[tuple[int, int, int]] = []
     for k in trained:
         turn = turns[k]
         start = len(turn.prompt_token_ids)
         end = start + len(turn.completion.token_ids)
         mask[start:end] = [1] * (end - start)
+        spans.append((k, start, end))
         lp = turn.completion.logprobs
         if lp is None or len(lp) != end - start:
             have_logprobs = False
@@ -129,6 +137,7 @@ def _flatten(
         prompt_len=len(turns[chain[0]].prompt_token_ids),
         prefix_mismatch=prefix_mismatch,
         top_logprobs=top,
+        spans=spans,
     )
 
 
@@ -199,6 +208,47 @@ def encode_trajectory_media(trajectory: Trajectory, processor: Any) -> MediaEnco
     return MediaEncoding(token_aligned=aligned, media=media)
 
 
+@dataclass(slots=True)
+class TurnLayout:
+    """Where the turns of a batch's trajectories sit in its ``[B, T]`` rows. Per-turn quantities
+    are ``[N, K]`` tables (:mod:`monorl.algorithms.credit`): one row per trajectory, one column
+    per turn, ``K`` the largest number of turns."""
+
+    owner: torch.Tensor
+    """``[B]``: the trajectory every row of the batch belongs to."""
+    turn_mask: torch.Tensor
+    """``[N, K]`` bool: trajectory ``i`` has a turn ``k``."""
+    token_turn: torch.Tensor
+    """``[B, T]``: ``i * K + k`` for a response token of turn ``k`` of trajectory ``i``, ``-1``
+    elsewhere."""
+    state_index: torch.Tensor
+    """``[N, K]``: flat position ``b * T + t`` of a turn's state, the last prompt token before
+    its completion in the row the turn is a loss position in; ``-1`` for a turn without one (an
+    empty prompt, a turn outside the batch's rows or cut off by ``max_seq_len``)."""
+
+    def per_token(self, per_turn: torch.Tensor) -> torch.Tensor:
+        """``[B, T]``: every response token gets the ``[N, K]`` entry of its own turn, the rest 0."""
+        flat = per_turn.to(torch.float32).reshape(-1)
+        return flat[self.token_turn.clamp(min=0)] * (self.token_turn >= 0)
+
+    def state_values(self, values: torch.Tensor) -> torch.Tensor:
+        """``[N, K]``: the ``[B, T]`` entry at every turn's state, 0 for turns without one."""
+        found = self.state_index >= 0
+        return values.to(torch.float32).reshape(-1)[self.state_index.clamp(min=0)] * found
+
+    def per_state(self, per_turn: torch.Tensor, select: torch.Tensor | None = None) -> torch.Tensor:
+        """``[B, T]``: the ``[N, K]`` entry of every turn at that turn's state, the rest 0.
+        ``select`` (``[N, K]`` bool) restricts it to some turns."""
+        chosen = self.state_index >= 0 if select is None else (self.state_index >= 0) & select.to(torch.bool)
+        out = torch.zeros(self.token_turn.numel(), dtype=torch.float32)
+        out[self.state_index[chosen]] = per_turn.to(torch.float32)[chosen]
+        return out.view_as(self.token_turn)
+
+    def state_mask(self, select: torch.Tensor | None = None) -> torch.Tensor:
+        """``[B, T]`` 0/1: the positions that are the state of a turn (of the ``select`` -ed turns)."""
+        return self.per_state(torch.ones(self.state_index.shape), select).to(torch.long)
+
+
 def build_train_batch(
     trajectories: Sequence[Trajectory],
     advantages: torch.Tensor | Sequence[float],
@@ -209,10 +259,12 @@ def build_train_batch(
     processor: Any | None = None,
     loss_agg: str = "token",
 ) -> tuple[TrainBatch, dict[str, float]]:
-    """Right-padded batch with per-trajectory advantages broadcast over response positions.
+    """Right-padded batch with the advantages spread over response positions.
 
-    ``advantages`` has one value per trajectory; a trajectory may contribute several sequences
-    (module docstring), so the batch can have more rows than there are trajectories.
+    ``advantages`` has one value per trajectory (``[N]``), which all its response tokens carry, or
+    one per turn (an ``[N, K]`` table, :mod:`monorl.algorithms.credit`), which the tokens of that
+    turn carry. A trajectory may contribute several sequences (module docstring), so the batch can
+    have more rows than there are trajectories.
     ``old_logprobs`` is ``None`` when any trajectory lacks sampling logprobs (the caller then
     decides whether to recompute them). ``ref_logprobs`` is left for the caller. ``processor``
     (the model's ``AutoProcessor``) enables media tensors for multimodal trajectories.
@@ -220,11 +272,46 @@ def build_train_batch(
     of response tokens its trajectory has in the batch. Returns the batch and token statistics
     (``tokens/*``).
     """
-    if not trajectories:
-        raise ValueError("cannot build a batch from zero trajectories")
-    adv = torch.as_tensor(advantages, dtype=torch.float32).reshape(-1)
+    adv = torch.as_tensor(advantages, dtype=torch.float32)
+    per_turn = adv.ndim == 2
+    if not per_turn:
+        adv = adv.reshape(-1)
     if adv.shape[0] != len(trajectories):
         raise ValueError(f"{adv.shape[0]} advantages for {len(trajectories)} trajectories")
+    batch, stats, layout = build_turn_batch(
+        trajectories,
+        pad_token_id=pad_token_id,
+        max_seq_len=max_seq_len,
+        meta=meta,
+        processor=processor,
+        loss_agg=loss_agg,
+    )
+    if per_turn:
+        if adv.shape != layout.turn_mask.shape:
+            raise ValueError(
+                f"per-turn advantages have shape {tuple(adv.shape)}, the trajectories need "
+                f"{tuple(layout.turn_mask.shape)}"
+            )
+        batch.advantages = layout.per_token(adv)
+    else:
+        batch.advantages = adv[layout.owner][:, None] * batch.response_mask.to(torch.float32)
+    return batch, stats
+
+
+def build_turn_batch(
+    trajectories: Sequence[Trajectory],
+    *,
+    pad_token_id: int,
+    max_seq_len: int,
+    meta: dict[str, Any] | None = None,
+    processor: Any | None = None,
+    loss_agg: str = "token",
+) -> tuple[TrainBatch, dict[str, float], TurnLayout]:
+    """:func:`build_train_batch` before the advantages are known: the batch with zero
+    ``advantages``, the token statistics and the :class:`TurnLayout` through which the caller
+    assigns per-turn advantages and reads or places the value estimates of every turn's state."""
+    if not trajectories:
+        raise ValueError("cannot build a batch from zero trajectories")
 
     flats: list[FlatSequence] = []
     owners: list[int] = []  # sequence -> index of its trajectory
@@ -272,8 +359,21 @@ def build_train_batch(
                     behavior_top_ids[b, start : start + n, : top.k] = ids[:n]
                     behavior_top_logprobs[b, start : start + n, : top.k] = values[:n]
     response = response_mask.to(torch.float32)
-    advantages_bt = adv[owner][:, None] * response
     position_ids = (attention_mask.cumsum(dim=-1) - 1).clamp(min=0)
+
+    max_turns = max(len(t.turns) for t in trajectories)
+    turn_mask = torch.zeros((len(trajectories), max_turns), dtype=torch.bool)
+    for i, trajectory in enumerate(trajectories):
+        turn_mask[i, : len(trajectory.turns)] = True
+    token_turn = torch.full((batch_size, width), -1, dtype=torch.long)
+    state_index = torch.full((len(trajectories), max_turns), -1, dtype=torch.long)
+    for b, f in enumerate(flats):
+        n = len(f.input_ids)  # the sequence may have been truncated
+        for k, start, end in f.spans:
+            token_turn[b, start : min(end, n)] = owners[b] * max_turns + k
+            if 1 <= start <= n:
+                state_index[owners[b], k] = b * width + start - 1
+    layout = TurnLayout(owner=owner, turn_mask=turn_mask, token_turn=token_turn, state_index=state_index)
 
     loss_weights = None
     if loss_agg == "rollout":
@@ -295,7 +395,7 @@ def build_train_batch(
         input_ids=input_ids,
         attention_mask=attention_mask,
         response_mask=response_mask,
-        advantages=advantages_bt,
+        advantages=torch.zeros((batch_size, width), dtype=torch.float32),
         rewards=torch.tensor([float(trajectories[i].reward) for i in owners], dtype=torch.float32),
         group_ids=[trajectories[i].group_id for i in owners],
         old_logprobs=old_logprobs,
@@ -318,4 +418,4 @@ def build_train_batch(
         "tokens/truncated": float(truncated),
         "tokens/total": float(attention_mask.sum().item()),
     }
-    return batch, stats
+    return batch, stats, layout

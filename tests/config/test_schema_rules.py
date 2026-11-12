@@ -10,13 +10,15 @@ def _base(**overrides):
     return cfg
 
 
-def test_ppo_requires_a_critic_backend() -> None:
-    with pytest.raises(ConfigError, match="critic"):
-        RunConfig.from_dict(_base(algorithm={"name": "ppo"}, trainer={"backend": "reference"}))
-    assert (
-        RunConfig.from_dict(_base(algorithm={"name": "ppo"}, trainer={"backend": "verl"})).algorithm.name
-        == "ppo"
-    )
+def test_ppo_is_accepted_wherever_a_critic_exists() -> None:
+    # the reference trainer (and the Unsloth wrapper around it) has a value head, verl its own critic
+    for backend in ("reference", "unsloth", "verl"):
+        cfg = RunConfig.from_dict(_base(algorithm={"name": "ppo"}, trainer={"backend": backend}))
+        assert cfg.algorithm.name == "ppo"
+    with pytest.raises(ConfigError, match="credit_assignment"):
+        RunConfig.from_dict(_base(algorithm={"credit_assignment": "token"}))
+    with pytest.raises(ConfigError, match="value_clip"):
+        RunConfig.from_dict(_base(algorithm={"name": "ppo", "value_clip": 0.0}))
 
 
 def test_group_algorithms_need_groups() -> None:

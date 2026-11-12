@@ -71,6 +71,7 @@ def test_ray_runtime_object_store_sync(ray_session, make_config, tmp_path: Path)
         assert trainer.step == 1
         assert metrics["loss/policy"] == pytest.approx(12.0) and metrics["batch/size"] == 4.0
         assert trainer.compute_logprobs(_batch(), reference=True).shape == (4, 3)
+        torch.testing.assert_close(trainer.compute_values(_batch()), _batch().input_ids / 10)
 
         assert _tag(engine) != _trainer_tag(trainer)
         sync_metrics = rt.weight_sync.sync(trainer, rt.engines)

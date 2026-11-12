@@ -95,6 +95,9 @@ class FakeTrainer:
     def compute_logprobs(self, batch: TrainBatch, *, reference: bool = False) -> torch.Tensor:
         return torch.full(batch.input_ids.shape, -1.0 if reference else -0.5)
 
+    def compute_values(self, batch: TrainBatch) -> torch.Tensor:
+        return batch.input_ids.to(torch.float32) / 10
+
     def export_weights(self) -> Iterator[tuple[str, torch.Tensor]]:
         yield from self.weights.items()
 

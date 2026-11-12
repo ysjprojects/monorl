@@ -237,6 +237,7 @@ class FakeTrainer:
         self.weight = torch.tensor([0.0])
         self.batches: list[Any] = []
         self.logprob_calls: list[bool] = []
+        self.value_calls: list[Any] = []
         self.max_seq_len = config.trainer.max_seq_len
         self.learning_rate = config.trainer.learning_rate
         self.sleep = float(config.trainer.extra.get("fake_sleep", 0.0))
@@ -273,6 +274,12 @@ class FakeTrainer:
     def compute_logprobs(self, batch: Any, *, reference: bool = False) -> torch.Tensor:
         self.logprob_calls.append(reference)
         return torch.full(batch.input_ids.shape, -0.5 if reference else -0.25, dtype=torch.float32)
+
+    def compute_values(self, batch: Any) -> torch.Tensor:
+        """A critic that values every state at ``trainer.extra['fake_value']`` (default 0.25)."""
+        self.value_calls.append(batch)
+        value = float(self.config.trainer.extra.get("fake_value", 0.25))
+        return torch.full(batch.input_ids.shape, value, dtype=torch.float32)
 
     def export_weights(self) -> Iterator[tuple[str, torch.Tensor]]:
         yield "w", self.weight.clone()

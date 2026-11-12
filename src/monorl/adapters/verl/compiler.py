@@ -70,6 +70,9 @@ DAPO_MAX_NUM_GEN_BATCHES = 10
 # monorl off_policy.ratio_mask -> algorithm.rollout_correction.rollout_rs
 # (verl/trainer/ppo/rollout_corr_helper.py compute_rollout_rejection_mask)
 ROLLOUT_RS = {"token": "token_k1", "sequence": "seq_sum_k1", "sequence_mean": "seq_mean_k1"}
+# critic.cliprange_value of verl/trainer/config/critic/critic.yaml; verl's value loss always clips
+# (verl/trainer/ppo/core_algos.py compute_value_loss)
+VERL_CLIPRANGE_VALUE = 0.5
 
 
 def adv_estimator(config: RunConfig) -> str:
@@ -160,6 +163,17 @@ def compile_config(
             f"trainer.backend='verl' runs env.type in {list(ENV_TYPES)} only, got {env.type!r}: verl would "
             f"sample single-turn completions and never step that environment; use trainer.backend "
             f"'reference', 'trl' or 'nemo_rl'"
+        )
+    if algo.credit_assignment == "turn":
+        raise ConfigError(
+            "algorithm.credit_assignment='turn' is not supported with trainer.backend='verl': verl computes "
+            "its own advantages (one outcome advantage per response for grpo/rloo, token-level GAE for ppo); "
+            "use trainer.backend='reference'"
+        )
+    if algo.name == "ppo" and algo.value_clip is None:
+        raise ConfigError(
+            "algorithm.value_clip=null (unclipped value loss) has no verl equivalent: its critic always clips "
+            "the value estimate (critic.cliprange_value); set a number or use trainer.backend='reference'"
         )
     tool_calling = env.type == "tool_calling"
     n_gpus = max(1, cluster.gpus_per_node)
@@ -335,6 +349,8 @@ def compile_config(
             "optim": {"lr": trainer.learning_rate * 10},
             "ppo_micro_batch_size_per_gpu": trainer.micro_batch_size,
         }
+        if algo.value_clip != VERL_CLIPRANGE_VALUE:
+            tree["critic"]["cliprange_value"] = algo.value_clip
         tree["algorithm"]["use_kl_in_reward"] = algo.kl_coef > 0
         tree["algorithm"]["kl_ctrl"] = {"type": "fixed", "kl_coef": algo.kl_coef}
         tree["algorithm"]["kl_penalty"] = KL_LOSS_TYPE[algo.kl_estimator]
