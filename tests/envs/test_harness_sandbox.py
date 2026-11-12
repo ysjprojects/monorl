@@ -167,6 +167,26 @@ def test_agent_and_verifier_run_in_one_container(
     assert list(root.iterdir()) == [] and get_gateway().num_sessions == 0
 
 
+def test_docker_engine_opens_the_episode_directory_before_removing_the_container(
+    make_config: Callable[..., RunConfig], docker: FakeDocker, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Docker Engine on Linux, monorl not root: what the container wrote into the episode
+    directory belongs to the container's users, so it is opened up from inside before the
+    container goes, or the directory could not be deleted."""
+    monkeypatch.setattr(sandbox, "PLATFORM", "linux")
+    monkeypatch.setattr("os.getuid", lambda: 1000)
+    agent, root = write_agent(tmp_path, 'print(chat(task["messages"])["content"])\n'), tmp_path / "episodes"
+    config = _config(make_config, ["{python}", str(agent)], workdir={"root": str(root)})
+
+    (trajectory,) = _episodes(config, [_sample()])
+
+    assert trajectory.info["stdout_tail"] == "ABC\n"
+    *_, opened, removed = docker.calls("exec", "rm")
+    assert opened["command"] == "exec" and opened["argv"][-4:] == ["chmod", "-R", "a+rwX", "/monorl"]
+    assert opened["argv"][opened["argv"].index("-u") + 1] == "0"
+    assert removed["command"] == "rm" and docker.containers() == [] and list(root.iterdir()) == []
+
+
 def test_container_agents_are_told_the_name_containers_reach_the_host_under(
     make_config: Callable[..., RunConfig], docker: FakeDocker, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

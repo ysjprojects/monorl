@@ -59,10 +59,10 @@ jobs:
           EOF
 
       - name: ruff check
-        run: .venv/bin/python -m ruff check src tests scripts
+        run: .venv/bin/python -m ruff check src tests scripts examples
 
       - name: ruff format --check
-        run: .venv/bin/python -m ruff format --check src tests scripts
+        run: .venv/bin/python -m ruff format --check src tests scripts examples
 
       - name: pytest
         run: >

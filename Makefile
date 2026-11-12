@@ -41,8 +41,8 @@ envs:
 	$(MAKE) -C envs all
 
 lint:
-	$(PY) -m ruff check src tests scripts
-	$(PY) -m ruff format --check src tests scripts
+	$(PY) -m ruff check src tests scripts examples
+	$(PY) -m ruff format --check src tests scripts examples
 
 vendor-list:
 	$(PY) scripts/vendor.py --list

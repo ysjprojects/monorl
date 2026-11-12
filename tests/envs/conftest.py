@@ -74,7 +74,10 @@ def fake_docker_bin(tmp_path_factory: pytest.TempPathFactory) -> Path:
 
 @pytest.fixture
 def docker(fake_docker_bin: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> FakeDocker:
-    """The stand-in ``docker`` first on ``PATH``, with a fresh daemon state: image ``box`` only."""
+    """The stand-in ``docker`` first on ``PATH``, with a fresh daemon state: image ``box`` only.
+    The sandbox takes this machine for a macOS host (a VM daemon), whatever it is: where the
+    gateway listens and how a container is cleaned up depend on the platform, and the tests about
+    that name the platform themselves."""
     state = tmp_path / "docker-state"
     (state / "containers").mkdir(parents=True)
     monkeypatch.setenv("PATH", f"{fake_docker_bin}{os.pathsep}{os.environ['PATH']}")
@@ -86,6 +89,7 @@ def docker(fake_docker_bin: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatc
     # what the sandbox module remembers about a daemon and its images belongs to the real one
     monkeypatch.setattr(sandbox, "_daemons", {})
     monkeypatch.setattr(sandbox, "_images", {})
+    monkeypatch.setattr(sandbox, "PLATFORM", "darwin")
     fake = FakeDocker(state)
     fake.add_image("box")
     return fake
