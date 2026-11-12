@@ -6,6 +6,7 @@ import json
 import os
 import sys
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +14,7 @@ import pytest
 import yaml
 from fastapi.testclient import TestClient
 
+from monorl.server import routes_jobs
 from monorl.server.app import ServerSettings, create_app
 from monorl.server.jobs import TERMINAL_STATES, JobManager, JobNotFound, train_command
 
@@ -288,6 +290,67 @@ def test_sse_logs_stream(client: TestClient, config_dict: dict[str, Any]) -> Non
     assert all(isinstance(line, str) for line in lines)
     assert any(line.endswith("[succeeded] done") for line in lines)
     assert any("fake trainer stdout line" in line for line in lines)
+
+
+async def test_sse_events_stream(
+    client: TestClient,
+    config_dict: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    sse: Callable[..., Any],
+) -> None:
+    gate = tmp_path / "trainer-gate"
+    monkeypatch.setenv("FAKE_TRAINER_GATE", str(gate))
+    job = client.post("/api/jobs", json={"config": config_dict}).json()
+    url = f"/api/jobs/{job['id']}"
+    try:
+        async with sse(f"{url}/events") as stream:
+            # the trainer is parked before its first step: only its start-up log lines exist
+            before = [await stream.event()]
+            while "fake trainer stdout line" not in before[-1][1]:
+                before.append(await stream.event())
+            assert {name for name, _ in before} == {"log"}
+            gate.touch()
+            *after, end = await stream.until_end()
+    finally:
+        gate.touch()
+
+    def data(events: list[tuple[str, Any]], name: str) -> list[Any]:
+        return [payload for event, payload in events if event == name]
+
+    metrics = client.get(f"{url}/metrics").json()["rows"]
+    lines = client.get(f"{url}/logs").json()["lines"]
+    trajectories = client.get(f"{url}/trajectories").json()["rows"]
+    assert data(after, "metrics") == metrics and [row["step"] for row in metrics] == [1, 2, 3]
+    assert data(after, "trajectory") == trajectories and [row["reward"] for row in trajectories] == [
+        0.25,
+        0.5,
+        0.75,
+    ]
+    assert data(before + after, "log") == lines and any(
+        line.endswith("step 3 done") for line in data(after, "log")
+    )
+    cursors = {"metrics": 3, "logs": len(lines), "trajectories": 3}
+    assert end == ("end", {"state": "succeeded", "error": None, "next": cursors})
+
+    # every kind resumes from its own cursor
+    async with sse(f"{url}/events", metrics=2, logs=len(lines), trajectories=1) as stream:
+        expected = [
+            ("metrics", metrics[2]),
+            ("trajectory", trajectories[1]),
+            ("trajectory", trajectories[2]),
+            end,
+        ]
+        assert await stream.until_end() == expected
+    # a finished run is drained before `end` even when a file holds more rows than one read returns
+    monkeypatch.setattr(routes_jobs, "MAX_ROWS", 2)
+    async with sse(f"{url}/events", logs=len(lines)) as stream:
+        *events, end = await stream.until_end()
+    assert data(events, "metrics") == metrics and data(events, "trajectory") == trajectories
+    assert end[1]["next"] == cursors
+    async with sse(f"{url}/metrics/stream") as stream:
+        *events, end = await stream.until_end()
+    assert data(events, "metrics") == metrics and end[1] == {"state": "succeeded", "next": 3, "error": None}
 
 
 def _collect_sse(client: TestClient, url: str, params: dict[str, Any] | None = None) -> list[tuple[str, str]]:

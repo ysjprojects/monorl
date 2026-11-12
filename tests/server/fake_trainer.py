@@ -8,6 +8,8 @@ Invoked as ``fake_trainer.py --config <path> --run-dir <dir>``; behaviour is sel
 * ``stubborn``: like ``hang`` but ignores SIGTERM (must be SIGKILLed)
 * ``crash``: status running, then exit 3 without a terminal status
 * ``spawn_fail``: never reached; tests point MONORL_TRAIN_CMD at a missing binary instead
+
+``FAKE_TRAINER_GATE=<file>`` holds the ``success`` run before its first step until the file exists.
 """
 
 from __future__ import annotations
@@ -53,6 +55,9 @@ def main() -> int:
         reporter.set_status("cancelled", "stopped by SIGTERM")
         return 0
 
+    gate = os.environ.get("FAKE_TRAINER_GATE")
+    while gate and not os.path.exists(gate):
+        time.sleep(0.01)
     for step in range(1, 4):
         reporter.log_metrics(step, {"reward/mean": step * 0.25, "loss/policy": 1.0 / step})
         reporter.log(f"step {step} done")

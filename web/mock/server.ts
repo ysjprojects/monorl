@@ -61,11 +61,6 @@ interface MockJob extends RunData {
 
 const now = () => Date.now() / 1000;
 const jobs = new Map<string, MockJob>();
-const listeners = new Map<string, Set<(kind: "metrics" | "log" | "end", payload: unknown) => void>>();
-
-function emit(id: string, kind: "metrics" | "log" | "end", payload: unknown) {
-  for (const fn of listeners.get(id) ?? []) fn(kind, payload);
-}
 
 const stamp = () => new Date().toISOString().replace("T", " ").slice(0, 19);
 
@@ -742,17 +737,14 @@ function startFakeJob(job: MockJob) {
   job.pid = 40_000 + Math.floor(Math.random() * 1000);
   job.message = "training";
   const log = (line: string) => {
-    const stamped = `${stamp()} ${line}`;
-    job.logs.push(stamped);
-    emit(job.id, "log", stamped);
+    job.logs.push(`${stamp()} ${line}`);
   };
   log(`[running] starting run ${job.name} (${maxSteps} steps, mock)`);
   log(`loading model ${(job.config.model as Dict).name_or_path}`);
   job.timer = setInterval(() => {
     if (job.state !== "running") return;
-    const row = trainTick(job, job.config, log);
+    trainTick(job, job.config, log);
     job.updated_at = now();
-    emit(job.id, "metrics", row);
     if (job.step >= maxSteps) finishJob(job, "succeeded", "finished");
   }, 1000);
 }
@@ -790,9 +782,7 @@ const stageLogger = (st: MockStage) => (line: string) => {
 };
 
 function pipelineLog(job: MockJob, line: string) {
-  const stamped = `${stamp()} ${line}`;
-  job.logs.push(stamped);
-  emit(job.id, "log", stamped);
+  job.logs.push(`${stamp()} ${line}`);
 }
 
 function beginStage(job: MockJob, st: MockStage) {
@@ -909,8 +899,6 @@ function finishJob(job: MockJob, state: RunState, message: string) {
     }
   }
   job.logs.push(`${stamp()} [${state}] ${message}`);
-  emit(job.id, "log", job.logs[job.logs.length - 1]);
-  emit(job.id, "end", { state });
 }
 
 function newJob(config: Dict, state: RunState = "pending"): MockJob {
@@ -960,6 +948,12 @@ function publicJob(job: MockJob) {
 function stageStatus(st: MockStage) {
   const { metrics: _m, logs: _l, trajectories: _t, checkpoints: _c, length: _len, config: _cfg, ...rest } = st;
   return rest;
+}
+
+/** GET /api/jobs/{id}/stages, and the data of each `stages` event of its stream. */
+function stagesPayload(job: MockJob) {
+  const last = [...job.stages].reverse().find((s) => s.type === "train" && s.state === "succeeded");
+  return { job_id: job.id, kind: job.kind, name: job.name, state: job.state, final_model_path: last ? `${last.run_dir}/final` : null, error: job.error, stages: job.stages.map(stageStatus) };
 }
 
 function statusJson(job: MockJob) {
@@ -1014,38 +1008,88 @@ function statusJson(job: MockJob) {
 
 const json = (data: unknown, status = 200) => Response.json(data, { status, headers: { "access-control-allow-origin": "*" } });
 
-function sse(id: string, kinds: ("metrics" | "log")[], replay: () => { kind: "metrics" | "log"; payload: unknown }[], terminal: () => RunState | null): Response {
+// SSE, polled like the real server: every stream re-reads its source on a timer, so a stream opened
+// before its job or stage started simply stays quiet until rows appear.
+const SSE_POLL_MS = 250;
+
+function sse(poll: (send: (event: string, data: unknown) => void) => boolean): Response {
   const encoder = new TextEncoder();
-  let unsubscribe: (() => void) | null = null;
+  let timer: Timer | null = null;
   const stream = new ReadableStream<Uint8Array>({
     start(controller) {
       const send = (event: string, data: unknown) => controller.enqueue(encoder.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`));
-      for (const r of replay()) send(r.kind, r.payload);
-      const t = terminal();
-      if (t) {
-        send("end", { state: t });
+      /** One poll; closes the stream and returns true once `poll` reports it finished. */
+      const step = () => {
+        if (!poll(send)) return false;
+        if (timer) clearInterval(timer);
         controller.close();
-        return;
-      }
-      const fn = (kind: "metrics" | "log" | "end", payload: unknown) => {
-        if (kind === "end") {
-          send("end", payload);
-          controller.close();
-          unsubscribe?.();
-          return;
-        }
-        if (kinds.includes(kind)) send(kind, payload);
+        return true;
       };
-      const set = listeners.get(id) ?? new Set();
-      set.add(fn);
-      listeners.set(id, set);
-      unsubscribe = () => listeners.get(id)?.delete(fn);
+      if (!step()) timer = setInterval(step, SSE_POLL_MS);
     },
     cancel() {
-      unsubscribe?.();
+      if (timer) clearInterval(timer);
     },
   });
-  return new Response(stream, { headers: { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" } });
+  return new Response(stream, { headers: { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive", "access-control-allow-origin": "*" } });
+}
+
+interface StreamEnd {
+  state: RunState;
+  error: string | null;
+}
+
+const isTerminal = (state: RunState) => state === "succeeded" || state === "failed" || state === "cancelled";
+const jobEnd = (job: MockJob): StreamEnd | null => (isTerminal(job.state) ? { state: job.state, error: job.error } : null);
+/** A stage is over when it is terminal or its job is (a cancelled pipeline leaves later stages pending). */
+const stageEnd = (job: MockJob, st: MockStage): StreamEnd | null => (isTerminal(st.state) ? { state: st.state, error: st.error } : jobEnd(job));
+
+const TAIL_EVENT = { metrics: "metrics", logs: "log", trajectories: "trajectory" } as const;
+type TailKind = keyof typeof TAIL_EVENT;
+
+type TailCursors = Partial<Record<TailKind, number>>;
+
+/**
+ * Tail of a job's or stage's run data for the kinds in `cursors`: one event per row / line from
+ * each cursor, then `end` `{state, error, next}` with `next = endNext(cursors)`.
+ */
+function sseTail(run: RunData, cursors: TailCursors, ended: () => StreamEnd | null, endNext: (cursors: TailCursors) => unknown): Response {
+  const kinds = Object.keys(cursors) as TailKind[];
+  return sse((send) => {
+    const end = ended(); // before draining, so nothing appended in between is lost
+    for (const kind of kinds) {
+      const items: unknown[] = run[kind];
+      let cursor = cursors[kind] ?? 0;
+      for (; cursor < items.length; cursor++) send(TAIL_EVENT[kind], items[cursor]);
+      cursors[kind] = cursor;
+    }
+    if (!end) return false;
+    send("end", { ...end, next: endNext(cursors) });
+    return true;
+  });
+}
+
+/** `<base>/events`: metrics, log and trajectories of one run dir on one connection, each from its own cursor. */
+function sseEvents(run: RunData, params: URLSearchParams, ended: () => StreamEnd | null): Response {
+  const cursor = (kind: TailKind) => Number(params.get(kind) ?? 0);
+  return sseTail(run, { metrics: cursor("metrics"), logs: cursor("logs"), trajectories: cursor("trajectories") }, ended, (cursors) => cursors);
+}
+
+/** `stages/stream`: the stages payload now and whenever it changes, then `end`. */
+function sseStages(job: MockJob): Response {
+  let sent = "";
+  return sse((send) => {
+    const end = jobEnd(job);
+    const payload = stagesPayload(job);
+    const text = JSON.stringify(payload);
+    if (text !== sent) {
+      send("stages", payload);
+      sent = text;
+    }
+    if (!end) return false;
+    send("end", { ...end, next: null });
+    return true;
+  });
 }
 
 Bun.serve({
@@ -1116,10 +1160,13 @@ Bun.serve({
         const sub = m[2] ?? "";
         const since = Number(url.searchParams.get("since") ?? 0);
         if (sub === "" && method === "GET") return json({ ...publicJob(job), status: statusJson(job) });
-        if (sub === "stages") {
-          if (job.kind !== "pipeline") return json({ detail: "not a pipeline job" }, 404);
-          const last = [...job.stages].reverse().find((s) => s.type === "train" && s.state === "succeeded");
-          return json({ job_id: job.id, kind: job.kind, name: job.name, state: job.state, final_model_path: last ? `${last.run_dir}/final` : null, stages: job.stages.map(stageStatus) });
+        if (sub === "stages") return json(stagesPayload(job));
+        if (sub === "stages/stream") return sseStages(job);
+        const stageEvents = sub.match(/^stages\/(\d+)\/events$/);
+        if (stageEvents) {
+          const st = job.stages[Number(stageEvents[1])];
+          if (!st) return json({ detail: "stage not found" }, 404);
+          return sseEvents(st, url.searchParams, () => stageEnd(job, st));
         }
         const sm = sub.match(/^stages\/(\d+)\/(metrics|logs|trajectories|checkpoints)$/);
         if (sm) {
@@ -1137,15 +1184,17 @@ Bun.serve({
           if (job.state === "running" || job.state === "pending") finishJob(job, "cancelled", "cancelled by user");
           return json(publicJob(job));
         }
+        if (sub === "events") return sseEvents(job, url.searchParams, () => jobEnd(job));
+        const single = sub.match(/^(metrics|logs)\/stream$/);
+        if (single) {
+          const kind = single[1] as TailKind;
+          return sseTail(job, { [kind]: since }, () => jobEnd(job), (cursors) => cursors[kind]);
+        }
         if (sub === "metrics") return json({ rows: job.metrics.slice(since), next: job.metrics.length });
-        if (sub === "metrics/stream")
-          return sse(job.id, ["metrics"], () => job.metrics.slice(since).map((payload) => ({ kind: "metrics" as const, payload })), () => (job.state === "running" || job.state === "pending" ? null : job.state));
         if (sub === "logs") {
           const tail = Number(url.searchParams.get("tail") ?? 200);
           return json({ lines: job.logs.slice(-tail), next: job.logs.length });
         }
-        if (sub === "logs/stream")
-          return sse(job.id, ["log"], () => job.logs.slice(since).map((payload) => ({ kind: "log" as const, payload })), () => (job.state === "running" || job.state === "pending" ? null : job.state));
         if (sub === "trajectories") return json({ rows: job.trajectories.slice(since), next: job.trajectories.length });
         if (sub === "checkpoints") return json({ checkpoints: job.checkpoints });
       }

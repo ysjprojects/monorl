@@ -302,13 +302,15 @@ export interface StageStatus {
   error?: string | null;
 }
 
-/** GET /api/jobs/{id}/stages */
+/** GET /api/jobs/{id}/stages, and the data of every `stages` event of /api/jobs/{id}/stages/stream. */
 export interface StagesResponse {
   job_id: string;
   kind: JobKind;
   name: string;
   state: RunState;
   final_model_path: string | null;
+  /** Why the pipeline failed, from the manifest. */
+  error?: string | null;
   stages: StageStatus[];
 }
 

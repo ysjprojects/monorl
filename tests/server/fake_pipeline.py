@@ -4,7 +4,9 @@ Invoked as ``fake_pipeline.py --config <pipeline.yaml> --run-dir <dir>``. Writes
 run-dir layout the real runner produces: top-level ``status.json`` (``step`` = stages finished),
 ``pipeline.json`` manifest and one stage dir per configured stage with metrics / trajectories /
 checkpoints / run.log. ``FAKE_PIPELINE_MODE=hang`` stops after the first stage and waits for
-SIGTERM (then writes ``cancelled``).
+SIGTERM (then writes ``cancelled``). With ``FAKE_PIPELINE_GATE=<dir>`` stage ``i`` stays ``pending``
+until the file ``<dir>/<i>`` (or ``<dir>/all``) exists; SIGTERM while parked there ends the
+pipeline as ``cancelled``.
 """
 
 from __future__ import annotations
@@ -52,8 +54,19 @@ def main() -> int:
         stop["flag"] = True
 
     signal.signal(signal.SIGTERM, on_term)
+    gate = os.environ.get("FAKE_PIPELINE_GATE")
+
+    def gate_open(index: int) -> bool:
+        return gate is None or any(os.path.exists(os.path.join(gate, name)) for name in (str(index), "all"))
 
     for record in records:
+        while not gate_open(record.index) and not stop["flag"]:
+            time.sleep(0.01)
+        if stop["flag"]:
+            manifest.state = "cancelled"
+            manifest.write()
+            reporter.set_status("cancelled", "stopped by SIGTERM", step=record.index)
+            return 0
         record.state, record.started_at = "running", time.time()
         manifest.write()
         reporter.set_status(

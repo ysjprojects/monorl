@@ -1,13 +1,16 @@
-"""Job CRUD + run-directory readers (metrics, logs, trajectories, checkpoints) with SSE tails."""
+"""Job CRUD + run-directory readers (metrics, logs, trajectories, checkpoints) with SSE tails,
+for a job's run dir and for each stage run dir of a pipeline job."""
 
 from __future__ import annotations
 
 import asyncio
 import json
 import os
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
+from functools import partial
+from operator import itemgetter
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 from fastapi import APIRouter, Query, Request
 from fastapi.responses import JSONResponse
@@ -164,11 +167,28 @@ def _stages(job: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _stage(job: dict[str, Any], index: int) -> dict[str, Any]:
+def _find_stage(job: dict[str, Any], index: int) -> dict[str, Any] | None:
     for stage in _stages(job)["stages"]:
         if isinstance(stage, dict) and stage.get("index") == index:
             return stage
-    raise JobNotFound(f"job {job['id']!r} has no stage {index}")
+    return None
+
+
+def _stage(job: dict[str, Any], index: int) -> dict[str, Any]:
+    stage = _find_stage(job, index)
+    if stage is None:
+        raise JobNotFound(f"job {job['id']!r} has no stage {index}")
+    return stage
+
+
+def _require_stage(job: dict[str, Any], index: int) -> None:
+    """404 unless the pipeline has a stage ``index``: one listed in the manifest or, before the
+    runner wrote ``pipeline.json``, one of the job's configured stages."""
+    if _find_stage(job, index) is not None:
+        return
+    configured = job["config"].get("stages") if job.get("kind") == "pipeline" else None
+    if not isinstance(configured, list) or not 0 <= index < len(configured):
+        raise JobNotFound(f"job {job['id']!r} has no stage {index}")
 
 
 @router.get("/jobs/{job_id}/stages")
@@ -176,6 +196,15 @@ def job_stages(job_id: str, request: Request) -> dict[str, Any]:
     """Manifest stages of a pipeline job (``stages: []`` for plain runs or before the runner
     wrote ``pipeline.json``)."""
     return _stages(_jobs(request).get(job_id))
+
+
+@router.get("/jobs/{job_id}/stages/stream")  # registered before /stages/{index}
+async def stream_stages(job_id: str, request: Request) -> EventSourceResponse:
+    """SSE: a ``stages`` event with the ``GET /jobs/{id}/stages`` payload now and whenever it
+    changes, then ``end`` once the job is terminal. A snapshot stream: there is no ``since``
+    cursor and ``end`` carries ``next: null``."""
+    _jobs(request).get(job_id)  # 404 before the stream opens
+    return EventSourceResponse(_stages_stream(request, job_id))
 
 
 @router.get("/jobs/{job_id}/stages/{index}")
@@ -231,29 +260,32 @@ def stage_checkpoints(job_id: str, index: int, request: Request) -> dict[str, An
 # -- SSE streams --------------------------------------------------------------------------------
 
 
-async def _poll_stream(
-    request: Request, job_id: str, *, since: int, read_new: Any, event: str
-) -> AsyncIterator[dict[str, str]]:
-    """Generic tail: ``read_new(cursor) -> (items, cursor)``; emits ``event`` per item, then
-    ``end`` once the job is terminal and the file has been fully drained."""
-    jobs = _jobs(request)
-    cursor = since
-    loop = asyncio.get_running_loop()
-    while True:
-        if await request.is_disconnected():
-            return
-        job = await loop.run_in_executor(None, jobs.get, job_id)
-        terminal = job["state"] in TERMINAL_STATES
-        items, cursor = await loop.run_in_executor(None, read_new, job["run_dir"], cursor)
-        for item in items:
-            yield {"event": event, "data": json.dumps(item)}
-        if terminal:
-            yield {
-                "event": "end",
-                "data": json.dumps({"state": job["state"], "next": cursor, "error": job.get("error")}),
-            }
-            return
-        await asyncio.sleep(POLL_INTERVAL)
+class _Tail(NamedTuple):
+    """What a tail stream follows: the run dir to read (``None`` until the pipeline manifest
+    lists the stage) and the state that decides when the stream ends."""
+
+    run_dir: str | None
+    state: str
+    error: str | None
+
+
+def _job_tail(jobs: JobManager, job_id: str) -> _Tail:
+    job = jobs.get(job_id)
+    return _Tail(job["run_dir"], job["state"], job.get("error"))
+
+
+def _stage_tail(jobs: JobManager, job_id: str, index: int) -> _Tail:
+    """A stage is over when it reports a terminal state or when its job does (a cancelled or
+    crashed pipeline leaves stages ``pending`` / ``running`` in the manifest)."""
+    job = jobs.get(job_id)  # read before the manifest: a terminal job implies a final manifest
+    stage = _find_stage(job, index) or {}
+    run_dir = stage.get("run_dir") or None
+    state = stage.get("state", "pending")
+    if state in TERMINAL_STATES:
+        return _Tail(run_dir, state, stage.get("error"))
+    if job["state"] in TERMINAL_STATES:
+        return _Tail(run_dir, job["state"], job.get("error"))
+    return _Tail(run_dir, state, None)
 
 
 def _new_metrics(run_dir: str, cursor: int) -> tuple[list[dict[str, Any]], int]:
@@ -266,15 +298,125 @@ def _new_logs(run_dir: str, cursor: int) -> tuple[list[str], int]:
     return out["lines"], out["next"]
 
 
+def _new_trajectories(run_dir: str, cursor: int) -> tuple[list[dict[str, Any]], int]:
+    out = _rows(iter_trajectories(run_dir, start_line=cursor), cursor, MAX_ROWS)
+    return out["rows"], out["next"]
+
+
+# Tailable run-dir files by cursor name: (SSE event, ``read_new(run_dir, cursor) -> (items, cursor)``).
+_TAILS: dict[str, tuple[str, Callable[[str, int], tuple[list[Any], int]]]] = {
+    "metrics": ("metrics", _new_metrics),
+    "logs": ("log", _new_logs),
+    "trajectories": ("trajectory", _new_trajectories),
+}
+
+
+async def _tail_stream(
+    request: Request,
+    tail: Callable[[], _Tail],
+    cursors: dict[str, int],
+    end_next: Callable[[dict[str, int]], Any],
+) -> AsyncIterator[dict[str, str]]:
+    """Tail the files named in ``cursors`` (``{kind: first line to send}``, kinds of ``_TAILS``):
+    one event per new row / line, in file order within a kind, then ``end`` with
+    ``next = end_next(cursors)`` once ``tail()`` is terminal and every file has been drained. A
+    run dir that does not exist yet (pending stage) simply has nothing to read."""
+    cursors = dict(cursors)
+    loop = asyncio.get_running_loop()
+    while True:
+        if await request.is_disconnected():
+            return
+        target = await loop.run_in_executor(None, tail)
+        for kind in cursors if target.run_dir is not None else ():
+            event, read_new = _TAILS[kind]
+            while True:
+                items, cursors[kind] = await loop.run_in_executor(
+                    None, read_new, target.run_dir, cursors[kind]
+                )
+                for item in items:
+                    yield {"event": event, "data": json.dumps(item)}
+                if len(items) < MAX_ROWS:  # a full page: more rows may be waiting
+                    break
+        if target.state in TERMINAL_STATES:
+            end = {"state": target.state, "next": end_next(cursors), "error": target.error}
+            yield {"event": "end", "data": json.dumps(end)}
+            return
+        await asyncio.sleep(POLL_INTERVAL)
+
+
+async def _stages_stream(request: Request, job_id: str) -> AsyncIterator[dict[str, str]]:
+    jobs = _jobs(request)
+    loop = asyncio.get_running_loop()
+    sent: str | None = None
+    while True:
+        if await request.is_disconnected():
+            return
+        job = await loop.run_in_executor(None, jobs.get, job_id)
+        data = json.dumps(await loop.run_in_executor(None, _stages, job))
+        if data != sent:
+            yield {"event": "stages", "data": data}
+            sent = data
+        if job["state"] in TERMINAL_STATES:
+            yield {
+                "event": "end",
+                "data": json.dumps({"state": job["state"], "next": None, "error": job.get("error")}),
+            }
+            return
+        await asyncio.sleep(POLL_INTERVAL)
+
+
+def _job_stream(request: Request, job_id: str, kind: str, since: int) -> EventSourceResponse:
+    """Single-file tail of a job's run dir; ``end`` carries that file's cursor as ``next``."""
+    jobs = _jobs(request)
+    jobs.get(job_id)  # 404 before the stream opens
+    return EventSourceResponse(
+        _tail_stream(request, partial(_job_tail, jobs, job_id), {kind: since}, itemgetter(kind))
+    )
+
+
 @router.get("/jobs/{job_id}/metrics/stream")
 async def stream_metrics(job_id: str, request: Request, since: int = Query(0, ge=0)) -> EventSourceResponse:
-    _jobs(request).get(job_id)  # 404 before the stream opens
-    return EventSourceResponse(
-        _poll_stream(request, job_id, since=since, read_new=_new_metrics, event="metrics")
-    )
+    return _job_stream(request, job_id, "metrics", since)
 
 
 @router.get("/jobs/{job_id}/logs/stream")
 async def stream_logs(job_id: str, request: Request, since: int = Query(0, ge=0)) -> EventSourceResponse:
-    _jobs(request).get(job_id)
-    return EventSourceResponse(_poll_stream(request, job_id, since=since, read_new=_new_logs, event="log"))
+    return _job_stream(request, job_id, "logs", since)
+
+
+@router.get("/jobs/{job_id}/events")
+async def stream_events(
+    job_id: str,
+    request: Request,
+    metrics: int = Query(0, ge=0),
+    logs: int = Query(0, ge=0),
+    trajectories: int = Query(0, ge=0),
+) -> EventSourceResponse:
+    """SSE: the run dir's metrics, log and trajectories on one connection. Events ``metrics`` /
+    ``log`` / ``trajectory`` (one row or line each), each kind starting at its own cursor (same
+    meaning as ``since`` on the JSON routes), then ``end`` ``{state, error, next: {metrics, logs,
+    trajectories}}`` once the job is terminal and the three files are drained."""
+    jobs = _jobs(request)
+    jobs.get(job_id)  # 404 before the stream opens
+    cursors = {"metrics": metrics, "logs": logs, "trajectories": trajectories}
+    return EventSourceResponse(_tail_stream(request, partial(_job_tail, jobs, job_id), cursors, dict))
+
+
+@router.get("/jobs/{job_id}/stages/{index}/events")
+async def stream_stage_events(
+    job_id: str,
+    index: int,
+    request: Request,
+    metrics: int = Query(0, ge=0),
+    logs: int = Query(0, ge=0),
+    trajectories: int = Query(0, ge=0),
+) -> EventSourceResponse:
+    """``/jobs/{id}/events`` for one stage run dir; ``end`` once that stage (or the job) is
+    terminal. A stage that has not started keeps the stream open (its run dir appears when it
+    does); an index the pipeline does not have is a 404."""
+    jobs = _jobs(request)
+    _require_stage(jobs.get(job_id), index)
+    cursors = {"metrics": metrics, "logs": logs, "trajectories": trajectories}
+    return EventSourceResponse(
+        _tail_stream(request, partial(_stage_tail, jobs, job_id, index), cursors, dict)
+    )

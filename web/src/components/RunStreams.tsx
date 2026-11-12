@@ -1,9 +1,9 @@
 // Charts / trajectories / logs for one run directory. `base` is `jobPath(id)` for a run or
-// `jobPath(id, stageIndex)` for a pipeline stage; the JSON routes under it share one shape.
-// Remount (key on `base`) to switch directories — stream cursors live in component state.
+// `jobPath(id, stageIndex)` for a pipeline stage; the JSON routes and the SSE tail under it share
+// one shape.
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { api, subscribeSse } from "../api";
+import { api, eventsUrl, subscribeSse, type TailCursors } from "../api";
 import { fmtNum } from "../format";
 import type { MetricRow, TrajectoryRow } from "../types";
 import { MetricChart } from "./MetricChart";
@@ -11,14 +11,33 @@ import { Pill, Tabs } from "./ui";
 
 const COLORS = ["#38bdf8", "#a78bfa", "#f472b6", "#fb923c", "#34d399", "#facc15"];
 
+/** Rows arriving over SSE are appended in batches this far apart, so a replay renders a few times, not once per row. */
+const FLUSH_MS = 100;
+const POLL_MS = 2000;
+
+/** The append-only files of a run dir, as far as they have been read. */
+interface Tails {
+  metrics: MetricRow[];
+  logs: string[];
+  trajectories: TrajectoryRow[];
+}
+
+const emptyTails = (): Tails => ({ metrics: [], logs: [], trajectories: [] });
+/** `prev` itself when there is nothing to add, so consumers memoised on one file ignore the others. */
+const appended = <T,>(prev: T[], more: T[]): T[] => (more.length ? [...prev, ...more] : prev);
+/** A page that failed to load counts as empty: the next tick asks again from the same cursor. */
+const pageOr = <T,>(page: Promise<{ rows: T[]; next: number }>) => page.catch(() => ({ rows: [] as T[], next: 0 }));
+
 /**
- * Tail an append-only stream: SSE first (`<base>/<kind>/stream`) when `sse` is set, falling back
- * to polling the paginated JSON endpoint if the EventSource errors. Stops once `terminal`.
+ * Tail the run dir at `base`: one EventSource on `<base>/events` carries all three files; if it
+ * fails, each file is polled from its paginated JSON route instead. Stops once `terminal` and
+ * drained. Cursors and rows are component state: they belong to the `base` the component mounted with.
  */
-function useStream<T>(base: string, kind: "metrics" | "logs", sse: boolean, terminal: boolean, poll: (since: number) => Promise<{ items: T[]; next: number }>, parse: (data: string) => T) {
-  const [items, setItems] = useState<T[]>([]);
-  const [mode, setMode] = useState<"sse" | "poll" | "done">(sse ? "sse" : "poll");
-  const nextRef = useRef(0);
+function useRunTails(base: string, terminal: boolean): Tails & { mode: "sse" | "poll" | "done" } {
+  const [tails, setTails] = useState(emptyTails);
+  const [mode, setMode] = useState<"sse" | "poll" | "done">("sse");
+  /** Rows in `tails` per file, i.e. where to continue from; rows still buffered are not counted. */
+  const cursors = useRef<TailCursors>({ metrics: 0, logs: 0, trajectories: 0 });
   const terminalRef = useRef(terminal);
   useEffect(() => {
     terminalRef.current = terminal;
@@ -26,61 +45,85 @@ function useStream<T>(base: string, kind: "metrics" | "logs", sse: boolean, term
 
   useEffect(() => {
     if (mode !== "sse") return;
-    const event = kind === "metrics" ? "metrics" : "log";
-    let gotAny = false;
+    let buffer = emptyTails();
+    let flushTimer: ReturnType<typeof setTimeout> | undefined;
+    const flush = () => {
+      clearTimeout(flushTimer);
+      flushTimer = undefined;
+      const add = buffer;
+      if (add.metrics.length + add.logs.length + add.trajectories.length === 0) return;
+      buffer = emptyTails();
+      cursors.current = {
+        metrics: cursors.current.metrics + add.metrics.length,
+        logs: cursors.current.logs + add.logs.length,
+        trajectories: cursors.current.trajectories + add.trajectories.length,
+      };
+      setTails((prev) => ({ metrics: appended(prev.metrics, add.metrics), logs: appended(prev.logs, add.logs), trajectories: appended(prev.trajectories, add.trajectories) }));
+    };
     const dispose = subscribeSse(
-      `${base}/${kind}/stream?since=${nextRef.current}`,
-      [event],
+      eventsUrl(base, cursors.current),
+      ["metrics", "log", "trajectory"],
       (name, data) => {
         if (name === "end") {
+          flush();
           setMode("done");
           return;
         }
-        gotAny = true;
-        nextRef.current += 1;
-        setItems((prev) => [...prev, parse(data)]);
+        if (name === "metrics") buffer.metrics.push(JSON.parse(data) as MetricRow);
+        else if (name === "log") buffer.logs.push(JSON.parse(data) as string);
+        else buffer.trajectories.push(JSON.parse(data) as TrajectoryRow);
+        flushTimer ??= setTimeout(flush, FLUSH_MS);
       },
       () => {
-        // EventSource would retry forever; a closed or never-opened stream means the endpoint is
-        // unavailable (older server / proxy without SSE) — fall back to polling.
-        if (!gotAny || terminalRef.current) {
-          dispose();
-          setMode(terminalRef.current ? "done" : "poll");
-        }
+        // The endpoint is unavailable (older server / proxy without SSE) or the connection broke.
+        // EventSource would reconnect to the same URL and replay rows from the old cursors, so
+        // close it and carry on by polling from the current ones.
+        flush();
+        dispose();
+        setMode("poll");
       },
     );
-    return dispose;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [base, kind, mode]);
+    return () => {
+      // Rows still buffered were never counted in the cursors: whatever reads next re-fetches them.
+      clearTimeout(flushTimer);
+      dispose();
+    };
+  }, [base, mode]);
 
   useEffect(() => {
     if (mode !== "poll") return;
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
     const tick = async () => {
-      try {
-        const res = await poll(nextRef.current);
-        if (cancelled) return;
-        if (res.items.length) {
-          nextRef.current = res.next;
-          setItems((prev) => [...prev, ...res.items]);
-        }
-      } catch {
-        /* keep polling */
-      }
+      // Only fetches that started after the run ended are known to have seen everything.
+      const ended = terminalRef.current;
+      const from = cursors.current;
+      const [metrics, logs, trajectories] = await Promise.all([
+        pageOr(api.metrics(base, from.metrics)),
+        // /logs returns the last N lines + the absolute `next` offset: keep the unseen ones.
+        pageOr(api.logs(base, 500).then((r) => ({ rows: r.next > from.logs ? r.lines.slice(from.logs - r.next) : [], next: r.next }))),
+        pageOr(api.trajectories(base, from.trajectories)),
+      ]);
       if (cancelled) return;
-      if (terminalRef.current) setMode("done");
-      else timer = setTimeout(tick, 2000);
+      cursors.current = {
+        metrics: metrics.rows.length ? metrics.next : from.metrics,
+        logs: logs.rows.length ? logs.next : from.logs,
+        trajectories: trajectories.rows.length ? trajectories.next : from.trajectories,
+      };
+      const got = metrics.rows.length + logs.rows.length + trajectories.rows.length;
+      if (got) setTails((prev) => ({ metrics: appended(prev.metrics, metrics.rows), logs: appended(prev.logs, logs.rows), trajectories: appended(prev.trajectories, trajectories.rows) }));
+      // The JSON routes are paginated: keep reading finished files until every page comes back empty.
+      if (ended && got === 0) setMode("done");
+      else timer = setTimeout(tick, ended ? 0 : POLL_MS);
     };
     void tick();
     return () => {
       cancelled = true;
       clearTimeout(timer);
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [base, kind, mode]);
+  }, [base, mode]);
 
-  // Terminal while in SSE mode: the server sends `end`; if it never does, do one final poll.
+  // Terminal while in SSE mode: the server sends `end`; if it does not, finish by polling.
   useEffect(() => {
     if (terminal && mode === "sse") {
       const t = setTimeout(() => setMode((m) => (m === "sse" ? "poll" : m)), 3000);
@@ -88,102 +131,35 @@ function useStream<T>(base: string, kind: "metrics" | "logs", sse: boolean, term
     }
   }, [terminal, mode]);
 
-  // Became terminal while polling-done was never reached (e.g. terminal from the start): one last fetch.
-  useEffect(() => {
-    if (terminal && mode === "done" && nextRef.current === 0) {
-      void poll(0).then((res) => {
-        if (res.items.length) {
-          nextRef.current = res.next;
-          setItems((prev) => (prev.length ? prev : res.items));
-        }
-      });
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [terminal, mode]);
-
-  return { items, mode };
-}
-
-function useIncremental<T>(base: string, terminal: boolean, fetchSince: (since: number) => Promise<{ rows: T[]; next: number }>) {
-  const [rows, setRows] = useState<T[]>([]);
-  const nextRef = useRef(0);
-  useEffect(() => {
-    let cancelled = false;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const tick = async () => {
-      try {
-        const r = await fetchSince(nextRef.current);
-        if (cancelled) return;
-        if (r.rows.length) {
-          nextRef.current = r.next;
-          setRows((prev) => [...prev, ...r.rows]);
-        }
-      } catch {
-        /* retry on next tick */
-      }
-      if (!cancelled && !terminal) timer = setTimeout(tick, 3000);
-    };
-    void tick();
-    return () => {
-      cancelled = true;
-      clearTimeout(timer);
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [base, terminal]);
-  return rows;
+  return { ...tails, mode };
 }
 
 export interface RunStreamsProps {
   base: string;
   terminal: boolean;
-  /** Try `<base>/metrics/stream` + `<base>/logs/stream` before polling (job-level routes only). */
-  sse: boolean;
   /** Metrics charted by default; everything else numeric is behind "show more". */
   chartMetrics: string[];
   /** Rendered as an extra "Config" tab when given. */
   configYaml?: string;
 }
 
-export function RunStreams({ base, terminal, sse, chartMetrics, configYaml }: RunStreamsProps) {
-  const metrics = useStream<MetricRow>(
-    base,
-    "metrics",
-    sse,
-    terminal,
-    async (since) => {
-      const r = await api.metrics(base, since);
-      return { items: r.rows, next: r.next };
-    },
-    (d) => JSON.parse(d) as MetricRow,
-  );
-  const logs = useStream<string>(
-    base,
-    "logs",
-    sse,
-    terminal,
-    async (since) => {
-      const r = await api.logs(base, 500);
-      // /logs returns the last N lines + the absolute `next` offset; only append unseen lines.
-      const unseen = Math.max(0, r.next - since);
-      return { items: unseen === 0 ? [] : r.lines.slice(-unseen), next: r.next };
-    },
-    (d) => {
-      try {
-        const v: unknown = JSON.parse(d);
-        return typeof v === "string" ? v : d;
-      } catch {
-        return d;
-      }
-    },
-  );
-  const traj = useIncremental<TrajectoryRow>(base, terminal, async (since) => api.trajectories(base, since));
+/**
+ * Streams of one run directory. A different `base` remounts the view, so the EventSources of the
+ * previous directory are closed and none of its rows or cursors carry over.
+ */
+export function RunStreams(props: RunStreamsProps) {
+  return <RunStreamsView key={props.base} {...props} />;
+}
+
+function RunStreamsView({ base, terminal, chartMetrics, configYaml }: RunStreamsProps) {
+  const { metrics, logs, trajectories, mode } = useRunTails(base, terminal);
 
   const [tab, setTab] = useState<"charts" | "trajectories" | "logs" | "config">("charts");
   const extraMetrics = useMemo(() => {
     const keys = new Set<string>();
-    for (const r of metrics.items) for (const k of Object.keys(r)) if (typeof r[k] === "number" && !["step", "time"].includes(k) && !chartMetrics.includes(k)) keys.add(k);
+    for (const r of metrics) for (const k of Object.keys(r)) if (typeof r[k] === "number" && !["step", "time"].includes(k) && !chartMetrics.includes(k)) keys.add(k);
     return [...keys].sort();
-  }, [metrics.items, chartMetrics]);
+  }, [metrics, chartMetrics]);
   const [showExtra, setShowExtra] = useState(false);
 
   return (
@@ -192,25 +168,25 @@ export function RunStreams({ base, terminal, sse, chartMetrics, configYaml }: Ru
         <div className="flex-1">
           <Tabs
             tabs={[
-              { id: "charts", label: `Charts (${metrics.items.length})` },
-              { id: "trajectories", label: `Trajectories (${traj.length})` },
-              { id: "logs", label: `Logs (${logs.items.length})` },
+              { id: "charts", label: `Charts (${metrics.length})` },
+              { id: "trajectories", label: `Trajectories (${trajectories.length})` },
+              { id: "logs", label: `Logs (${logs.length})` },
               ...(configYaml !== undefined ? [{ id: "config" as const, label: "Config" }] : []),
             ]}
             value={tab}
             onChange={setTab}
           />
         </div>
-        <Pill tone={metrics.mode === "sse" ? "sky" : "slate"}>{metrics.mode === "sse" ? "live (SSE)" : metrics.mode === "poll" ? "polling" : "finished"}</Pill>
+        <Pill tone={mode === "sse" ? "sky" : "slate"}>{mode === "sse" ? "live (SSE)" : mode === "poll" ? "polling" : "finished"}</Pill>
       </div>
 
       {tab === "charts" && (
         <div>
           <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
             {chartMetrics.map((m, i) => (
-              <MetricChart key={m} rows={metrics.items} metric={m} color={COLORS[i % COLORS.length]} />
+              <MetricChart key={m} rows={metrics} metric={m} color={COLORS[i % COLORS.length]} />
             ))}
-            {showExtra && extraMetrics.map((m, i) => <MetricChart key={m} rows={metrics.items} metric={m} color={COLORS[(i + 3) % COLORS.length]} />)}
+            {showExtra && extraMetrics.map((m, i) => <MetricChart key={m} rows={metrics} metric={m} color={COLORS[(i + 3) % COLORS.length]} />)}
           </div>
           {extraMetrics.length > 0 && (
             <button className="btn mt-3" onClick={() => setShowExtra((s) => !s)}>
@@ -220,9 +196,9 @@ export function RunStreams({ base, terminal, sse, chartMetrics, configYaml }: Ru
         </div>
       )}
 
-      {tab === "trajectories" && <TrajectoryTable rows={traj} />}
+      {tab === "trajectories" && <TrajectoryTable rows={trajectories} />}
 
-      {tab === "logs" && <LogView lines={logs.items} />}
+      {tab === "logs" && <LogView lines={logs} />}
 
       {tab === "config" && configYaml !== undefined && <pre className="card overflow-auto font-mono text-xs text-slate-300">{configYaml}</pre>}
     </div>

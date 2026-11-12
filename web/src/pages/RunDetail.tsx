@@ -1,11 +1,11 @@
 import { useMemo, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { stringify as toYaml } from "yaml";
-import { api, jobPath } from "../api";
+import { api, jobPath, stagesStreamUrl } from "../api";
 import { RunStreams } from "../components/RunStreams";
 import { Card, ErrorBox, Kv, Pill, Spinner, StateBadge } from "../components/ui";
 import { fmtDate, fmtDuration, fmtNum } from "../format";
-import { useAsync } from "../hooks";
+import { useAsync, useLiveSnapshot } from "../hooks";
 import { EVAL_METRICS, REJECTION_METRICS, RL_METRICS, SFT_METRICS } from "../metrics";
 import { effectiveAlgorithm } from "../pipeline";
 import { isPipelineJob, jobRunConfig, TERMINAL_STATES, type JobDetail, type JsonValue, type PipelineJob, type StageStatus, type StageType } from "../types";
@@ -96,7 +96,7 @@ function SingleRunView({ job: j, terminal }: { job: JobDetail; terminal: boolean
         </Card>
         <CheckpointsCard checkpoints={ckpts.data?.checkpoints ?? []} saveEvery={c?.trainer?.save_every} />
       </div>
-      <RunStreams base={base} terminal={terminal} sse chartMetrics={sft ? SFT_METRICS : RL_METRICS} configYaml={configYaml} />
+      <RunStreams base={base} terminal={terminal} chartMetrics={sft ? SFT_METRICS : RL_METRICS} configYaml={configYaml} />
     </>
   );
 }
@@ -127,7 +127,7 @@ function CheckpointsCard({ checkpoints, saveEvery }: { checkpoints: { step: numb
 function PipelineView({ job: j, terminal }: { job: PipelineJob & { status: JobDetail["status"] }; terminal: boolean }) {
   const status = j.status;
   const base = j.config.base;
-  const manifest = useAsync(() => api.stages(j.id), [j.id], terminal ? 0 : 2000);
+  const manifest = useLiveSnapshot(stagesStreamUrl(j.id), "stages", () => api.stages(j.id), terminal);
   const stages = manifest.data?.stages ?? [];
   const total = j.config.stages.length;
   const finished = stages.filter((s) => s.state === "succeeded").length;
@@ -163,7 +163,7 @@ function PipelineView({ job: j, terminal }: { job: PipelineJob & { status: JobDe
         </Card>
         <Card title="Stages">
           <ErrorBox error={manifest.error} className="mb-2" />
-          {!manifest.data && manifest.loading && <Spinner />}
+          {!manifest.data && !manifest.error && <Spinner />}
           {manifest.data && stages.length === 0 && <div className="text-xs text-slate-500">No stage manifest yet.</div>}
           {stages.length > 0 && (
             <div className="overflow-hidden rounded-md border border-slate-800">
@@ -282,7 +282,7 @@ function StagePanel({ jobId, stage: s, job, jobTerminal }: { jobId: string; stag
           </Card>
         )}
       </div>
-      <RunStreams base={base} terminal={terminal} sse={false} chartMetrics={chartMetrics} configYaml={s.type === "train" ? stageYaml : undefined} />
+      <RunStreams base={base} terminal={terminal} chartMetrics={chartMetrics} configYaml={s.type === "train" ? stageYaml : undefined} />
     </div>
   );
 }

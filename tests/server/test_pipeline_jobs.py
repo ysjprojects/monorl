@@ -1,10 +1,11 @@
-"""Pipeline jobs through the API: creation (``{pipeline: ...}``), ``kind``, stage routes, recipes
-and schema; driven by ``fake_pipeline.py`` via ``MONORL_PIPELINE_CMD``."""
+"""Pipeline jobs through the API: creation (``{pipeline: ...}``), ``kind``, stage routes and their
+SSE streams, recipes and schema; driven by ``fake_pipeline.py`` via ``MONORL_PIPELINE_CMD``."""
 
 from __future__ import annotations
 
 import shlex
 import sys
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
 
@@ -173,6 +174,141 @@ def test_cancel_pipeline_job(
     stages = client.get(f"/api/jobs/{job['id']}/stages").json()
     assert stages["state"] == "cancelled"
     assert [s["state"] for s in stages["stages"]] == ["succeeded", "pending", "pending", "pending"]
+
+
+# -- SSE streams -------------------------------------------------------------------------------
+
+
+@pytest.fixture
+def gate(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Callable[..., None]]:
+    """Park the fake pipeline before every stage; ``gate(i, ...)`` lets stages ``i, ...`` run."""
+    root = tmp_path / "gate"
+    root.mkdir()
+    monkeypatch.setenv("FAKE_PIPELINE_GATE", str(root))
+
+    def release(*stages: int) -> None:
+        for index in stages:
+            (root / str(index)).touch()
+
+    yield release
+    (root / "all").touch()  # never leave a parked runner behind
+
+
+@pytest.fixture
+def parked(
+    client: TestClient, pipeline_dict: dict[str, Any], gate: Callable[..., None], wait_for: Callable[..., Any]
+) -> str:
+    """Id of a pipeline job whose manifest is written and whose four stages are all pending."""
+    job = client.post("/api/jobs", json={"pipeline": pipeline_dict}).json()
+    wait_for(lambda: client.get(f"/api/jobs/{job['id']}/stages").json()["stages"])
+    return job["id"]
+
+
+async def test_stages_stream_emits_on_stage_change(
+    client: TestClient, parked: str, gate: Callable[..., None], sse: Callable[..., Any]
+) -> None:
+    url = f"/api/jobs/{parked}/stages"
+    async with sse(f"{url}/stream") as stream:
+        seen = [await stream.event()]
+        assert seen[0] == ("stages", client.get(url).json())
+        assert [s["state"] for s in seen[0][1]["stages"]] == ["pending"] * 4
+        assert await stream.idle(0.2)  # nothing changes: nothing is sent
+
+        gate(0)
+        while seen[-1][1]["stages"][0]["state"] != "succeeded":
+            seen.append(await stream.event())
+        assert seen[-1][1]["stages"][1]["state"] == "pending" and seen[-1][1]["state"] == "running"
+
+        gate(1, 2, 3)
+        *more, end = await stream.until_end()
+    seen += more
+    assert {name for name, _ in seen} == {"stages"}
+    payloads = [payload for _, payload in seen]
+    assert all(a != b for a, b in zip(payloads, payloads[1:], strict=False))
+    assert payloads[-1] == client.get(url).json()
+    assert payloads[-1]["state"] == "succeeded" and payloads[-1]["final_model_path"]
+    assert end == ("end", {"state": "succeeded", "next": None, "error": None})
+
+
+def _data(events: list[tuple[str, Any]], name: str) -> list[Any]:
+    return [data for event, data in events if event == name]
+
+
+async def test_pending_stage_events_start_with_the_stage(
+    client: TestClient, parked: str, gate: Callable[..., None], sse: Callable[..., Any]
+) -> None:
+    base = f"/api/jobs/{parked}/stages/1"
+    async with sse(f"{base}/events") as stream:
+        assert await stream.idle(0.3)  # stage 1 has no run dir yet: the stream stays open and silent
+        gate(0, 1)
+        *events, end = await stream.until_end()
+
+    # stage 2 is still parked, so it was the stage's own terminal state that ended the stream
+    assert client.get(f"/api/jobs/{parked}").json()["state"] == "running"
+    metrics = client.get(f"{base}/metrics").json()["rows"]
+    lines = client.get(f"{base}/logs").json()["lines"]
+    trajectories = client.get(f"{base}/trajectories").json()["rows"]
+    assert {name for name, _ in events} == {"metrics", "log", "trajectory"}
+    assert _data(events, "metrics") == metrics and [row["step"] for row in metrics] == [1, 2]
+    assert _data(events, "log") == lines and any(line.endswith("stage grpo step 2") for line in lines)
+    assert _data(events, "trajectory") == trajectories and [row["group_id"] for row in trajectories] == [
+        "g1",
+        "g2",
+    ]
+    cursors = {"metrics": 2, "logs": len(lines), "trajectories": 2}
+    assert end == ("end", {"state": "succeeded", "error": None, "next": cursors})
+
+    # every kind resumes from its own cursor
+    async with sse(f"{base}/events", metrics=1, logs=len(lines) - 1, trajectories=2) as stream:
+        assert await stream.until_end() == [("metrics", metrics[1]), ("log", lines[-1]), end]
+    async with sse(f"{base}/events", metrics=2, logs=len(lines)) as stream:
+        assert await stream.until_end() == [
+            ("trajectory", trajectories[0]),
+            ("trajectory", trajectories[1]),
+            end,
+        ]
+
+
+async def test_stage_events_end_when_the_job_does(
+    client: TestClient,
+    parked: str,
+    gate: Callable[..., None],
+    sse: Callable[..., Any],
+    wait_for: Callable[..., Any],
+) -> None:
+    gate(0)
+    wait_for(lambda: client.get(f"/api/jobs/{parked}/stages/0").json()["state"] == "succeeded")
+    async with sse(f"/api/jobs/{parked}/stages/2/events") as stream:
+        assert await stream.idle(0.2)
+        client.post(f"/api/jobs/{parked}/cancel")
+        # stage 2 never ran and stays `pending` in the manifest: the job's state closes its stream
+        nothing = {"metrics": 0, "logs": 0, "trajectories": 0}
+        assert await stream.until_end() == [("end", {"state": "cancelled", "error": None, "next": nothing})]
+    # a stage that did finish keeps reporting its own state
+    logged = client.get(f"/api/jobs/{parked}/stages/0/logs").json()["next"]
+    async with sse(f"/api/jobs/{parked}/stages/0/events", metrics=1, logs=logged, trajectories=2) as stream:
+        events = await stream.until_end()
+    assert [name for name, _ in events] == ["metrics", "end"]
+    assert events[-1][1] == {
+        "state": "succeeded",
+        "error": None,
+        "next": {"metrics": 2, "logs": logged, "trajectories": 2},
+    }
+
+
+def test_stage_events_404(
+    client: TestClient, pipeline_dict: dict[str, Any], config_dict: dict[str, Any], terminal
+) -> None:
+    job = client.post("/api/jobs", json={"pipeline": pipeline_dict}).json()
+    run = client.post("/api/jobs", json={"config": config_dict}).json()
+    terminal(job["id"])
+    terminal(run["id"])
+    r = client.get(f"/api/jobs/{job['id']}/stages/4/events")
+    assert r.status_code == 404 and r.json() == {"detail": f"job {job['id']!r} has no stage 4"}
+    assert client.get(f"/api/jobs/{run['id']}/stages/0/events").status_code == 404
+    assert client.get("/api/jobs/nope/stages/0/events").status_code == 404
+    assert client.get("/api/jobs/nope/stages/stream").status_code == 404
+    assert client.get("/api/jobs/nope/events").status_code == 404
 
 
 def test_manager_persists_kind(settings, pipeline_dict: dict[str, Any], wait_for) -> None:  # noqa: ANN001

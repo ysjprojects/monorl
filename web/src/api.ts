@@ -61,6 +61,17 @@ const q = (params: Record<string, string | number | undefined>) => {
 /** Base path of a job's run dir routes, or of one pipeline stage's run dir. */
 export const jobPath = (id: string, stage?: number | null) => (stage == null ? `/api/jobs/${id}` : `/api/jobs/${id}/stages/${stage}`);
 
+/** Rows / lines already held of each append-only file of a run dir, i.e. where its tail continues. */
+export interface TailCursors {
+  metrics: number;
+  logs: number;
+  trajectories: number;
+}
+/** SSE tail of a whole run dir (`base` as for `jobPath`): `metrics` / `log` / `trajectory` events from the given cursors, then `end`. */
+export const eventsUrl = (base: string, cursors: TailCursors) => `${base}/events${q({ ...cursors })}`;
+/** SSE stream of a pipeline's stage manifest: a `stages` event (StagesResponse) per change. */
+export const stagesStreamUrl = (id: string) => `/api/jobs/${id}/stages/stream`;
+
 export const api = {
   system: () => get<SystemReport>("/api/system"),
   schema: () => get<JsonSchema>("/api/config/schema"),
@@ -82,7 +93,7 @@ export const api = {
   createPipelineJob: (pipeline: PipelineConfig) => post<Job>("/api/jobs", { pipeline }),
   cancelJob: (id: string) => post<Job>(`/api/jobs/${id}/cancel`, {}),
   stages: (id: string) => get<StagesResponse>(`/api/jobs/${id}/stages`),
-  // Run-dir streams: `base` is `jobPath(id)` or `jobPath(id, stageIndex)`; shapes are identical.
+  // Run-dir readers: `base` is `jobPath(id)` or `jobPath(id, stageIndex)`; shapes are identical.
   metrics: (base: string, since = 0) => get<{ rows: MetricRow[]; next: number }>(`${base}/metrics${q({ since })}`),
   logs: (base: string, tail = 200) => get<{ lines: string[]; next: number }>(`${base}/logs${q({ tail })}`),
   trajectories: (base: string, since = 0) => get<{ rows: TrajectoryRow[]; next: number }>(`${base}/trajectories${q({ since })}`),
