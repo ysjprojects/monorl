@@ -4,7 +4,8 @@
 
     {"transport": "stdio", "command": ["./my-env", "--stdio"], "cwd": ".", "env": {...},
      "parallel": 4, "timeout_s": 60}
-    {"transport": "http", "url": "http://127.0.0.1:8080", "timeout_s": 60}
+    {"transport": "http", "url": "http://127.0.0.1:8080", "parallel": 16, "timeout_s": 60}
+    {"transport": "http", "urls": ["http://env-1:8080", "http://env-2:8080"], "timeout_s": 60}
 
 Stdio: the orchestrator spawns the env binary and speaks JSON lines over its stdin/stdout; stderr
 is forwarded to the ``monorl.envs.remote`` logger. One process serves up to
@@ -15,7 +16,13 @@ serialised (the protocol is line-oriented) and multiplexed by ``episode_id``. If
 or a request times out, it is restarted; the in-flight episode fails with
 :class:`~monorl.core.errors.EnvironmentError_` and later episodes land on the fresh process.
 
-Http: a shared :class:`httpx.Client` per url; ``GET /spec`` is fetched once and cached.
+Http: a shared :class:`httpx.Client` per server; ``GET /spec`` is fetched once and cached. At most
+``params.parallel`` (default: the server's ``spec.parallel_episodes``) episodes are open on a server
+at a time; further ``reset`` calls wait for one to end, because a server at capacity refuses new
+episodes. ``urls`` lists identical replicas: an episode's state lives in one server process, so
+every episode is pinned to one replica (the one with the fewest open episodes) for its whole life.
+Replicas behind a single round-robin address cannot be used through ``url``: the requests of one
+episode would reach different servers.
 """
 
 from __future__ import annotations
@@ -27,7 +34,7 @@ import queue
 import subprocess
 import threading
 import uuid
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
@@ -301,20 +308,50 @@ class SlotSource(Protocol):
 
 
 class HttpSlotSource:
-    def __init__(self, transport: HttpTransport) -> None:
-        self.transport = transport
+    """The shared clients of an environment's http server(s). Each episode holds one of them from
+    ``reset`` to its end — the replica with the fewest open episodes — and no server gets more
+    than ``parallel`` episodes at a time."""
+
+    def __init__(self, transports: Sequence[HttpTransport], *, parallel: int | None = None) -> None:
+        if not transports:
+            raise ValueError("remote env: http transport needs at least one server")
+        self.transports = list(transports)
+        self._parallel_override = parallel
+        self._open = [0] * len(self.transports)
+        self._cap: int | None = None
+        self._cv = threading.Condition()
 
     def spec(self) -> EnvSpec:
-        return self.transport.spec()
+        return self.transports[0].spec()
+
+    @property
+    def parallel(self) -> int:
+        if self._parallel_override is not None:
+            return max(1, int(self._parallel_override))
+        return max(1, self.spec().parallel_episodes)
 
     def acquire(self) -> HttpTransport:
-        return self.transport
+        with self._cv:
+            if self._cap is None:
+                self._cap = self.parallel
+            while True:
+                i = min(range(len(self.transports)), key=self._open.__getitem__)
+                if self._open[i] < self._cap:
+                    self._open[i] += 1
+                    return self.transports[i]
+                self._cv.wait()
 
     def release(self, transport: Transport) -> None:
-        return None
+        with self._cv:
+            for i, candidate in enumerate(self.transports):
+                if candidate is transport and self._open[i] > 0:
+                    self._open[i] -= 1
+                    self._cv.notify()
+                    return
 
     def close(self) -> None:
-        self.transport.close()
+        for transport in self.transports:
+            transport.close()
 
 
 @dataclass(slots=True)
@@ -393,10 +430,21 @@ _POOLS: dict[tuple[Any, ...], SlotSource] = {}
 _POOLS_LOCK = threading.Lock()
 
 
+def _http_urls(params: Mapping[str, Any]) -> list[str]:
+    """Server addresses of an http environment: ``params.urls`` (replicas) or the single ``params.url``."""
+    urls = params.get("urls") or ([params["url"]] if params.get("url") else [])
+    return [str(u) for u in urls]
+
+
 def _pool_key(params: Mapping[str, Any]) -> tuple[Any, ...]:
     transport = params.get("transport", "stdio")
     if transport == "http":
-        return ("http", str(params["url"]), float(params.get("timeout_s", 60.0)))
+        return (
+            "http",
+            tuple(_http_urls(params)),
+            float(params.get("timeout_s", 60.0)),
+            params.get("parallel"),
+        )
     env_items = tuple(sorted((str(k), str(v)) for k, v in dict(params.get("env") or {}).items()))
     return (
         "stdio",
@@ -413,8 +461,8 @@ def slot_source_for(params: Mapping[str, Any]) -> SlotSource:
     transport = params.get("transport", "stdio")
     if transport not in ("stdio", "http"):
         raise ValueError(f"remote env: unknown transport {transport!r}; expected 'stdio' or 'http'")
-    if transport == "http" and not params.get("url"):
-        raise ValueError("remote env: http transport needs params.url")
+    if transport == "http" and not _http_urls(params):
+        raise ValueError("remote env: http transport needs params.url (or params.urls for replicas)")
     if transport == "stdio" and not params.get("command"):
         raise ValueError("remote env: stdio transport needs params.command")
     key = _pool_key(params)
@@ -424,7 +472,11 @@ def slot_source_for(params: Mapping[str, Any]) -> SlotSource:
             timeout_s = float(params.get("timeout_s", 60.0))
             if transport == "http":
                 source = HttpSlotSource(
-                    HttpTransport(str(params["url"]), timeout_s=timeout_s, headers=params.get("headers"))
+                    [
+                        HttpTransport(url, timeout_s=timeout_s, headers=params.get("headers"))
+                        for url in _http_urls(params)
+                    ],
+                    parallel=params.get("parallel"),
                 )
             else:
                 source = StdioPool(

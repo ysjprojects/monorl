@@ -178,3 +178,20 @@ jobs:
           recursive: true
           dockerfile: "docker/Dockerfile.*"
           config: docker/.hadolint.yaml
+
+  docker-build:
+    name: docker build (envs + cpu images)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+      - name: Build the env image and query a server
+        run: |
+          docker build -f docker/Dockerfile.envs --build-arg ENV_NAME=go-wordle -t monorl-env:ci .
+          docker run -d --name env -p 8080:8080 monorl-env:ci
+          for _ in $(seq 1 30); do curl -fsS -o /dev/null localhost:8080/health && break; sleep 1; done
+          curl -fsS localhost:8080/spec
+      - name: Build the CPU image and run doctor in it
+        run: |
+          docker build -f docker/Dockerfile.cpu -t monorl:ci .
+          docker run --rm --entrypoint monorl monorl:ci doctor

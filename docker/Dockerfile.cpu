@@ -8,6 +8,9 @@ ARG PYTHON_VERSION=3.12
 ARG NODE_VERSION=24
 ARG UV_VERSION=0.11.16
 
+# uv binaries. A named stage because `COPY --from=<image>` does not expand build args.
+FROM ghcr.io/astral-sh/uv:${UV_VERSION} AS uv
+
 # ---------------------------------------------------------------------------
 # web: Vite + React build of the UI (served as static files by `monorl serve`).
 # ---------------------------------------------------------------------------
@@ -24,9 +27,8 @@ RUN pnpm build
 # runtime: python 3.12 + monorl (editable install so REPO_ROOT-relative paths resolve to /app).
 # ---------------------------------------------------------------------------
 FROM python:${PYTHON_VERSION}-slim-bookworm AS runtime
-ARG UV_VERSION
 ARG MONORL_EXTRAS=trl,distributed,rewards,openenv,hermes
-COPY --from=ghcr.io/astral-sh/uv:${UV_VERSION} /uv /uvx /usr/local/bin/
+COPY --from=uv /uv /uvx /usr/local/bin/
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \

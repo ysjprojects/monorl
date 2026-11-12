@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
 import torch
 
 from monorl.adapters.nemo_rl.compile import build_env_config
@@ -14,6 +15,7 @@ from monorl.adapters.nemo_rl.env_bridge import (
     MonorlEnvironmentBridge,
 )
 from monorl.config.schema import RunConfig
+from monorl.core.errors import ConfigError
 from monorl.core.registry import registry
 from monorl.core.types import Completion, Message, Sample, StepResult
 
@@ -114,6 +116,51 @@ def test_multi_turn_keeps_env_state_across_steps(nemo_config: RunConfig) -> None
     assert len(_TwoTurnEnv.instances) == 1 and _TwoTurnEnv.instances[0].closed
     assert bridge.num_live_episodes == 0
     assert second.metadata[0][EPISODE_KEY] == first.metadata[0][EPISODE_KEY]
+
+
+class _PartsEnv:
+    """Never-ending env whose observation ``content`` is a list of parts instead of a string."""
+
+    max_turns = 2
+    parts: list[dict[str, Any]] = []
+
+    def reset(self, sample: Sample) -> list[Message]:
+        return list(sample.messages)
+
+    def step(self, action: Completion) -> StepResult:
+        return StepResult(messages=[{"role": "user", "content": list(self.parts)}], reward=0.0, done=False)
+
+    def close(self) -> None:
+        pass
+
+
+def _parts_bridge(nemo_config: RunConfig, parts: list[dict[str, Any]]) -> MonorlEnvironmentBridge:
+    _PartsEnv.parts = parts
+    registry.register("env", "parts_test", lambda config, **kw: _PartsEnv(), overwrite=True)
+    config = RunConfig.from_dict(
+        {**nemo_config.to_dict(), "env": {"type": "parts_test", "max_turns": 2}, "rewards": []}
+    )
+    return MonorlEnvironmentBridge(build_env_config(config))
+
+
+def test_text_parts_observation_reaches_nemo_as_plain_text(nemo_config: RunConfig) -> None:
+    bridge = _parts_bridge(
+        nemo_config, [{"type": "text", "text": "tool says "}, {"type": "text", "text": "42"}]
+    )
+    sample = Sample(id="s", messages=[{"role": "user", "content": "hi"}], reference=None)
+    out = bridge.step([_log(sample, "hello")], [_metadata(sample)])
+    assert out.observations == [{"role": "user", "content": "tool says 42"}]
+    bridge.shutdown()
+
+
+def test_media_observation_is_rejected(nemo_config: RunConfig) -> None:
+    bridge = _parts_bridge(
+        nemo_config, [{"type": "image", "image": "/tmp/x.png"}, {"type": "text", "text": "look"}]
+    )
+    sample = Sample(id="s", messages=[{"role": "user", "content": "hi"}], reference=None)
+    with pytest.raises(ConfigError, match="text observations only"):
+        bridge.step([_log(sample, "hello")], [_metadata(sample)])
+    bridge.shutdown()
 
 
 def test_rewards_added_on_final_turn_with_env_rewards(nemo_config: RunConfig) -> None:

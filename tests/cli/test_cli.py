@@ -494,3 +494,19 @@ def test_data_inspect_local_jsonl(runner: CliRunner, tmp_path: Path) -> None:
 
     result = runner.invoke(app, ["data", "inspect", str(tmp_path / "missing.jsonl")])
     assert result.exit_code == 1
+
+
+def test_data_inspect_renders_media_parts_as_markers(runner: CliRunner, tmp_path: Path) -> None:
+    image_module = pytest.importorskip("PIL.Image")
+    image_module.new("RGB", (4, 4), (255, 0, 0)).save(tmp_path / "red.png")
+    user = [{"type": "image", "image": str(tmp_path / "red.png")}, {"type": "text", "text": "What colour?"}]
+    row = {"messages": [{"role": "user", "content": user}, {"role": "assistant", "content": "Red"}]}
+    f = tmp_path / "chat.jsonl"
+    f.write_text(json.dumps(row) + "\n")
+
+    result = runner.invoke(app, ["data", "inspect", str(f), "--limit", "1"], env={"COLUMNS": "1000"})
+    assert result.exit_code == 0, result.output
+    sample_lines = [line for line in result.output.splitlines() if line.lstrip().startswith("[user]")]
+    assert [" ".join(line.split()) for line in sample_lines] == [
+        f"[user] <image: {tmp_path / 'red.png'}> What colour?"
+    ]

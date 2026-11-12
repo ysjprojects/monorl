@@ -60,7 +60,17 @@ Pins: [`third_party/pins.toml`](../third_party/pins.toml). Patch mechanics:
 
 Every engine implements `generate(prompts, params) -> list[list[Completion]]` with exactly
 `params.n` completions per prompt and per-token logprobs; the orchestrator's `BatchingEngine`
-coalesces concurrent episode requests into one engine call.
+coalesces concurrent episode requests into one engine call. A completion that ends on one of
+`rollout.stop` keeps the stop string in its text on every engine — vLLM and SGLang cut it by
+default, so the adapters send `include_stop_str_in_output=True` / `no_stop_trim=True` — which is
+what lets `tool_calling` parse a closing `</tool_call>` and keeps re-rendered chats token-exact.
+
+All four GPU engine classes implement the optional `cancel()` (in-flight `generate` calls raise
+`GenerationCancelled`, the engine stays usable). Colocated `vllm` checks between engine steps and
+calls `LLMEngine.abort_request`; colocated `sglang` cancels its `Engine.async_generate` task, which
+makes sglang send an abort per dispatched request. Both server clients close the HTTP request in
+flight, and the server aborts on the disconnect (vLLM at once via `with_cancellation`; SGLang's
+`/generate` waiter polls every `SGLANG_REQUEST_STATE_WAIT_TIMEOUT` seconds, 4 by default).
 
 #### Multimodal (image) prompts
 
@@ -72,7 +82,7 @@ Chat prompts with `{"type": "image", ...}` parts (`data.image_field`, see `docs/
 | `hf` | in-process | `AutoProcessor` (`monorl.rollout.media`) | processor chat template (placeholders included) |
 | `vllm` | colocate | `TokensPrompt(prompt_token_ids=<processor ids>, multi_modal_data={"image": [PIL…]})`; `rollout.extra.limit_mm_per_prompt` (`{"image": N}` or `N`) → `EngineArgs.limit_mm_per_prompt` | processor chat template |
 | `vllm` | server | `POST /v1/chat/completions` with `image_url` data-URL parts, `logprobs=true, top_logprobs=0`, `return_token_ids=true`; one request per prompt (`n` choices). The chat endpoint's logprob entries carry token *strings*, so ids come from `choices[i].token_ids` and the prompt ids from the response-level `prompt_token_ids` (rendered by the server's chat template) | server `prompt_token_ids` |
-| `sglang` | colocate | `Engine.generate(input_ids=<processor ids>, image_data=[[PIL…] or None per request])`; sglang's multimodal processor decodes the ids, re-expands the image placeholders and returns the final ids | processor chat template |
+| `sglang` | colocate | `Engine.async_generate(input_ids=<processor ids>, image_data=[[PIL…] or None per request])` run on the engine's loop; sglang's multimodal processor decodes the ids, re-expands the image placeholders and returns the final ids | processor chat template |
 | `sglang` | server | `POST /generate` with `image_data` = per-request lists of `data:image/png;base64,…` URLs (sglang `load_image`) | processor chat template |
 
 Text-only models never load a processor (`load_processor` decides from the HF config); a VLM
@@ -109,8 +119,12 @@ vLLM/SGLang adapters yet.
   trainer classes Unsloth regenerates, so `trainer.backend: trl` also works with Unsloth imported.
   **Pin conflict:** unsloth 2026.10.11 declares `trl<=1.15.0` and `transformers<=5.17.0`, while
   monorl's environment pins trl 1.17.1 / transformers 5.22; `pip install unsloth` into the monorl
-  venv therefore downgrades (or refuses) those packages. Run Unsloth in its own environment on
-  the versions it accepts; the adapter's version gates are written against 2026.10.11.
+  venv therefore downgrades (or refuses) those packages. Run Unsloth in its own environment:
+  `make install-unsloth` creates `.venv-unsloth` with `monorl[unsloth,dev]` and the unsloth version
+  pinned in `third_party/pins.toml` (uv resolves that to trl 1.15.0 / transformers 5.17.0 for Linux
+  x86_64, Python 3.12; checked with `uv pip compile`, not installed on this CUDA-less dev box), then
+  `.venv-unsloth/bin/python -m monorl.adapters.unsloth.preload monorl.cli train --config …`. The
+  adapter's version gates are written against 2026.10.11.
 
 ### Environments (`env.type`)
 
@@ -118,7 +132,7 @@ vLLM/SGLang adapters yet.
 |---|---|---|
 | `single_turn` | one prompt → one completion, reward from `rewards` | `system_prompt` |
 | `tool_calling` | multi-turn with built-in `calculator`, `python_exec`, `lookup` tools; Hermes or OpenAI call syntax | `tools`, `tool_modules`, `invalid_call_penalty`, `corpus` |
-| `remote` | MEP/1 client for out-of-process envs (Go/C++/Python) | `transport: stdio` + `command`, `cwd`, `env`, `parallel`, `timeout_s` · `transport: http` + `url` |
+| `remote` | MEP/1 client for out-of-process envs (Go/C++/Python) | `transport: stdio` + `command`, `cwd`, `env`, `parallel`, `timeout_s` · `transport: http` + `url` or `urls` (replicas; each episode pinned to one), `parallel` (open-episode cap per server, default its `parallel_episodes`), `timeout_s` |
 | `openenv` | OpenEnv Gym-style env as a multi-turn env | `url` · `env_class` + `env_kwargs` · `image` + `env_vars`; `action_mode`, `action_field`, `observation_template`, `system_prompt`, `invalid_action_penalty`, `reset_kwargs`, `timeout_s` |
 | `hermes` | Hermes Agent turn loop (tools, skills, sandboxed terminal); policy tokens from our engine | `tools` (tool/toolset names, default `[file, terminal]`), `tool_modules`, `skills`, `skills_dir`, `hermes_home`, `workspace_dir` (default: temp dir per episode), `sandbox: {backend: local|docker|…, image}`, `max_tool_output_chars`, `max_calls_per_turn`, `invalid_call_penalty`, `system_prompt`, `hermes_system_prompt`, `model_name` |
 
@@ -138,19 +152,26 @@ Hydra and NeMo-RL yaml, `GRPOConfig` kwargs for TRL).
   fills; the trainer gets the model's `AutoProcessor` as `processing_class` and the policy is
   loaded with `AutoModelForImageTextToText`. `algorithm.name: sft` → `trl.SFTTrainer`/`SFTConfig`
   on `prompt`/`completion` conversational rows (`completion_only_loss` unless
-  `algorithm.sft_train_on_prompt`, `max_length = trainer.max_seq_len`,
-  `label_smoothing_factor = algorithm.sft_label_smoothing`, `trainer.prompts_per_step` sequences
-  per optimizer step); metrics map `loss → loss/sft`, `mean_token_accuracy → sft/token_accuracy`,
-  `eval_loss → eval/loss`; checkpoints (`step-<n>`), resume and the merged `final/` export are
-  shared with the GRPO path. Runnable on CPU (`tests/adapters/trl/test_sft_and_multimodal.py`).
+  `algorithm.sft_train_on_prompt`, `max_length = trainer.max_seq_len`, `trainer.prompts_per_step`
+  sequences per optimizer step). `algorithm.sft_label_smoothing > 0` swaps in
+  `monorl.adapters.trl.sft.LabelSmoothedSFTTrainer`, whose `compute_loss` applies
+  `monorl.algorithms.sft_loss` (smoothing and `loss_agg`) to the full logits at TRL's loss positions
+  instead of TRL's deprecated `label_smoothing_factor`; smoothing 0 keeps the stock fused-LM-head
+  path and `eval_loss` is always the unsmoothed NLL. Metrics map `loss → loss/sft`,
+  `mean_token_accuracy → sft/token_accuracy`, `eval_loss → eval/loss`; checkpoints (`step-<n>`),
+  resume and the merged `final/` export are shared with the GRPO path. Runnable on CPU
+  (`tests/adapters/trl/test_sft_and_multimodal.py`).
 * **verl** — pinned to v0.9.1 (commit `1876b06d`). Compiles `actor_rollout_ref.*`, `data.*`,
   `algorithm.*`, `trainer.*` from the RunConfig (FSDP actor, vLLM/SGLang rollout, GRPO/DAPO/PPO
   advantage estimator), registers a reward manager that calls `monorl.rewards.build_reward`, and
   launches `python -m monorl.adapters.verl.entry` on the Ray cluster — a `main_ppo` wrapper
   whose `TaskRunner` subclass applies the `verl.tracking.*` patches inside the Ray actor (the
   driver process never sees verl's `Tracking` logger), so metrics reach `metrics.jsonl`.
-  Limits: `rollout.stop` has no verl equivalent and is ignored; `rollout.backend: hf` falls
-  back to vLLM (verl only has `vllm`/`sglang`); the per-reward breakdown is only available in
+  Limits: `env.type` must be `single_turn` or `tool_calling` (verl's `single_turn_agent` /
+  `tool_agent` loops) — any other environment is a `ConfigError`, because verl would sample
+  single-turn completions and never step it; `rollout.stop` has no verl equivalent and is
+  ignored; `rollout.backend: hf` falls back to vLLM (verl only has `vllm`/`sglang`); the
+  per-reward breakdown is only available in
   verl's `reward_extra_info` (the scalar `score` is the reward). `trainer.extra` keys are
   deep-merged into the Hydra tree, except `verl_python`, which picks the interpreter that runs
   the entry (default: the current one).

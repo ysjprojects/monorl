@@ -40,6 +40,7 @@ from monorl.adapters.verl.data import (
 from monorl.adapters.verl.reward import REWARD_FUNCTION_NAME, reward_module_path
 from monorl.adapters.verl.tools import tool_config_path
 from monorl.config.schema import RunConfig
+from monorl.core.errors import ConfigError
 from monorl.core.reporting import CHECKPOINT_DIR
 
 VERL_TAG = "v0.9.1"
@@ -58,6 +59,9 @@ LOSS_AGG_MODE = {"token": "token-mean", "sequence": "seq-mean-token-mean"}
 ROLLOUT_DTYPE = {"bfloat16": "bfloat16", "float16": "float16", "float32": "float32"}
 ROLLOUT_BACKENDS = ("vllm", "sglang")
 DEFAULT_ROLLOUT_BACKEND = "vllm"
+# Environments verl can run: its ``single_turn_agent`` loop and, for ``tool_calling``, its ``tool_agent``
+# loop over monorl tools (:mod:`.tools`). verl never steps any other monorl environment.
+ENV_TYPES = ("single_turn", "tool_calling")
 # DAPO overlong buffer as a fraction of max_response_length (recipe/dapo uses 4096 of 20480).
 OVERLONG_BUFFER_FRACTION = 0.2
 DAPO_GEN_BATCH_MULTIPLIER = 2
@@ -113,6 +117,12 @@ def compile_config(
         config.data,
         config.logging,
     )
+    if env.type not in ENV_TYPES:
+        raise ConfigError(
+            f"trainer.backend='verl' runs env.type in {list(ENV_TYPES)} only, got {env.type!r}: verl would "
+            f"sample single-turn completions and never step that environment; use trainer.backend "
+            f"'reference', 'trl' or 'nemo_rl'"
+        )
     tool_calling = env.type == "tool_calling"
     n_gpus = max(1, cluster.gpus_per_node)
     use_kl_loss = algo.kl_coef > 0 and algo.name != "ppo"

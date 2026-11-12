@@ -24,6 +24,7 @@ from monorl.config.loader import apply_overrides, load_yaml
 from monorl.config.pipeline import PipelineConfig, is_pipeline_payload
 from monorl.config.schema import RunConfig
 from monorl.core.errors import ConfigError, MonorlError
+from monorl.core.types import MEDIA_PART_TYPES, message_media, message_text
 
 app = typer.Typer(
     name="monorl",
@@ -58,6 +59,18 @@ def _yes_no(flag: bool | None) -> str:
     if flag is None:
         return "[dim]-[/dim]"
     return "[green]yes[/green]" if flag else "[red]no[/red]"
+
+
+def _message_line(message: dict[str, Any], limit: int) -> str:
+    """One console line per chat message: media parts as ``<kind: ref>`` markers (inline ``data:``
+    URLs cut to their header), then its text."""
+    media = [
+        f"<{kind}: {ref.partition(',')[0] + ',…' if ref.startswith('data:') else ref}>"
+        for kind in MEDIA_PART_TYPES
+        for ref in message_media(message, kind)  # type: ignore[arg-type]
+    ]
+    text = message_text(message)[:limit]  # type: ignore[arg-type]
+    return f"  [{message.get('role')}] {' '.join([*media, text])}"
 
 
 # -- train -----------------------------------------------------------------------------------
@@ -415,7 +428,7 @@ def data_inspect(
     for s in samples:
         console.print(f"[bold]sample {s['id']}[/bold] reference={s['reference']!r}")
         for m in s["messages"]:
-            console.print(escape(f"  [{m.get('role')}] {str(m.get('content', ''))[:300]}"))
+            console.print(escape(_message_line(m, 300)))
 
 
 # -- env -------------------------------------------------------------------------------------
@@ -462,7 +475,7 @@ def env_check(
         if report.reset_messages:
             console.print(f"reset: {len(report.reset_messages)} message(s)")
             for m in report.reset_messages:
-                console.print(escape(f"  [{m.get('role')}] {str(m.get('content', ''))[:200]}"))
+                console.print(escape(_message_line(m, 200)))
         for s in report.steps:
             console.print(
                 f"step {s.turn}: reward={s.reward} done={s.done} messages={len(s.messages)} info={s.info}"

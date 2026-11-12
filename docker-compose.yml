@@ -3,8 +3,11 @@
 #   docker compose up --scale env-wordle=8    # grow the fleet
 #   docker compose --profile gpu up ray-head  # Ray head node on the vLLM image (needs the NVIDIA runtime)
 #
-# The UI container reaches the fleet at http://env-wordle:8080 (Docker DNS round-robins the replicas):
-#   env: {type: remote, params: {transport: http, url: "http://env-wordle:8080", parallel: 16}}
+# Episode state lives in one env process, so a run addresses the replicas one by one and monorl pins
+# each episode to one of them (the service name env-wordle round-robins between replicas and would
+# scatter the requests of an episode):
+#   env: {type: remote, params: {transport: http, urls: ["http://monorl-env-wordle-1:8080",
+#         "http://monorl-env-wordle-2:8080", "http://monorl-env-wordle-3:8080", "http://monorl-env-wordle-4:8080"]}}
 # From the host the replicas are on localhost:8081-8084.
 name: monorl
 

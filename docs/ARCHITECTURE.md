@@ -192,10 +192,19 @@ POST /api/jobs {config}               -> job {id, run_dir, state,...}; spawns `p
 GET  /api/jobs                        [job]
 GET  /api/jobs/{id}                   job + status.json
 POST /api/jobs/{id}/cancel
-GET  /api/jobs/{id}/metrics?since=N   {rows, next}         GET /api/jobs/{id}/metrics/stream  (SSE)
-GET  /api/jobs/{id}/logs?tail=N       {lines, next}        GET /api/jobs/{id}/logs/stream     (SSE)
-GET  /api/jobs/{id}/trajectories?since=N
+GET  /api/jobs/{id}/metrics?since=N        {rows, next}    GET /api/jobs/{id}/metrics/stream?since=N  (SSE: `metrics` per row, then `end` {state, next, error})
+GET  /api/jobs/{id}/logs?tail=N            {lines, next}   GET /api/jobs/{id}/logs/stream?since=N     (SSE: `log` per line, then `end` {state, next, error})
+GET  /api/jobs/{id}/trajectories?since=N   {rows, next}
 GET  /api/jobs/{id}/checkpoints
+GET  /api/jobs/{id}/events?metrics=N&logs=N&trajectories=N   SSE tail of the whole run dir on one connection: `metrics` / `log` / `trajectory`
+                                           per row or line from each cursor (default 0, as `since` above), then `end`
+                                           {state, error, next: {metrics, logs, trajectories}} once terminal and drained
+GET  /api/jobs/{id}/stages                 pipeline manifest {job_id, kind, name, state, final_model_path, error, stages:[...]} (`stages: []` for plain runs)
+GET  /api/jobs/{id}/stages/stream          SSE: `stages` = that payload, now and on every change, then `end` {state, next: null, error}
+GET  /api/jobs/{id}/stages/{index}         one stage + its status.json
+GET  /api/jobs/{id}/stages/{index}/(metrics|logs|trajectories|checkpoints)   the stage run dir, same shapes as the job-level routes
+GET  /api/jobs/{id}/stages/{index}/events?metrics=N&logs=N&trajectories=N    SSE as /api/jobs/{id}/events for the stage run dir; `end` once the stage
+                                           (or the job) is terminal; a pending stage's stream waits for it to start; unknown index -> 404
 GET  /api/envs                        registered env types + MEP example servers discovered under envs/sdk
 ```
 Jobs persist in `$MONORL_HOME/jobs.json` (default `~/.monorl`); run dirs under
@@ -210,7 +219,8 @@ Jobs persist in `$MONORL_HOME/jobs.json` (default `~/.monorl`); run dirs under
 
 ### MEP/1 environment protocol — `src/monorl/envs/protocol.py` (read the docstring)
 Python side: env type `remote` with `env.params = {"transport": "stdio", "command": [...], "cwd": ...}`
-or `{"transport": "http", "url": "http://host:port", "parallel": N}`. Go SDK: `envs/sdk/go`
+or `{"transport": "http", "url": "http://host:port", "parallel": N}` (`"urls": [...]` for replicas; each
+episode is pinned to one). Go SDK: `envs/sdk/go`
 (module `github.com/monorl/envsdk`), C++ SDK: `envs/sdk/cpp` (header-only `mep.hpp` +
 `nlohmann/json.hpp` vendored). Both serve stdio and http from the same env implementation.
 
@@ -253,7 +263,8 @@ or `{"transport": "http", "url": "http://host:port", "parallel": N}`. Go SDK: `e
 uses it), `message_media(m, "image")`, `messages_have_media(messages)`. `DataConfig.image_field`
 (column or columns: HF `Image` feature, path/URI, bytes, base64) attaches images to the user
 message as parts; `'<image>'` in `prompt_template` positions them (default: before the text).
-Images materialised from bytes/PIL are written to `$MONORL_HOME/cache/media/<sha256>.png` and
+Images materialised from bytes/PIL are written to `$MONORL_HOME/cache/media/<sha256>.<ext>` (the
+bytes' own container — png/jpg/gif/webp/bmp; anything else is re-encoded as PNG) and
 referenced by path so samples/trajectories/MEP/1 stay JSON. Engines and trainers load media
 through the model's `AutoProcessor`; `Completion.prompt_token_ids` includes media placeholder
 tokens; `TrainBatch.extra` carries processor tensors (`pixel_values`, `image_grid_thw`, ...)
@@ -290,8 +301,8 @@ assistant turn kept by the data layer in `metadata["assistant_turn"]`), masks th
 trains with `monorl.algorithms.sft_loss(logprobs, response_mask, *, label_smoothing, loss_agg)`
 → `PolicyLossOutput` with metrics `loss/sft`, `sft/ppl`, `sft/tokens`. `trainer.prompts_per_step`
 = sequences per optimizer step; `max_steps`/`save_every`/`eval_every` as for RL (eval = held-out
-NLL `eval/loss`). Pipeline backends map it to TRL `SFTTrainer`, verl `fsdp_sft_trainer`,
-NeMo-RL `run_sft.py`.
+NLL `eval/loss`). Pipeline backends map it to TRL `SFTTrainer`, verl's engine-based
+`sft_trainer_ray` (`sft_trainer_engine.yaml`; v0.9.1 dropped `fsdp_sft_trainer`), NeMo-RL `run_sft.py`.
 
 ### Pipelines — `monorl.config.pipeline.PipelineConfig` → `monorl.pipeline.run_pipeline(config, run_dir=None, *, resume=False) -> PipelineResult`
 Run dir layout: `<run_dir>/pipeline.yaml`, `status.json` (same shape as a run; `step` = stages

@@ -222,6 +222,68 @@ def test_http_unreachable():
         RemoteEnv.from_params(env_params)
 
 
+@pytest.mark.parametrize("override, cap", [(None, 2), (1, 1)])
+def test_http_episodes_wait_for_a_free_server_slot(override, cap):
+    """A server refuses episodes beyond ``parallel_episodes``; the client must queue the excess."""
+    server = MEPServer(
+        lambda: make_tool_calling_env({"tools": ["calculator"]}, max_turns=3), parallel_episodes=2
+    )
+    handle = start_http_server(server, port=0)
+    env_params = {"transport": "http", "url": handle.url, "timeout_s": 30}
+    if override is not None:
+        env_params["parallel"] = override
+    peak: list[int] = []
+
+    def run(i: int) -> str:
+        env = RemoteEnv.from_params(env_params)
+        env.reset(_sample(f"ep{i}"))
+        peak.append(server.active_episodes)
+        answer = env.step(_c(CALC % f"{i}+1")).messages[0]["content"]
+        env.close()
+        return answer
+
+    try:
+        with ThreadPoolExecutor(6) as pool:
+            results = list(pool.map(run, range(6)))
+    finally:
+        handle.stop()
+    assert results == [str(i + 1) for i in range(6)]
+    assert 1 <= max(peak) <= cap
+
+
+def test_http_replicas_pin_each_episode_to_one_server():
+    """Episode state lives in one server process: with ``urls`` every request of an episode has
+    to reach the replica that holds it, and the replicas share the open episodes."""
+    servers = [
+        MEPServer(lambda: make_tool_calling_env({"tools": ["calculator"]}, max_turns=3), parallel_episodes=2)
+        for _ in range(2)
+    ]
+    handles = [start_http_server(server, port=0) for server in servers]
+    env_params = {"transport": "http", "urls": [h.url for h in handles], "timeout_s": 30}
+    open_per_server: list[tuple[int, ...]] = []
+    # the action runs once, when all four episodes are open and none has stepped yet
+    barrier = threading.Barrier(
+        4, action=lambda: open_per_server.append(tuple(s.active_episodes for s in servers))
+    )
+
+    def run(i: int) -> list[str]:
+        env = RemoteEnv.from_params(env_params)
+        env.reset(_sample(f"ep{i}"))
+        barrier.wait(timeout=20)
+        out = [env.step(_c(CALC % f"{i}*10+{k}")).messages[0]["content"] for k in range(2)]
+        env.close()
+        return out
+
+    try:
+        with ThreadPoolExecutor(4) as pool:
+            results = list(pool.map(run, range(4)))
+    finally:
+        for handle in handles:
+            handle.stop()
+    assert results == [[str(i * 10), str(i * 10 + 1)] for i in range(4)]
+    assert open_per_server == [(2, 2)]
+
+
 def test_bad_params():
     with pytest.raises(ValueError):
         slot_source_for({"transport": "carrier-pigeon"})

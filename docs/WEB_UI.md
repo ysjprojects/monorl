@@ -60,18 +60,29 @@ loop)* toggle at the top — a `PipelineConfig` whose `base` is the same wizard 
    checks, flagged as such) and **Launch** (`POST /api/jobs` with `{config}` or `{pipeline}`).
 
 **Run detail** (`/runs/:id`) — status, config, live metric charts (`reward/mean`, `loss/policy`,
-`loss/kl`, `policy/clipfrac`, token counts, timings; streamed over SSE from
-`/api/jobs/{id}/metrics/stream`), log tail (`/logs/stream`), sampled trajectories with prompt /
+`loss/kl`, `policy/clipfrac`, token counts, timings), log tail, sampled trajectories with prompt /
 response / reward breakdown, checkpoints list, and *Cancel* (`POST /api/jobs/{id}/cancel`, sends
-`SIGTERM`; the run ends as `cancelled`). SFT runs chart `loss/sft`, `sft/ppl`, `eval/loss`.
+`SIGTERM`; the run ends as `cancelled`). Charts, log and trajectories arrive over one SSE
+connection, `/api/jobs/{id}/events` (events `metrics`, `log`, `trajectory`). SFT runs chart
+`loss/sft`, `sft/ppl`, `eval/loss`.
 
-Pipeline jobs (`kind: pipeline`) show the stage table from `GET /api/jobs/{id}/stages` (index,
-name, type, state, step, summary, duration; the running stage is followed until you pick one)
-and a status card with stages finished / total. Selecting a stage loads its metrics, logs,
-trajectories and checkpoints from `/api/jobs/{id}/stages/{index}/…` (polled; these routes have no
-SSE variant) into the same charts / log / trajectory components. Rejection-sampling stages show
-sampled / accepted counts and the accept-rate chart (`rs/accept_rate`); eval stages chart
-`eval/reward_mean`.
+Pipeline jobs (`kind: pipeline`) show the stage table (index, name, type, state, step, summary,
+duration; the running stage is followed until you pick one) and a status card with stages
+finished / total. The table is the pipeline manifest, pushed over SSE from
+`/api/jobs/{id}/stages/stream` whenever a stage changes. Selecting a stage streams its metrics,
+log and trajectories from `/api/jobs/{id}/stages/{index}/events` into the same charts / log /
+trajectory components (its checkpoints come from `/stages/{index}/checkpoints`); a stage that has
+not started yet shows empty charts that fill in once it does, and switching stages closes the
+previous stage's stream. Rejection-sampling stages show sampled / accepted counts and the
+accept-rate chart (`rs/accept_rate`); eval stages chart `eval/reward_mean`.
+
+A live run view therefore holds one `EventSource` and a live pipeline view two (manifest +
+selected stage), which leaves room under the browser's six-connections-per-origin limit for
+several tabs. The badge next to the tabs reads *live (SSE)* while the events stream is open; if
+it fails (a proxy that buffers or drops event streams, an older server) the view closes it and
+polls the JSON routes (`…/metrics?since=N`, `…/logs?tail=N`, `…/trajectories?since=N`) from the
+rows it had reached, and the badge reads *polling*. The manifest falls back to
+`GET /api/jobs/{id}/stages` the same way. The job header and the checkpoints list are polled.
 
 Run logs: the server spawns the trainer with `MONORL_REPORTER_ECHO=0` and redirects its
 stdout/stderr into `<run_dir>/run.log`, so the reporter writes each line to `run.log` once instead

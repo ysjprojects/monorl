@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.7
 # monorl on top of verl's published uv image (the one verl 0.9.1's own CI runs on).
-# Tag verified on Docker Hub: verlai/verl:uv.cu130 (multi-arch; CUDA 13.0 / torch 2.11, baked uv
+# Tag verified on Docker Hub: verlai/verl:uv.cu130 (linux/amd64 only; CUDA 13.0 / torch 2.11, baked uv
 # cache for every backend, verl checked out at /workspace/verl, no venv materialised yet).
 # Pick the engine/trainer extras at build time (one inference engine + one trainer, see verl docs):
 #   docker build -f docker/Dockerfile.verl --build-arg INFER_BACKEND=vllm --build-arg TRAIN_BACKEND=fsdp -t monorl:verl .

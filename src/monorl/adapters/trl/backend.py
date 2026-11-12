@@ -1,5 +1,6 @@
 """``pipeline_backend: trl`` — run a :class:`~monorl.config.RunConfig` with ``trl.GRPOTrainer``
-(``grpo``/``dapo``) or ``trl.SFTTrainer`` (``algorithm.name: sft``).
+(``grpo``/``dapo``) or ``trl.SFTTrainer`` (``algorithm.name: sft``; label smoothing through the
+:mod:`.sft` subclass).
 
 monorl data → HF dataset (:mod:`.data`; ``images`` column + ``AutoProcessor`` for VLMs), monorl
 rewards → TRL reward function (:mod:`.rewards`), monorl environments → TRL ``rollout_func``
@@ -22,7 +23,12 @@ from typing import Any
 import torch
 
 from monorl.adapters.trl.callbacks import ReporterCallback, link_checkpoint, trajectories_with_advantages
-from monorl.adapters.trl.compile import compile_grpo_config, compile_sft_config, resolve_device
+from monorl.adapters.trl.compile import (
+    compile_grpo_config,
+    compile_sft_config,
+    resolve_device,
+    sft_label_smoothing,
+)
 from monorl.adapters.trl.data import build_train_and_eval
 from monorl.adapters.trl.patches import HOOKS_ATTR, hooks_patch_applied
 from monorl.adapters.trl.rewards import MonorlRewardFunc
@@ -112,7 +118,14 @@ class TRLPipelineBackend:
         if config.is_sft:
             args = compile_sft_config(config, run_dir, device=device)
             callback = ReporterCallback(reporter, sft=True, label="SFTTrainer")
-            trainer = trl.SFTTrainer(
+            trainer_cls, loss_kwargs = trl.SFTTrainer, {}
+            smoothing = sft_label_smoothing(config)
+            if smoothing > 0:
+                from monorl.adapters.trl.sft import LabelSmoothedSFTTrainer
+
+                trainer_cls = LabelSmoothedSFTTrainer
+                loss_kwargs = {"label_smoothing": smoothing, "loss_agg": config.algorithm.loss_agg}
+            trainer = trainer_cls(
                 model=model,
                 args=args,
                 train_dataset=train_ds,
@@ -120,6 +133,7 @@ class TRLPipelineBackend:
                 processing_class=processing_class,
                 callbacks=[callback],
                 peft_config=peft_config_for(config),
+                **loss_kwargs,
             )
         else:
             args = compile_grpo_config(config, run_dir, device=device)

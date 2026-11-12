@@ -4,8 +4,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from monorl.adapters.verl import VERL_COMMIT, VERL_TAG, VERL_VERSIONS, compile_config, to_overrides
 from monorl.adapters.verl.compiler import flatten, format_value
+from monorl.core.errors import ConfigError
 
 
 def _overrides(config, run_dir: Path) -> dict[str, str]:
@@ -168,6 +171,13 @@ def test_tool_calling_snapshot(make_config, tmp_path: Path):
     assert ov["actor_rollout_ref.rollout.multi_turn.max_user_turns"] == "4"
     assert ov["actor_rollout_ref.rollout.multi_turn.format"] == "hermes"
     assert ov["actor_rollout_ref.rollout.agent.default_agent_loop"] == "tool_agent"
+
+
+@pytest.mark.parametrize("env_type", ["remote", "openenv", "hermes"])
+def test_environments_verl_cannot_step_are_rejected(make_config, tmp_path: Path, env_type: str):
+    cfg = make_config(env={"type": env_type, "max_turns": 4})
+    with pytest.raises(ConfigError, match="never step that environment"):
+        compile_config(cfg, tmp_path)
 
 
 def test_model_options(make_config, tmp_path: Path):

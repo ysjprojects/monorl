@@ -1,5 +1,6 @@
 .git
 .venv
+.venv-unsloth
 .ruff_cache
 .pytest_cache
 .monorl

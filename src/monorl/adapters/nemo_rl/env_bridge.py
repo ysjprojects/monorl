@@ -28,8 +28,17 @@ import torch
 
 from monorl.adapters.nemo_rl.compile import ACTOR_FQN, build_env_config
 from monorl.config.schema import RunConfig
+from monorl.core.errors import ConfigError
 from monorl.core.interfaces import Environment, RewardFunction
-from monorl.core.types import Completion, Message, Sample, Trajectory, Turn
+from monorl.core.types import (
+    Completion,
+    Message,
+    Sample,
+    Trajectory,
+    Turn,
+    message_text,
+    messages_have_media,
+)
 
 try:  # the real NamedTuple when NeMo-RL is importable; identical field layout otherwise
     from nemo_rl.environments.interfaces import EnvironmentReturn
@@ -62,12 +71,12 @@ class _Episode:
 def _latest_assistant(message_log: Sequence[dict[str, Any]]) -> str:
     for m in reversed(message_log):
         if m.get("role") == "assistant":
-            return str(m.get("content", ""))
+            return message_text(m)
     return ""
 
 
 def _role_content(message_log: Sequence[dict[str, Any]]) -> list[Message]:
-    return [{"role": m.get("role", "user"), "content": str(m.get("content", ""))} for m in message_log]  # type: ignore[misc]
+    return [{"role": m.get("role", "user"), "content": message_text(m)} for m in message_log]  # type: ignore[misc]
 
 
 class MonorlEnvironmentBridge:
@@ -163,9 +172,15 @@ class MonorlEnvironmentBridge:
                 self._finish(episode_id)
                 observations.append({"role": TERMINAL_ROLE, "content": ""})
             else:
+                if messages_have_media(result.messages):
+                    raise ConfigError(
+                        f"trainer.backend='nemo_rl' passes text observations only, but env "
+                        f"{self.config.env.type!r} returned image/audio/video parts; run multimodal "
+                        f"environments with the component loop (trainer.backend='reference')"
+                    )
                 role = str(result.messages[0].get("role", "user")) if result.messages else "user"
                 observations.append(
-                    {"role": role, "content": "\n".join(str(m.get("content", "")) for m in result.messages)}
+                    {"role": role, "content": "\n".join(message_text(m) for m in result.messages)}
                 )
             out_metadata.append(meta)
             rewards.append(float(result.reward))

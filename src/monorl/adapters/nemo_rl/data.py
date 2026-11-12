@@ -81,8 +81,8 @@ def data_paths(run_dir: str | Path) -> DataPaths:
 def _last_user_text(messages: list[Message]) -> str:
     for m in reversed(messages):
         if m.get("role") == "user":
-            return str(m.get("content", ""))
-    return str(messages[-1].get("content", "")) if messages else ""
+            return message_text(m)
+    return message_text(messages[-1]) if messages else ""
 
 
 def sample_to_row(sample: Sample) -> dict[str, Any]:
@@ -217,7 +217,7 @@ def monorl_data_processor(
     if prompt:
         for m in reversed(messages):
             if m.get("role") == "user":
-                m["content"] = prompt.format(m.get("content", ""))
+                m["content"] = prompt.format(message_text(m))
                 break
     text = tokenizer.apply_chat_template(
         messages, tokenize=False, add_generation_prompt=True, add_special_tokens=False

@@ -91,9 +91,10 @@ def sft_config_kwargs(
     """Keyword arguments for ``SFTConfig`` (TRL 1.17 ``trl/trainer/sft_config.py``).
 
     ``trainer.prompts_per_step`` sequences per optimizer step, ``max_length = trainer.max_seq_len``,
-    ``completion_only_loss`` unless ``algorithm.sft_train_on_prompt``, ``label_smoothing_factor``
-    from ``algorithm.sft_label_smoothing`` (``Trainer.label_smoother``; TRL falls back to its fused
-    NLL path when it is 0). ``trainer.extra`` overrides any field last.
+    ``completion_only_loss`` unless ``algorithm.sft_train_on_prompt``. ``label_smoothing_factor`` is
+    left at TRL's 0 (deprecated in TRL 1.17): :func:`sft_label_smoothing` routes
+    ``algorithm.sft_label_smoothing`` to the trainer subclass instead. ``trainer.extra`` overrides
+    any field last.
     """
     device = device or resolve_device(config)
     algo, tr = config.algorithm, config.trainer
@@ -106,7 +107,6 @@ def sft_config_kwargs(
             "max_length": tr.max_seq_len,
             "completion_only_loss": not algo.sft_train_on_prompt,
             "assistant_only_loss": False,
-            "label_smoothing_factor": algo.sft_label_smoothing,
             "packing": False,
             "padding_free": False,
             "loss_type": "nll",
@@ -114,6 +114,20 @@ def sft_config_kwargs(
     )
     kwargs.update(tr.extra)
     return kwargs
+
+
+def sft_label_smoothing(config: RunConfig) -> float:
+    """Label smoothing :class:`~monorl.adapters.trl.sft.LabelSmoothedSFTTrainer` has to apply; ``0.0``
+    selects the stock ``trl.SFTTrainer``.
+
+    ``algorithm.sft_label_smoothing`` unless ``trainer.extra`` overrides the loss: an explicit
+    ``label_smoothing_factor`` hands smoothing to TRL's own (deprecated) ``LabelSmoother`` path, and
+    TRL defines no smoothed form of a non-``nll`` ``loss_type`` (``dft``).
+    """
+    extra = config.trainer.extra
+    if "label_smoothing_factor" in extra or extra.get("loss_type", "nll") != "nll":
+        return 0.0
+    return config.algorithm.sft_label_smoothing
 
 
 def compile_sft_config(config: RunConfig, run_dir: Path, *, device: torch.device | None = None) -> Any:

@@ -134,10 +134,14 @@ Metrics written by sampling stages: rejection `rs/prompts`, `rs/sampled`, `rs/ac
 stage from its latest checkpoint. The stage list (names and types) must match the manifest.
 
 SIGTERM/SIGINT cancel the pipeline: a train stage finishes its current step, checkpoints and reports
-`cancelled` (the orchestrator's own handling); a sampling stage aborts episodes that have not started
-generating, finishes the in-flight ones, does not start the next prompt chunk and discards its partial
-dataset. The stage and the pipeline end in state `cancelled` (`final_model_path` is only set for a
-succeeded pipeline); later stages stay `pending`. A second signal interrupts immediately.
+`cancelled` (the orchestrator's own handling); a sampling stage aborts its episodes, does not start
+the next prompt chunk and discards its partial dataset. Generation in flight is aborted, not
+finished: the episodes stop waiting for it at once, and an engine implementing `cancel()` (`hf`,
+`vllm` and `sglang` all do) stops generating within one step. An engine without `cancel()` still completes the batch
+it is running before the stage shuts it down, with the results dropped. An environment step in
+flight finishes before its episode aborts. The stage and the pipeline end in state `cancelled`
+(`final_model_path` is only set for a succeeded pipeline); later stages stay `pending`. A second
+signal interrupts immediately.
 
 ## API and UI
 
@@ -149,6 +153,22 @@ succeeded pipeline); later stages stay `pending`. A second signal interrupts imm
   (`stages: []` for plain runs); `GET /api/jobs/{id}/stages/{index}` → one stage + its `status.json`.
 - `GET /api/jobs/{id}/stages/{index}/metrics|trajectories|logs|checkpoints` read that stage's run dir
   with the same query parameters and shapes as the job-level routes.
+- Server-sent events (named events, a final `end` event), for live views:
+  - `GET /api/jobs/{id}/stages/stream` → a `stages` event carrying the `GET /api/jobs/{id}/stages`
+    payload, sent on connect and again whenever it changes; `end` `{state, next: null, error}`
+    follows the last one once the job is terminal. It is a snapshot stream: no cursor.
+  - `GET /api/jobs/{id}/stages/{index}/events?metrics=N&logs=N&trajectories=N` → the stage run
+    dir's three append-only files on one connection: `metrics` / `log` / `trajectory` events (one
+    row or line each, file order within a kind), each kind starting at its own cursor (default 0,
+    same meaning as `since` on the JSON routes). `end` `{state, error, next: {metrics, logs,
+    trajectories}}` comes once that stage (or the job) is terminal and the files are drained, with
+    the stage's state, or the job's when the stage never finished. A stream opened for a `pending`
+    stage stays open and starts emitting when the stage starts; an index the pipeline does not
+    have is a 404.
+  - `GET /api/jobs/{id}/events` is the same stream for the job's own run dir (a plain run's
+    metrics, log and trajectories; a pipeline's top-level log).
+- The UI holds two connections on a live pipeline (the manifest and the selected stage) and one
+  on a live run, and falls back to polling the JSON routes if an `EventSource` fails.
 - `GET /api/config/pipeline_schema`; `POST /api/config/validate {pipeline: ...}` → `{ok, errors, pipeline}`.
 - `GET /api/recipes` entries carry `kind: "run" | "pipeline"`.
 

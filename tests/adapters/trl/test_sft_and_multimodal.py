@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import re
+import warnings
 from pathlib import Path
 from typing import Any
 
@@ -11,9 +13,22 @@ import torch
 from PIL import Image
 from transformers import AutoModelForCausalLM
 
+from monorl.adapters.trl.backend import load_policy_model, load_processing_class
 from monorl.adapters.trl.callbacks import map_metrics
-from monorl.adapters.trl.compile import compile_sft_config, sft_config_kwargs, split_batch
-from monorl.adapters.trl.data import build_dataset, sample_to_row, sft_sample_to_row, structured_messages
+from monorl.adapters.trl.compile import (
+    compile_sft_config,
+    sft_config_kwargs,
+    sft_label_smoothing,
+    split_batch,
+)
+from monorl.adapters.trl.data import (
+    build_dataset,
+    build_train_and_eval,
+    sample_to_row,
+    sft_sample_to_row,
+    structured_messages,
+)
+from monorl.adapters.trl.sft import LabelSmoothedSFTTrainer
 from monorl.config.schema import DataConfig, RunConfig
 from monorl.core.errors import ConfigError
 from monorl.core.registry import registry
@@ -68,7 +83,8 @@ def test_sft_config_mapping(sft_config: RunConfig, tmp_path: Path) -> None:
     assert kw["max_length"] == 256 and kw["max_steps"] == 2 and kw["save_steps"] == 1
     assert kw["per_device_train_batch_size"] == 1 and kw["gradient_accumulation_steps"] == 2
     assert kw["completion_only_loss"] is True and kw["assistant_only_loss"] is False
-    assert kw["label_smoothing_factor"] == 0.1 and kw["packing"] is False and kw["loss_type"] == "nll"
+    assert "label_smoothing_factor" not in kw and kw["packing"] is False and kw["loss_type"] == "nll"
+    assert sft_label_smoothing(sft_config) == 0.1
     assert kw["use_cpu"] is True and kw["report_to"] == "none"
     assert "num_generations" not in kw and "eval_strategy" not in kw
     assert split_batch(sft_config) == (1, 2)
@@ -86,6 +102,17 @@ def test_sft_train_on_prompt_eval_and_extra(sft_config: RunConfig, tmp_path: Pat
     cfg.trainer.extra = {"num_generations": 4}
     with pytest.raises(ConfigError, match="num_generations"):
         compile_sft_config(cfg, tmp_path, device=CPU)
+
+
+def test_extra_loss_overrides_take_smoothing_away_from_monorl(sft_config: RunConfig, tmp_path: Path) -> None:
+    cfg = sft_config.model_copy(deep=True)
+    cfg.trainer.extra = {"label_smoothing_factor": 0.2}  # TRL's own smoother: must not be applied twice
+    assert compile_sft_config(cfg, tmp_path, device=CPU).label_smoothing_factor == 0.2
+    assert sft_label_smoothing(cfg) == 0.0
+    cfg.trainer.extra = {"loss_type": "dft"}
+    args = compile_sft_config(cfg, tmp_path, device=CPU)
+    assert args.loss_type == "dft" and args.label_smoothing_factor == 0.0
+    assert sft_label_smoothing(cfg) == 0.0
 
 
 def test_sft_kwargs_reject_rl_algorithms(trl_config: RunConfig, tmp_path: Path) -> None:
@@ -177,6 +204,89 @@ def test_build_dataset_with_image_field(tmp_path: Path) -> None:
     assert [p["type"] for p in build_dataset(cfg, sft=True)[0]["completion"][0]["content"]] == ["text"]
 
 
+# -- label-smoothed loss ---------------------------------------------------------------------------
+
+EPS = 0.1
+
+
+@pytest.fixture
+def smoothed(
+    sft_config: RunConfig, tmp_path: Path
+) -> tuple[LabelSmoothedSFTTrainer, dict[str, torch.Tensor]]:
+    """The trainer the backend builds for ``sft_label_smoothing: 0.1`` and one collated 3-row batch."""
+    tokenizer, processing_class = load_processing_class(sft_config)
+    train_ds, _ = build_train_and_eval(sft_config, tokenizer=tokenizer)
+    trainer = LabelSmoothedSFTTrainer(
+        model=load_policy_model(sft_config, CPU),
+        args=compile_sft_config(sft_config, tmp_path, device=CPU),
+        train_dataset=train_ds,
+        processing_class=processing_class,
+        label_smoothing=sft_label_smoothing(sft_config),
+    )
+    batch = dict(trainer.data_collator([trainer.train_dataset[i] for i in (0, 2, 3)]))
+    return trainer, batch
+
+
+def _closed_form(
+    trainer: LabelSmoothedSFTTrainer, batch: dict[str, torch.Tensor], eps: float
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """``(token mean, mean of per-sequence means)`` of the smoothed cross-entropy, straight from logits."""
+    with torch.no_grad():
+        logits = trainer.model(input_ids=batch["input_ids"], attention_mask=batch["attention_mask"]).logits
+    logits, labels = logits[:, :-1], batch["labels"][:, 1:]
+    ce = torch.nn.functional.cross_entropy
+    token = ce(logits.flatten(0, 1), labels.flatten(), ignore_index=-100, label_smoothing=eps)
+    per_seq = [
+        ce(lg, lb, ignore_index=-100, label_smoothing=eps) for lg, lb in zip(logits, labels, strict=True)
+    ]
+    return token, torch.stack(per_seq).mean()
+
+
+def test_smoothed_loss_matches_closed_form_and_trains(
+    smoothed: tuple[LabelSmoothedSFTTrainer, dict[str, torch.Tensor]],
+) -> None:
+    trainer, batch = smoothed
+    model = trainer.model.train()
+    loss_tokens = int((batch["labels"][:, 1:] != -100).sum())
+    # completion-only masking survives: the prompt and the padding are not loss positions
+    assert 0 < loss_tokens < int(batch["attention_mask"].sum()) < batch["input_ids"].numel()
+    expected, _ = _closed_form(trainer, batch, EPS)
+    unsmoothed, _ = _closed_form(trainer, batch, 0.0)
+
+    loss, outputs = trainer.compute_loss(model, dict(batch), return_outputs=True)
+    assert loss.item() == pytest.approx(expected.item(), abs=1e-5)
+    assert abs(loss.item() - unsmoothed.item()) > 1e-3
+    assert outputs.logits.shape == (*batch["input_ids"].shape, model.config.vocab_size)
+
+    loss.backward()
+    grad = model.get_output_embeddings().weight.grad
+    assert grad is not None and float(grad.abs().sum()) > 0
+
+    # Trainer's accumulated-batch normalisation: the micro-batch sum over the window's token count
+    scaled = trainer.compute_loss(model, dict(batch), num_items_in_batch=torch.tensor(2 * loss_tokens))
+    assert scaled.item() == pytest.approx(expected.item() / 2, abs=1e-5)
+
+
+def test_smoothed_loss_sequence_aggregation_and_unsmoothed_eval(
+    smoothed: tuple[LabelSmoothedSFTTrainer, dict[str, torch.Tensor]],
+) -> None:
+    trainer, batch = smoothed
+    model = trainer.model.train()
+    token, sequence = _closed_form(trainer, batch, EPS)
+    assert abs(token.item() - sequence.item()) > 1e-4  # rows have different completion lengths
+
+    trainer.loss_agg = "sequence"
+    assert trainer.compute_loss(model, dict(batch)).item() == pytest.approx(sequence.item(), abs=1e-5)
+    trainer.current_gradient_accumulation_steps = 2  # set by Trainer's loop for every accumulation window
+    scaled = trainer.compute_loss(model, dict(batch), num_items_in_batch=torch.tensor(99))
+    assert scaled.item() == pytest.approx(sequence.item() / 2, abs=1e-5)
+
+    model.eval()  # eval_loss is the held-out NLL, as in monorl's SFT loop
+    unsmoothed, _ = _closed_form(trainer, batch, 0.0)
+    with torch.no_grad():
+        assert trainer.compute_loss(model, dict(batch)).item() == pytest.approx(unsmoothed.item(), abs=1e-5)
+
+
 # -- real CPU run --------------------------------------------------------------------------------
 
 
@@ -185,7 +295,18 @@ def test_sft_end_to_end_on_cpu(sft_config: RunConfig, tmp_path: Path) -> None:
     run_dir = tmp_path / "run"
     reporter = RunReporter(run_dir, echo=False)
     backend = registry.get("pipeline_backend", "trl")(sft_config)
-    result = backend.run(sft_config, run_dir, reporter=reporter)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        result = backend.run(sft_config, run_dir, reporter=reporter)
+
+    deprecated = [
+        str(w.message)
+        for w in caught
+        if issubclass(w.category, FutureWarning)
+        and re.search(r"label_smoothing_factor|compute_loss_func", str(w.message))
+    ]
+    assert deprecated == []
+    assert isinstance(backend.trainer, LabelSmoothedSFTTrainer) and backend.trainer.label_smoothing == 0.1
 
     assert result.state == "succeeded", result.error
     assert result.final_step == 2
