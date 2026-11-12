@@ -92,8 +92,9 @@ vLLM/SGLang adapters yet.
 ### Trainers (`trainer.backend`)
 
 * `reference` — pure torch loop: policy loss from `monorl.algorithms` (grpo/dapo/rloo/
-  reinforce; `ppo` needs a critic and is only available through the verl backend), optional KL to a reference model, full fine-tuning or LoRA (`model.lora`),
-  resumable checkpoints, HF export.
+  reinforce, and `ppo` with a value head on the policy's hidden states and turn-level GAE,
+  [`CREDIT_ASSIGNMENT.md`](CREDIT_ASSIGNMENT.md)), optional KL to a reference model, full
+  fine-tuning or LoRA (`model.lora`), resumable checkpoints, HF export.
   **SFT** (`algorithm.name: sft`): `monorl.orchestrator.run` skips rollouts, rewards and
   environments and runs `monorl.orchestrator.sft.SFTLoop` — each sample is encoded as
   `messages + assistant response` (`data.response_field` → `answer_field` → trailing assistant
