@@ -5,7 +5,8 @@ importing sglang. Endpoints (SGLang v0.5.23, ``python/sglang/srt/entrypoints/htt
 
 * ``POST /generate`` — body is ``GenerateReqInput`` (``srt/managers/io_struct.py`` /
   ``sglang/api/v1/api_types.py``): ``input_ids`` (list of token-id lists), ``sampling_params``
-  (one dict per request), ``return_logprob``, ``logprob_start_len``, ``image_data`` (one entry per
+  (one dict per request), ``return_logprob``, ``logprob_start_len``, ``top_logprobs_num`` (when
+  ``SamplingParams.top_logprobs`` is set), ``image_data`` (one entry per
   request: a list of ``data:image/png;base64`` URLs, or ``None`` for text-only); returns the same
   flat list of ``{"text", "output_ids", "meta_info"}`` dicts as ``Engine.generate``.
 * ``POST /update_weights_from_tensor`` — ``UpdateWeightsFromTensorReqInput``:
@@ -50,6 +51,7 @@ from monorl.adapters.sglang.common import (
     group_outputs,
     image_data_urls,
     is_media_prompt,
+    logprob_kwargs,
     serialized_payloads,
     server_url,
 )
@@ -137,8 +139,7 @@ class SGLangServerClient:
             body: dict[str, Any] = {
                 "input_ids": input_ids,
                 "sampling_params": sampling,
-                "return_logprob": params.logprobs,
-                "logprob_start_len": -1,
+                **logprob_kwargs(params),
             }
             image_data = image_data_urls(expand_image_data([images for _, images in encoded], params))
             if image_data is not None:

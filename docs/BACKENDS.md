@@ -135,6 +135,12 @@ vLLM/SGLang adapters yet.
 | `remote` | MEP/1 client for out-of-process envs (Go/C++/Python) | `transport: stdio` + `command`, `cwd`, `env`, `parallel`, `timeout_s` · `transport: http` + `url` or `urls` (replicas; each episode pinned to one), `parallel` (open-episode cap per server, default its `parallel_episodes`), `timeout_s` |
 | `openenv` | OpenEnv Gym-style env as a multi-turn env | `url` · `env_class` + `env_kwargs` · `image` + `env_vars`; `action_mode`, `action_field`, `observation_template`, `system_prompt`, `invalid_action_penalty`, `reset_kwargs`, `timeout_s` |
 | `hermes` | Hermes Agent turn loop (tools, skills, sandboxed terminal); policy tokens from our engine | `tools` (tool/toolset names, default `[file, terminal]`), `tool_modules`, `skills`, `skills_dir`, `hermes_home`, `workspace_dir` (default: temp dir per episode), `sandbox: {backend: local|docker|…, image}`, `max_tool_output_chars`, `max_calls_per_turn`, `invalid_call_penalty`, `system_prompt`, `hermes_system_prompt`, `model_name` |
+| `harness` | any external agent program is the environment: one process per episode that calls the policy through the OpenAI-compatible capture gateway, which records every call with its token ids and logprobs ([`GATEWAY.md`](GATEWAY.md)) | `command` (argv or string; placeholders `{task_file}`, `{workdir}`, `{base_url}`, `{api_key}`, `{model}`, `{python}`, …), `timeout`, `env`, `verifier` + `verifier_timeout`, `workdir: {root, template}`, `model`; `env.max_turns` caps the policy calls |
+
+Multi-turn prompts are built token-in/token-out by default (`rollout.turn_rendering: tokens`): the
+sampled tokens of earlier turns stay in the context and only new messages are rendered, and each
+trajectory trains as one sequence per token-contiguous chain of turns (see "Multi-turn episodes"
+in [`ARCHITECTURE.md`](ARCHITECTURE.md)).
 
 ## Pipeline backends
 

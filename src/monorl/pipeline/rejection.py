@@ -1,4 +1,4 @@
-"""Sampling stages: rejection sampling (policy → scored completions → SFT dataset) and greedy eval.
+"""Sampling stages: rejection sampling (policy → scored completions → SFT dataset) and eval.
 
 Both build only a rollout engine (no trainer) from the registry, run episodes through the
 orchestrator's parallel episode runner against the configured environment, and score them with the
@@ -9,7 +9,6 @@ policy.
 from __future__ import annotations
 
 import json
-import math
 import os
 import threading
 import time
@@ -26,6 +25,7 @@ from monorl.core.reporting import CONFIG_FILE, RunReporter
 from monorl.core.types import Message, RewardResult, Sample, SamplingParams, Trajectory
 from monorl.orchestrator import loop as _loop
 from monorl.orchestrator.episodes import EpisodeAborted, EpisodeSpec, run_episodes
+from monorl.orchestrator.metrics import eval_metrics, reward_metrics
 from monorl.pipeline.stages import DATASET_FILE
 
 ROW_SOURCE_SAMPLED = "sampled"
@@ -86,6 +86,7 @@ class PolicySampler:
             params=params,
             max_parallel=self.max_parallel,
             abort=abort,
+            turn_rendering=self.config.rollout.turn_rendering,
         )
 
     def score(self, trajectories: Sequence[Trajectory]) -> None:
@@ -148,20 +149,19 @@ def sampling_params(config: RunConfig, *, greedy: bool) -> SamplingParams:
     )
 
 
-def reward_stats(trajectories: Sequence[Trajectory]) -> dict[str, float]:
-    rewards = [float(t.reward) for t in trajectories]
-    if not rewards:
-        return {"reward/mean": 0.0, "reward/std": 0.0}
-    mean = sum(rewards) / len(rewards)
-    var = sum((r - mean) ** 2 for r in rewards) / len(rewards)
-    out = {"reward/mean": mean, "reward/std": math.sqrt(var)}
-    names: dict[str, list[float]] = {}
-    for t in trajectories:
-        for k, v in t.reward_breakdown.items():
-            names.setdefault(k, []).append(float(v))
-    for k, vals in names.items():
-        out[f"reward/{k}"] = sum(vals) / len(rewards)
-    return out
+def _log_trajectories(
+    reporter: RunReporter, config: RunConfig, step: int, trajectories: Sequence[Trajectory], *, phase: str
+) -> None:
+    log_cfg = config.logging
+    if log_cfg.save_trajectories and log_cfg.trajectories_per_step > 0:
+        reporter.log_trajectories(
+            step,
+            trajectories,
+            max_items=log_cfg.trajectories_per_step,
+            phase=phase,
+            save_transcripts=log_cfg.save_transcripts,
+            success_threshold=log_cfg.success_threshold,
+        )
 
 
 def _chunks(items: Sequence[Any], size: int) -> list[Sequence[Any]]:
@@ -364,7 +364,7 @@ def run_rejection_sampling(
                 outcome.sampled += len(trajectories)
                 outcome.accepted += len(kept)
                 outcome.steps = step
-                stats = reward_stats(trajectories)
+                stats = reward_metrics(trajectories)
                 metrics = {
                     "rs/prompts": float(len(chunk)),
                     "rs/sampled": float(len(trajectories)),
@@ -379,9 +379,7 @@ def run_rejection_sampling(
                     "time/rollout": time.perf_counter() - t0,
                 }
                 reporter.log_metrics(step, metrics, phase="rejection")
-                per_step = config.logging.trajectories_per_step
-                if config.logging.save_trajectories and per_step > 0:
-                    reporter.log_trajectories(step, trajectories, max_items=per_step)
+                _log_trajectories(reporter, config, step, trajectories, phase="rejection")
                 reporter.log(
                     f"chunk {step}/{len(chunks)}: accepted {len(kept)}/{len(trajectories)} "
                     f"(reward mean {stats['reward/mean']:.4f})"
@@ -470,8 +468,9 @@ def eval_data_config(stage: EvalStage, config: RunConfig) -> DataConfig:
 def run_eval(
     stage: EvalStage, config: RunConfig, *, run_dir: Path, cancel: threading.Event | None = None
 ) -> EvalOutcome:
-    """Greedy episodes over the eval dataset; logs ``eval/*`` metrics (phase ``eval``) and a final
-    aggregate row."""
+    """Episodes over the eval dataset — greedy, or ``stage.num_samples`` sampled completions per
+    prompt grouped per prompt (pass@k); logs ``eval/*`` metrics (phase ``eval``), the sampled
+    trajectories and a final aggregate row."""
     reporter = RunReporter(run_dir)
     config.to_yaml(reporter.run_dir / CONFIG_FILE)
     outcome = EvalOutcome()
@@ -482,8 +481,8 @@ def run_eval(
         samples = sampler.load_samples(data_cfg, limit=stage.max_prompts)
         if not samples:
             raise DataError(f"no usable prompts in {data_cfg.uri}")
-        reporter.log(f"eval: {len(samples)} prompts from {data_cfg.uri}")
-        params = sampling_params(config, greedy=True)
+        reporter.log(f"eval: {len(samples)} prompts x {stage.num_samples} samples from {data_cfg.uri}")
+        params = sampling_params(config, greedy=stage.num_samples == 1)
         chunks = _chunks(
             samples, int(config.rollout.extra.get("eval_prompts_per_step", config.trainer.prompts_per_step))
         )
@@ -496,7 +495,7 @@ def run_eval(
             reporter.set_status("running", f"evaluating chunk {step}/{len(chunks)}", step=step - 1)
             try:
                 trajectories = sampler.episodes(
-                    chunk, n=1, params=params, group_prefix=f"eval{step}", abort=cancel
+                    chunk, n=stage.num_samples, params=params, group_prefix=f"eval{step}", abort=cancel
                 )
             except EpisodeAborted:
                 outcome.cancelled = True
@@ -504,22 +503,14 @@ def run_eval(
             sampler.score(trajectories)
             scored.extend(trajectories)
             outcome.steps = step
-            per_step = config.logging.trajectories_per_step
-            if config.logging.save_trajectories and per_step > 0:
-                reporter.log_trajectories(step, trajectories, max_items=per_step)
-            stats = reward_stats(trajectories)
-            reporter.log_metrics(step, {"eval/chunk_reward_mean": stats["reward/mean"]}, phase="eval")
+            _log_trajectories(reporter, config, step, trajectories, phase="eval")
+            chunk_mean = reward_metrics(trajectories)["reward/mean"]
+            reporter.log_metrics(step, {"eval/chunk_reward_mean": chunk_mean}, phase="eval")
         if outcome.cancelled:
             reporter.set_status("cancelled", f"cancelled after chunk {outcome.steps}", step=outcome.steps)
             return outcome
-        stats = reward_stats(scored)
-        metrics = {
-            "eval/reward_mean": stats.pop("reward/mean"),
-            "eval/reward_std": stats.pop("reward/std"),
-            "eval/num_samples": float(len(scored)),
-            "eval/time": time.perf_counter() - t_start,
-            **{f"eval/{k}": v for k, v in stats.items()},
-        }
+        metrics = eval_metrics(scored, success_threshold=config.logging.success_threshold)
+        metrics["eval/time"] = time.perf_counter() - t_start
         outcome.metrics = metrics
         outcome.num_samples = len(scored)
         reporter.log_metrics(outcome.steps, metrics, phase="eval")

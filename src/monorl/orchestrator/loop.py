@@ -7,7 +7,6 @@ orchestrator module itself stays import-light and tests can substitute fakes.
 
 from __future__ import annotations
 
-import math
 import os
 import queue
 import random
@@ -22,12 +21,13 @@ from typing import TYPE_CHECKING, Any
 
 import torch
 
-from monorl.core.errors import DataError
+from monorl.core.errors import ConfigError, DataError
 from monorl.core.registry import registry
 from monorl.core.reporting import list_checkpoints
 from monorl.core.types import RewardResult, RunResult, Sample, SamplingParams, Trajectory
 from monorl.orchestrator.batching import build_train_batch
 from monorl.orchestrator.episodes import EpisodeAborted, EpisodeSpec, run_episodes
+from monorl.orchestrator.metrics import eval_metrics, step_metrics
 from monorl.orchestrator.sampler import PromptSampler
 from monorl.orchestrator.sinks import MetricSinks
 
@@ -65,6 +65,16 @@ class ComponentLoop:
         self._eval_samples: list[Sample] | None = None
         self._runtime: Any = None
         self._sinks: MetricSinks | None = None
+        off = config.algorithm.off_policy
+        needs_behavior = off.corrects or off.anchor == "behavior" or off.score_centering
+        if needs_behavior and not self._engine_logprobs_match_trainer():
+            raise ConfigError(
+                "algorithm.off_policy (importance_weights / ratio_mask / score_centering / anchor='behavior') "
+                "needs sampling log-probs that are comparable with the trainer's, but rollout.backend="
+                f"{config.rollout.backend!r} reports them after top_k / top_p / min_p / repetition_penalty "
+                "(or rollout.extra.trust_engine_logprobs is false); sample without truncation or disable "
+                "these off_policy options"
+            )
 
     # -- lifecycle ------------------------------------------------------------------------
     def run(self) -> RunResult:
@@ -164,6 +174,11 @@ class ComponentLoop:
             repetition_penalty=float(extra.get("repetition_penalty", 1.0)),
             stop=list(r.stop),
             logprobs=True,
+            top_logprobs=(
+                config.algorithm.off_policy.score_centering_top_k
+                if config.algorithm.off_policy.score_centering
+                else 0
+            ),
         )
         self.eval_sampling = SamplingParams(
             n=1,
@@ -350,6 +365,7 @@ class ComponentLoop:
             params=self.sampling,
             max_parallel=self.max_parallel,
             abort=abort,
+            turn_rendering=self.config.rollout.turn_rendering,
         )
 
     def _score(self, trajectories: Sequence[Trajectory]) -> None:
@@ -397,7 +413,7 @@ class ComponentLoop:
                 "lr", float(getattr(self.trainer, "learning_rate", config.trainer.learning_rate))
             )
             return metrics
-        metrics.update(_reward_metrics(trajectories))
+        metrics.update(step_metrics(trajectories, success_threshold=config.logging.success_threshold))
 
         rewards = torch.tensor([t.reward for t in trajectories], dtype=torch.float32)
         advantages = _resolve_compute_advantages()(
@@ -414,6 +430,7 @@ class ComponentLoop:
                 "sample_ids": [t.sample.id for t in trajectories],
             },
             processor=self.processor,
+            loss_agg=algo.loss_agg,
         )
         metrics.update(token_stats)
         metrics["advantage/mean"] = float(batch.advantages.sum().item() / max(1, batch.num_response_tokens))
@@ -422,13 +439,31 @@ class ComponentLoop:
         )
 
         t0 = time.perf_counter()
-        if batch.old_logprobs is None or not self._engine_logprobs_match_trainer():
+        off = algo.off_policy
+        behavior = batch.old_logprobs if self._engine_logprobs_match_trainer() else None
+        if behavior is None or off.decoupled:
             # Engines that sample through top-k/top-p/min-p/repetition-penalty processors may report
             # logprobs of the *truncated* distribution (vLLM processed_logprobs, SGLang), while the
             # trainer scores the full temperature-scaled softmax. Mixing them biases the importance
             # ratio below 1 even on-policy, so recompute old_logprobs with the trainer instead.
+            # Decoupled PPO anchors on the trainer by design and keeps the sampling logprobs apart.
             batch.old_logprobs = self.trainer.compute_logprobs(batch, reference=False) * batch.response_mask
             metrics["tokens/old_logprobs_recomputed"] = 1.0
+        centered = off.score_centering and behavior is not None and batch.behavior_top_ids is not None
+        if off.decoupled or off.anchor == "behavior" or off.score_centering:
+            # 1 when this batch has no usable sampling logprobs (or top-k) and trains uncorrected.
+            metrics["offpolicy/skipped"] = float(behavior is None or (off.score_centering and not centered))
+        if off.decoupled and behavior is not None:
+            batch.behavior_logprobs = behavior
+            metrics.update(
+                _resolve_offpolicy().offpolicy_metrics(batch.old_logprobs, behavior, batch.response_mask, off)
+            )
+        if centered:
+            metrics["offpolicy/sc_head_mass"] = _resolve_offpolicy().head_mass(
+                batch.behavior_top_logprobs, batch.response_mask
+            )
+        else:
+            batch.behavior_top_ids = batch.behavior_top_logprobs = None
         if algo.kl_coef > 0:
             batch.ref_logprobs = self.trainer.compute_logprobs(batch, reference=True) * batch.response_mask
         train_metrics: dict[str, list[float]] = {}
@@ -484,7 +519,7 @@ class ComponentLoop:
             if self._sinks is not None:
                 self._sinks.log(step, metrics)
             if log_cfg.save_trajectories and log_cfg.trajectories_per_step > 0 and trajectories:
-                self.reporter.log_trajectories(step, trajectories, max_items=log_cfg.trajectories_per_step)
+                self._log_trajectories(step, trajectories, phase="train")
             reward = metrics.get("reward/mean", float("nan"))
             loss = metrics.get("loss/policy", float("nan"))
             self.reporter.set_status(
@@ -494,6 +529,17 @@ class ComponentLoop:
             )
         else:
             self.reporter.set_status("running", step=step)
+
+    def _log_trajectories(self, step: int, trajectories: Sequence[Trajectory], *, phase: str) -> None:
+        log_cfg = self.config.logging
+        self.reporter.log_trajectories(
+            step,
+            trajectories,
+            max_items=log_cfg.trajectories_per_step,
+            phase=phase,
+            save_transcripts=log_cfg.save_transcripts,
+            success_threshold=log_cfg.success_threshold,
+        )
 
     # -- evaluation ----------------------------------------------------------------------
     def _evaluate(self, step: int) -> None:
@@ -527,40 +573,21 @@ class ComponentLoop:
                 tokenizer=self.tokenizer,
                 params=self.eval_sampling,
                 max_parallel=self.max_parallel,
+                turn_rendering=config.rollout.turn_rendering,
             )
         self._score(trajectories)
-        reward_metrics = _reward_metrics(trajectories)
-        metrics = {
-            "eval/reward_mean": reward_metrics.pop("reward/mean"),
-            "eval/reward_std": reward_metrics.pop("reward/std"),
-        }
-        metrics.update({f"eval/{k}": v for k, v in reward_metrics.items()})
-        metrics["eval/num_samples"] = float(len(trajectories))
+        log_cfg = config.logging
+        metrics = eval_metrics(trajectories, success_threshold=log_cfg.success_threshold)
         metrics["eval/time"] = time.perf_counter() - t0
         self.reporter.log_metrics(step, metrics, phase="eval")
         if self._sinks is not None:
             self._sinks.log(step, metrics, phase="eval")
+        if log_cfg.save_trajectories and log_cfg.trajectories_per_step > 0:
+            self._log_trajectories(step, trajectories, phase="eval")
         self.reporter.log(f"eval step {step}: reward_mean={metrics['eval/reward_mean']:.4f}")
 
 
 # -- helpers -------------------------------------------------------------------------------
-
-
-def _reward_metrics(trajectories: Sequence[Trajectory]) -> dict[str, float]:
-    rewards = [float(t.reward) for t in trajectories]
-    n = len(rewards)
-    mean = sum(rewards) / n
-    var = sum((r - mean) ** 2 for r in rewards) / n
-    metrics = {"reward/mean": mean, "reward/std": math.sqrt(var)}
-    names: dict[str, list[float]] = {}
-    for t in trajectories:
-        for k, v in t.reward_breakdown.items():
-            names.setdefault(k, []).append(float(v))
-    for k, vals in names.items():
-        # Keys present on a subset of trajectories (env return, overlong penalty) average over all
-        # trajectories, counting absent entries as 0.
-        metrics[f"reward/{k}"] = sum(vals) / n
-    return metrics
 
 
 def _groups(trajectories: Sequence[Trajectory]) -> dict[str, list[Trajectory]]:
@@ -642,6 +669,12 @@ def _resolve_compute_advantages() -> Callable[..., Any]:
     from monorl.algorithms import compute_advantages
 
     return compute_advantages
+
+
+def _resolve_offpolicy() -> Any:
+    from monorl.algorithms import offpolicy
+
+    return offpolicy
 
 
 def _resolve_batching_engine() -> Callable[..., Any]:

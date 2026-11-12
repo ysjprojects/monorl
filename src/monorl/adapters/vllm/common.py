@@ -7,7 +7,16 @@ Upstream references (vLLM v0.33.0):
 
 * ``vllm/sampling_params.py`` ``SamplingParams`` fields ``n, max_tokens, temperature, top_p,
   top_k (0 disables, -1 accepted), min_p, repetition_penalty, stop, seed, logprobs``; with
-  ``logprobs=0`` only the sampled token's logprob is returned (OpenAI semantics).
+  ``logprobs=0`` only the sampled token's logprob is returned (OpenAI semantics). ``logprobs=k``
+  returns, per position, the sampled token followed by the ``k`` most likely tokens
+  (``vllm/v1/sample/sampler.py`` ``gather_logprobs``, ``vllm/logprobs.py``
+  ``append_logprobs_for_next_position``): ``k`` entries when the sampled token is among them, else
+  ``k + 1``. ``k`` is bounded by the engine's ``max_logprobs`` (``vllm/config/model.py``, default 20).
+* ``/v1/completions`` returns all of those entries as ``logprobs.top_logprobs[i]`` and
+  ``/v1/chat/completions`` the first ``top_logprobs`` of them as
+  ``logprobs.content[i].top_logprobs`` (``vllm/entrypoints/generate/base/serving.py``
+  ``completion_top_logprobs_limit`` / ``chat_top_logprobs_limit``); ``return_tokens_as_token_ids``
+  renders their tokens as ``"token_id:<id>"`` (``format_token_id_placeholder``).
 * ``vllm/outputs.py`` ``CompletionOutput(index, text, token_ids, cumulative_logprob, logprobs,
   finish_reason, ...)``; ``logprobs`` is ``SampleLogprobs = list[dict[int, Logprob]]`` or a
   ``FlatLogprobs`` (``vllm/logprobs.py``) when ``flat_logprobs=True``.
@@ -36,6 +45,7 @@ from monorl.core.types import (
     Message,
     PromptInput,
     SamplingParams,
+    TopLogprobs,
     messages_have_media,
 )
 
@@ -64,9 +74,14 @@ def sampling_kwargs(params: SamplingParams) -> dict[str, Any]:
     """Keyword arguments for ``vllm.SamplingParams`` (also the ``/v1/completions`` body subset).
 
     ``logprobs=0`` requests exactly the sampled token's logprob per position; ``None`` disables
-    logprob computation entirely. ``include_stop_str_in_output`` keeps a matched stop string in the
-    text (vLLM cuts it off by default), as the ``RolloutEngine`` contract requires.
+    logprob computation entirely; ``params.top_logprobs`` requests that many most likely tokens
+    too. ``include_stop_str_in_output`` keeps a matched stop string in the text (vLLM cuts it off
+    by default), as the ``RolloutEngine`` contract requires.
     """
+    if params.top_logprobs > 0:
+        logprobs: int | None = params.top_logprobs
+    else:
+        logprobs = 0 if params.logprobs else None
     return {
         "n": params.n,
         "max_tokens": params.max_new_tokens,
@@ -78,8 +93,31 @@ def sampling_kwargs(params: SamplingParams) -> dict[str, Any]:
         "stop": list(params.stop),
         "include_stop_str_in_output": True,
         "seed": params.seed,
-        "logprobs": 0 if params.logprobs else None,
+        "logprobs": logprobs,
     }
+
+
+#: ``format_token_id_placeholder`` (``vllm/entrypoints/generate/base/serving.py``).
+TOKEN_ID_PREFIX = "token_id:"
+
+
+def most_likely(candidates: Iterable[tuple[int, float]], k: int) -> list[tuple[int, float]]:
+    """The ``k`` most likely ``(token_id, logprob)`` of one position, most likely first.
+
+    vLLM reports the sampled token plus its top-k. A sampled token outside the top-k is the least
+    likely entry, so cutting the sorted candidates at ``k`` leaves the top-k whatever was sampled.
+    """
+    return sorted(candidates, key=lambda c: -c[1])[:k]
+
+
+def placeholder_token_id(token: str) -> int:
+    """Token id of a ``"token_id:<id>"`` placeholder (``return_tokens_as_token_ids=true``)."""
+    if not token.startswith(TOKEN_ID_PREFIX):
+        raise ValueError(
+            f"server returned the logprob token {token!r} instead of a 'token_id:<id>' placeholder; "
+            "request must set return_tokens_as_token_ids=true"
+        )
+    return int(token[len(TOKEN_ID_PREFIX) :])
 
 
 def is_token_prompt(prompt: PromptInput) -> bool:
@@ -183,8 +221,13 @@ def chat_completion_kwargs(params: SamplingParams) -> dict[str, Any]:
     """``ChatCompletionRequest`` body subset. ``logprobs=True, top_logprobs=0`` returns exactly the
     sampled token's logprob per position; ``return_token_ids=True`` adds ``choices[i].token_ids``
     and the response-level ``prompt_token_ids`` (the chat endpoint's logprob entries carry token
-    *strings*, so the ids must come from ``return_token_ids``)."""
-    return {
+    *strings*, so the ids must come from ``return_token_ids``).
+
+    With ``params.top_logprobs = k`` the request asks for ``k + 1`` candidates as token-id
+    placeholders: the endpoint returns the first ``top_logprobs`` entries of a position, which
+    start with the sampled token, so ``k + 1`` always contain the ``k`` most likely tokens."""
+    top = params.top_logprobs
+    body: dict[str, Any] = {
         "n": params.n,
         "max_completion_tokens": params.max_new_tokens,
         "temperature": params.temperature,
@@ -195,14 +238,17 @@ def chat_completion_kwargs(params: SamplingParams) -> dict[str, Any]:
         "stop": list(params.stop),
         "include_stop_str_in_output": True,
         "seed": params.seed,
-        "logprobs": bool(params.logprobs),
-        "top_logprobs": 0,
+        "logprobs": bool(params.logprobs) or top > 0,
+        "top_logprobs": top + 1 if top > 0 else 0,
         "return_token_ids": True,
     }
+    if top > 0:
+        body["return_tokens_as_token_ids"] = True
+    return body
 
 
 def completions_from_chat_response(
-    response: dict[str, Any], n: int, *, want_logprobs: bool
+    response: dict[str, Any], n: int, *, want_logprobs: bool, top_logprobs: int = 0
 ) -> list[Completion]:
     """One ``ChatCompletionResponse`` → ``n`` completions ordered by ``choices[i].index``."""
     choices = response.get("choices") or []
@@ -219,13 +265,29 @@ def completions_from_chat_response(
                 "chat response lacks choices[].token_ids; request must set return_token_ids=true"
             )
         lps: list[float] | None = None
-        if want_logprobs:
+        top: TopLogprobs | None = None
+        if want_logprobs or top_logprobs > 0:
             content = (choice.get("logprobs") or {}).get("content")
             if content is None:
                 raise ValueError("chat response lacks logprobs.content; request must set logprobs=true")
-            lps = [math.nan if e.get("logprob") is None else float(e["logprob"]) for e in content]
-            if len(lps) != len(token_ids):
-                raise ValueError(f"logprobs length {len(lps)} != token_ids length {len(token_ids)}")
+            if len(content) != len(token_ids):
+                raise ValueError(f"logprobs length {len(content)} != token_ids length {len(token_ids)}")
+            if want_logprobs:
+                lps = [math.nan if e.get("logprob") is None else float(e["logprob"]) for e in content]
+            if top_logprobs > 0 and all(e.get("top_logprobs") for e in content):
+                top = TopLogprobs.from_positions(
+                    [
+                        most_likely(
+                            (
+                                (placeholder_token_id(c["token"]), float(c["logprob"]))
+                                for c in e["top_logprobs"]
+                            ),
+                            top_logprobs,
+                        )
+                        for e in content
+                    ],
+                    top_logprobs,
+                )
         message = choice.get("message") or {}
         result.append(
             Completion(
@@ -234,6 +296,7 @@ def completions_from_chat_response(
                 logprobs=lps,
                 finish_reason=map_finish_reason(choice.get("finish_reason")),
                 prompt_token_ids=[int(t) for t in prompt_ids],
+                top_logprobs=top,
             )
         )
     return result
@@ -257,8 +320,23 @@ def sampled_logprobs(output: Any) -> list[float] | None:
     return result
 
 
+def top_logprobs_of(output: Any, k: int) -> TopLogprobs | None:
+    """The ``k`` most likely tokens at every position of one ``CompletionOutput`` sampled with
+    ``logprobs=k``; ``None`` when a position carries no logprobs."""
+    lps = output.logprobs
+    if lps is None or any(position is None for position in lps):
+        return None
+    return TopLogprobs.from_positions(
+        [
+            most_likely(((int(token), float(entry.logprob)) for token, entry in position.items()), k)
+            for position in lps
+        ],
+        k,
+    )
+
+
 def completions_from_request_output(
-    request_output: Any, prompt_ids: list[int], *, want_logprobs: bool
+    request_output: Any, prompt_ids: list[int], *, want_logprobs: bool, top_logprobs: int = 0
 ) -> list[Completion]:
     """Convert one ``RequestOutput`` into ``n`` :class:`Completion` objects ordered by ``index``."""
     outs = sorted(request_output.outputs, key=lambda o: o.index)
@@ -271,19 +349,26 @@ def completions_from_request_output(
                 logprobs=sampled_logprobs(out) if want_logprobs else None,
                 finish_reason=map_finish_reason(out.finish_reason),
                 prompt_token_ids=list(prompt_ids),
+                top_logprobs=top_logprobs_of(out, top_logprobs) if top_logprobs > 0 else None,
             )
         )
     return result
 
 
 def completions_from_choices(
-    choices: Sequence[dict[str, Any]], prompt_ids: Sequence[list[int]], n: int, *, want_logprobs: bool
+    choices: Sequence[dict[str, Any]],
+    prompt_ids: Sequence[list[int]],
+    n: int,
+    *,
+    want_logprobs: bool,
+    top_logprobs: int = 0,
 ) -> list[list[Completion]]:
     """Group ``/v1/completions`` choices (``index = prompt_idx * n + i``) back per prompt.
 
     ``vllm/entrypoints/openai/completion/protocol.py`` ``CompletionResponseChoice``: ``text``,
-    ``token_ids`` (``return_token_ids=True``), ``logprobs.token_logprobs`` (``logprobs=0``),
-    ``finish_reason``, ``prompt_token_ids``.
+    ``token_ids`` (``return_token_ids=True``), ``logprobs.token_logprobs`` (``logprobs>=0``),
+    ``logprobs.top_logprobs`` (one ``{"token_id:<id>": logprob}`` mapping per position with
+    ``logprobs=k`` and ``return_tokens_as_token_ids=True``), ``finish_reason``, ``prompt_token_ids``.
     """
     expected = len(prompt_ids) * n
     if len(choices) != expected:
@@ -297,8 +382,8 @@ def completions_from_choices(
             if token_ids is None:
                 raise ValueError("server response lacks token_ids; request must set return_token_ids=true")
             lps: list[float] | None = None
+            lp_obj = choice.get("logprobs") or {}
             if want_logprobs:
-                lp_obj = choice.get("logprobs") or {}
                 raw = lp_obj.get("token_logprobs")
                 if raw is None:
                     raise ValueError(
@@ -307,6 +392,25 @@ def completions_from_choices(
                 lps = [math.nan if v is None else float(v) for v in raw]
                 if len(lps) != len(token_ids):
                     raise ValueError(f"logprobs length {len(lps)} != token_ids length {len(token_ids)}")
+            top: TopLogprobs | None = None
+            if top_logprobs > 0:
+                positions = lp_obj.get("top_logprobs")
+                if positions is None or len(positions) != len(token_ids):
+                    raise ValueError(
+                        "server response lacks logprobs.top_logprobs for every token; request must set "
+                        f"logprobs={top_logprobs}"
+                    )
+                if all(positions):
+                    top = TopLogprobs.from_positions(
+                        [
+                            most_likely(
+                                ((placeholder_token_id(t), float(lp)) for t, lp in position.items()),
+                                top_logprobs,
+                            )
+                            for position in positions
+                        ],
+                        top_logprobs,
+                    )
             group.append(
                 Completion(
                     text=choice.get("text", ""),
@@ -314,6 +418,7 @@ def completions_from_choices(
                     logprobs=lps,
                     finish_reason=map_finish_reason(choice.get("finish_reason")),
                     prompt_token_ids=list(choice.get("prompt_token_ids") or ids),
+                    top_logprobs=top,
                 )
             )
         grouped.append(group)

@@ -397,7 +397,14 @@ class SFTLoop:
             if self._sinks is not None:
                 self._sinks.log(step, metrics)
             if log_cfg.save_trajectories and log_cfg.trajectories_per_step > 0 and trajectories:
-                self.reporter.log_trajectories(step, trajectories, max_items=log_cfg.trajectories_per_step)
+                self.reporter.log_trajectories(
+                    step,
+                    trajectories,
+                    max_items=log_cfg.trajectories_per_step,
+                    phase="sft",
+                    save_transcripts=log_cfg.save_transcripts,
+                    success_threshold=log_cfg.success_threshold,
+                )
             loss = metrics.get("loss/sft", float("nan"))
             ppl = metrics.get("sft/ppl", float("nan"))
             self.reporter.set_status(

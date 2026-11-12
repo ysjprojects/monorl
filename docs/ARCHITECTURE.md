@@ -91,11 +91,18 @@ Read the file. Key points:
 - `Trainer.train_step(TrainBatch) -> metrics`, `compute_logprobs(batch, reference=False)`,
   `export_weights()` (merged, HF-named), `save_checkpoint/load_checkpoint` (resumable),
   `save_pretrained` (HF export).
-- `Environment.reset(sample) -> messages`, `step(Completion) -> StepResult`, `max_turns`.
+- `Environment.reset(sample) -> messages`, `step(Completion) -> StepResult`, `max_turns`; or an
+  `EpisodeDriver` that runs the whole episode itself (`run_episode(sample, *, group_id, engine,
+  tokenizer, params, abort, turn_rendering) -> Trajectory`): an external agent behind the capture
+  gateway (`env.type: harness`, [`GATEWAY.md`](GATEWAY.md)). The env factory may return either.
 - `RewardFunction(trajectories) -> list[RewardResult]` (batched).
 - `PipelineBackend.run(config, run_dir, reporter=...) -> RunResult` for trl/verl/nemo_rl.
 - `TrainBatch` (`core/batch.py`): right-padded `[B,T]`, `response_mask` marks loss positions,
-  `advantages` per-token, `old_logprobs`/`ref_logprobs` aligned with `input_ids`.
+  `advantages` per-token, `old_logprobs`/`ref_logprobs` aligned with `input_ids`, optional
+  `loss_weights` (per-token weights of the loss mean, set for `algorithm.loss_agg: rollout`).
+- `Trajectory` (`core/types.py`): `messages` is the conversation the episode ended in (thread 0),
+  `extra_threads` hold other contexts of the same episode (a history before compaction, a
+  sub-agent); every `Turn` names its thread and the position of its assistant message.
 
 ### Registry — `src/monorl/core/registry.py`
 `registry.register(namespace, name, factory)`; factories are `factory(config: RunConfig, **kw)`
@@ -104,7 +111,7 @@ Providers expose `register(registry)`. Built-in providers are imported lazily on
 adapters via `monorl.adapters.PROVIDERS`.
 
 Names: rollout_engine `hf|vllm|sglang`; trainer `reference|unsloth`; pipeline_backend
-`trl|verl|nemo_rl`; env `single_turn|tool_calling|remote|openenv|hermes`; weight_sync
+`trl|verl|nemo_rl`; env `single_turn|tool_calling|remote|openenv|hermes|harness`; weight_sync
 `inprocess|checkpoint|broadcast|cuda_ipc`; data_source `local|hf|s3`; reward names listed above.
 
 ### Orchestrator entrypoint — `monorl.orchestrator`
@@ -118,12 +125,84 @@ Loop per step: sample `prompts_per_step` prompts → run `group_size` episodes p
 through the env (parallel; generation batched across episodes) → rewards → advantages
 (`monorl.algorithms`) → `TrainBatch` → `trainer.train_step` (× `algorithm.num_epochs`) →
 `weight_sync.sync` → checkpoint every `save_every` → `reporter.log_metrics/log_trajectories`.
-`rollout.async_steps_ahead > 0` enables a producer thread generating ahead (bounded staleness).
+`rollout.async_steps_ahead > 0` enables a producer thread generating ahead (bounded staleness);
+`algorithm.off_policy` configures how the loss accounts for it (decoupled PPO, truncated importance
+weights, ratio masks, score centering: [`OFF_POLICY.md`](OFF_POLICY.md)).
 Honour `SIGTERM`/`SIGINT` → `status cancelled`. Resume from the latest checkpoint when `resume`.
+
+#### Multi-turn episodes: prompts and training sequences
+`rollout.turn_rendering` decides how the prompt of turn `k+1` is built
+(`monorl.rollout.render.continue_prompt_ids`, used by the episode runner and the capture gateway):
+
+- `tokens` (default): previous prompt ids + the completion ids exactly as sampled + the template's
+  end-of-turn text (skipped when the completion already ended with that token) + the rendering of
+  only the new messages and the generation prompt. Nothing the policy produced is re-tokenised, so
+  special tokens, whitespace the template would trim and odd tokenisations stay in the context, the
+  prompt is an exact extension of the previous turn (prefix cache hits) and the episode trains as
+  one sequence. This fixes tokens, never content: a turn is continued only when the template
+  itself would carry the assistant's content over unchanged. A template that rewrites history
+  (Qwen3 / DeepSeek-R1 dropping the reasoning of earlier turns once a new user message arrives) is
+  followed, i.e. that turn is re-rendered.
+- `template`: the chat template re-renders the whole conversation every turn.
+
+`monorl.orchestrator.batching.build_train_batch` turns each trajectory into one sequence per
+token-contiguous chain of turns (`trajectory_rows`): turn `k` continues turn `j` when its prompt
+starts with `j`'s prompt + completion ids. Re-rendered turns, a compacted history or a sub-agent's
+conversation therefore become rows of their own instead of being dropped, and a turn shared by two
+branches is a loss position in exactly one row. All rows of a trajectory carry its advantage,
+reward and group id; `tokens/sequences` is the row count and `tokens/prefix_mismatch` the number of
+trajectories that needed more than one row. `algorithm.loss_agg`: `token` (mean over response
+tokens), `sequence` (per row, then over rows) or `rollout` (per trajectory across its rows, then
+over trajectories, through `TrainBatch.loss_weights`; on backends that train one sequence per
+rollout it equals `sequence`). Multimodal trajectories stay a single sequence (the final turn's
+chain) because the media tensors belong to the final prompt.
 
 Metric names (used by the UI): `reward/mean`, `reward/std`, `reward/<name>` per reward,
 `loss/policy`, `loss/kl`, `loss/entropy`, `policy/clipfrac`, `policy/approx_kl`,
-`tokens/response_mean`, `tokens/prompt_mean`, `time/rollout`, `time/train`, `time/sync`, `lr`.
+`policy/staleness`, `tokens/response_mean`, `tokens/prompt_mean`, `tokens/sequences`,
+`tokens/prefix_mismatch`, `time/rollout`, `time/train`, `time/sync`, `lr`, and `offpolicy/*` when
+`algorithm.off_policy` is active.
+
+Agent metrics (`monorl.orchestrator.metrics.episode_metrics(trajectories, *, success_threshold)`,
+reported per step as `reward/success_rate`, `reward/pass_at_k` and `episode/<key>`, and by every
+evaluation as `eval/<key>` next to `eval/reward_mean`, `eval/reward_std`, `eval/reward/<name>`,
+`eval/num_samples`, `eval/time`):
+
+| key | meaning |
+| --- | --- |
+| `success_rate` | episodes with total reward >= `logging.success_threshold` |
+| `pass_at_k` | `group_id` groups with at least one success; only when some group has 2+ episodes |
+| `turns_mean`, `turns_max` | policy turns per episode |
+| `done_frac` | episodes the environment ended (`Trajectory.done`) |
+| `truncated_frac` | episodes whose last turn finished with `length` |
+| `context_tokens_mean`, `context_tokens_max` | largest prompt + completion token count of an episode |
+| `tool_calls_mean`, `invalid_calls_mean` | per-episode sums of `Turn.info["tool_calls"]` (length) / `Turn.info["invalid_calls"]`; only when some turn reports them |
+| `threads_mean` | conversations per episode; only when some episode has `extra_threads` |
+
+#### `trajectories.jsonl` rows — `monorl.core.reporting.trajectory_row`
+At most `logging.trajectories_per_step` rows per logged step (`logging.save_trajectories`), written
+by training (`phase: train`), loop and pipeline evaluation (`eval`), rejection sampling
+(`rejection`) and SFT sample logging (`sft`). Rows never hold token ids or logprobs.
+
+```
+{step, phase, sample_id, group_id, prompt, response, reward, reward_breakdown, success, done,
+ finish_reason, num_turns, num_response_tokens, num_context_tokens, reference, info,
+ threads?: [[{role, content: str | [part], name?, tool_call_id?, tool_calls?}]],
+ turns?: [{index, thread, message_index, reward, finish_reason, prompt_tokens, response_tokens, info}]}
+```
+
+- `prompt` = last user message of the sample, `response` = all completions concatenated,
+  `finish_reason` = the last turn's, `num_context_tokens` = largest prompt + completion token count
+  over the turns, `success` = `reward >= logging.success_threshold`, `info` = `Trajectory.info`.
+- `threads` / `turns` are present when `logging.save_transcripts` is true. `threads` is
+  `Trajectory.threads` (thread 0 = the conversation the episode ended in). `turns[i].thread` indexes
+  `threads`; `turns[i].message_index` is the position of that turn's assistant message in its thread
+  — `Turn.message_index` when recorded, else the turns of a thread map in order onto the thread's
+  last N assistant messages (N = its turn count), else `null`. `turns[i].info` = `Turn.info`.
+- Size guards: any string over 20000 characters is cut and ends with
+  `… [<n> characters truncated]`; media parts keep paths, URLs and `data:` URLs up to 64 KiB, anything
+  else becomes `{"type": "image", "image": null, "note": "<what was omitted>"}`; values that are not
+  JSON data (objects, bytes, non-finite floats) become short strings.
 
 ### Internal helper contracts (consumed across workstreams)
 ```python
@@ -142,9 +221,14 @@ def compute_advantages(rewards: Tensor[B], group_ids: list[str], *, algorithm: A
 #   group/batch/none normalisation; rloo = leave-one-out baseline; reinforce = raw reward.
 def policy_loss(logprobs: Tensor[B,T], old_logprobs: Tensor[B,T] | None, advantages: Tensor[B,T],
                 response_mask: Tensor[B,T], *, algorithm: AlgorithmConfig,
-                ref_logprobs: Tensor[B,T] | None = None, entropy: Tensor[B,T] | None = None) -> PolicyLossOutput
+                ref_logprobs: Tensor[B,T] | None = None, entropy: Tensor[B,T] | None = None,
+                loss_weights: Tensor[B,T] | None = None, behavior_logprobs: Tensor[B,T] | None = None,
+                top_logprobs: Tensor[B,T,K] | None = None,
+                behavior_top_logprobs: Tensor[B,T,K] | None = None) -> PolicyLossOutput
 #   PolicyLossOutput(loss: scalar Tensor, metrics: dict[str, float]) with keys loss/policy, loss/kl, loss/entropy,
 #   policy/clipfrac, policy/approx_kl, policy/ratio_mean. old_logprobs=None → ratio=1 (on-policy REINFORCE-style).
+#   loss_weights: per-token weights of the loss mean (loss_agg="rollout"); behavior_logprobs and the top-k
+#   tensors feed algorithm.off_policy. The trainer passes each of the four only when the batch carries it.
 def kl_penalty(logprobs, ref_logprobs, estimator: Literal["k1","k2","k3"]) -> Tensor[B,T]
 
 # monorl.rollout

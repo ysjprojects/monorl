@@ -16,16 +16,70 @@ import torch
 from monorl.config.schema import RunConfig
 from monorl.core.errors import ConfigError
 
-#: TRL loss formulation per (monorl algorithm, loss aggregation).
+#: TRL loss formulation per (monorl algorithm, loss aggregation). TRL trains one sequence per
+#: rollout, so "rollout" aggregation is its per-sequence formulation.
 LOSS_TYPES: dict[tuple[str, str], str] = {
     ("grpo", "token"): "bnpo",
     ("grpo", "sequence"): "grpo",
+    ("grpo", "rollout"): "grpo",
     ("dapo", "token"): "dapo",
     ("dapo", "sequence"): "grpo",
+    ("dapo", "rollout"): "grpo",
 }
 
 SCHEDULERS = {"constant": "constant", "linear": "linear", "cosine": "cosine"}
 OPTIMIZERS = {"adamw": "adamw_torch", "adam": "adamw_torch", "sgd": "sgd"}
+
+
+def importance_sampling_kwargs(config: RunConfig) -> dict[str, Any]:
+    """``GRPOConfig`` ``vllm_importance_sampling_*`` fields for ``algorithm.off_policy``.
+
+    TRL always clips against the training model's log-probs at generation time and, for vLLM
+    rollouts only, multiplies the loss by ``exp(old - sampling log-probs)`` per token or per
+    sequence, clamped (``*_truncate``) or zeroed outside ``[clip_min, clip_max]`` (``*_mask``).
+    Without explicit options TRL's own defaults apply.
+    """
+    off = config.algorithm.off_policy
+    if off.score_centering:
+        raise ConfigError(
+            "algorithm.off_policy.score_centering has no TRL equivalent (GRPOTrainer has importance-sampling "
+            "corrections only); use trainer.backend='reference'"
+        )
+    if off.anchor == "behavior":
+        raise ConfigError(
+            "algorithm.off_policy.anchor='behavior' has no TRL equivalent: GRPOTrainer always clips against "
+            "the training model's log-probs"
+        )
+    if off.anchor == "auto" and not off.corrects:
+        return {}
+    weights, mask, cap = off.importance_weights, off.ratio_mask, off.importance_cap
+    if config.rollout.backend != "vllm":
+        if off.corrects:
+            raise ConfigError(
+                "algorithm.off_policy.importance_weights / ratio_mask need rollout.backend='vllm' with "
+                "trainer.backend='trl': GRPOTrainer corrects vLLM rollouts only (its own generation is the "
+                "training policy)"
+            )
+        return {}
+    if not off.corrects:
+        return {"vllm_importance_sampling_correction": False}
+    if weights != "none" and mask == "none" and cap is not None:
+        mode, low, high = f"{weights}_truncate", None, cap
+    elif mask == weights and (cap is None or cap >= off.ratio_mask_high):
+        mode, low, high = f"{weights}_mask", off.ratio_mask_low, off.ratio_mask_high
+    else:
+        raise ConfigError(
+            f"algorithm.off_policy importance_weights={weights!r} (cap {cap}) with ratio_mask={mask!r} has no "
+            "TRL equivalent. Supported: capped weights alone ('token_truncate' / 'sequence_truncate'); a mask "
+            "at the level of the weights with importance_cap null or >= ratio_mask_high ('token_mask' / "
+            "'sequence_mask')"
+        )
+    return {
+        "vllm_importance_sampling_correction": True,
+        "vllm_importance_sampling_mode": mode,
+        "vllm_importance_sampling_clip_min": low,
+        "vllm_importance_sampling_clip_max": high,
+    }
 
 
 def resolve_device(config: RunConfig) -> torch.device:
@@ -204,6 +258,7 @@ def grpo_config_kwargs(
         raise ConfigError(
             f"trainer.backend='trl' generates with rollout.backend 'hf' or 'vllm', got {ro.backend!r}"
         )
+    kwargs.update(importance_sampling_kwargs(config))
     kwargs.update(tr.extra)
     return kwargs
 

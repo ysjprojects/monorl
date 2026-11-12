@@ -23,6 +23,7 @@ import json
 import logging
 import os
 import threading
+from array import array
 from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -34,7 +35,7 @@ from transformers.generation import StoppingCriteria, StoppingCriteriaList, Stop
 
 from monorl.config.schema import RunConfig
 from monorl.core.errors import GenerationCancelled
-from monorl.core.types import Completion, FinishReason, PromptInput, SamplingParams
+from monorl.core.types import Completion, FinishReason, PromptInput, SamplingParams, TopLogprobs
 from monorl.rollout.media import (
     auto_model_class,
     collate_media,
@@ -315,7 +316,7 @@ class HFRolloutEngine:
             eos_token_id=self._eos_ids,
             repetition_penalty=params.repetition_penalty,
             return_dict_in_generate=True,
-            output_logits=params.logprobs,
+            output_logits=params.logprobs or params.top_logprobs > 0,
             use_cache=True,
         )
         if do_sample:
@@ -389,13 +390,26 @@ class HFRolloutEngine:
         recorder.finalize(total_steps)
 
         logprobs: torch.Tensor | None = None
-        if params.logprobs:
+        top: tuple[torch.Tensor, torch.Tensor] | None = None  # ([rows, steps, k] ids, logprobs)
+        if params.logprobs or params.top_logprobs > 0:
             temperature = params.temperature if not greedy else 1.0
-            logprobs = torch.empty((rows, total_steps), dtype=torch.float32)
+            if params.logprobs:
+                logprobs = torch.empty((rows, total_steps), dtype=torch.float32)
             for t, step_logits in enumerate(out.logits[:total_steps]):
-                scaled = step_logits.float() / temperature
-                lp = torch.log_softmax(scaled, dim=-1).gather(1, generated[:, t : t + 1]).squeeze(1)
-                logprobs[:, t] = lp.cpu()
+                step_logprobs = torch.log_softmax(step_logits.float() / temperature, dim=-1)
+                if logprobs is not None:
+                    logprobs[:, t] = step_logprobs.gather(1, generated[:, t : t + 1]).squeeze(1).cpu()
+                if params.top_logprobs > 0:
+                    values, indices = step_logprobs.topk(min(params.top_logprobs, step_logprobs.shape[-1]))
+                    if top is None:
+                        top = (
+                            torch.empty((rows, total_steps, indices.shape[-1]), dtype=torch.int32),
+                            torch.empty((rows, total_steps, indices.shape[-1]), dtype=torch.float32),
+                        )
+                    top[0][:, t] = indices.cpu()
+                    top[1][:, t] = values.cpu()
+            if params.top_logprobs > 0 and top is None:  # nothing was generated
+                top = (torch.empty((rows, 0, 0), dtype=torch.int32), torch.empty((rows, 0, 0)))
         generated = generated.cpu()
 
         results: list[list[Completion]] = []
@@ -412,10 +426,18 @@ class HFRolloutEngine:
                         logprobs=logprobs[row, :k].tolist() if logprobs is not None else None,
                         finish_reason=recorder.reason[row] or "length",
                         prompt_token_ids=list(pids),
+                        top_logprobs=None
+                        if top is None
+                        else TopLogprobs(
+                            k=top[0].shape[-1],
+                            token_ids=array("i", top[0][row, :k].reshape(-1).tolist()),
+                            logprobs=array("f", top[1][row, :k].reshape(-1).tolist()),
+                        ),
                     )
                 )
             if greedy and params.n > 1:
                 base = group[0]
+                top_logprobs = base.top_logprobs
                 group = [
                     Completion(
                         text=base.text,
@@ -423,6 +445,9 @@ class HFRolloutEngine:
                         logprobs=None if base.logprobs is None else list(base.logprobs),
                         finish_reason=base.finish_reason,
                         prompt_token_ids=list(pids),
+                        top_logprobs=None
+                        if top_logprobs is None
+                        else TopLogprobs(top_logprobs.k, top_logprobs.token_ids[:], top_logprobs.logprobs[:]),
                     )
                     for _ in range(params.n)
                 ]

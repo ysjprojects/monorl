@@ -173,7 +173,7 @@ def test_tool_calling_snapshot(make_config, tmp_path: Path):
     assert ov["actor_rollout_ref.rollout.agent.default_agent_loop"] == "tool_agent"
 
 
-@pytest.mark.parametrize("env_type", ["remote", "openenv", "hermes"])
+@pytest.mark.parametrize("env_type", ["remote", "openenv", "hermes", "harness"])
 def test_environments_verl_cannot_step_are_rejected(make_config, tmp_path: Path, env_type: str):
     cfg = make_config(env={"type": env_type, "max_turns": 4})
     with pytest.raises(ConfigError, match="never step that environment"):

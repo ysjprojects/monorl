@@ -91,6 +91,77 @@ class DataConfig(_Model):
     extra: dict[str, Any] = Field(default_factory=dict, description="Loader-specific options.")
 
 
+class OffPolicyConfig(_Model):
+    """Corrections for batches sampled by another policy than the one being updated (stale rollouts
+    under ``rollout.async_steps_ahead``, engines whose weights or numerics lag): docs/OFF_POLICY.md."""
+
+    anchor: Literal["auto", "behavior", "trainer"] = Field(
+        "auto",
+        description=(
+            "Proximal policy the clipped ratio is anchored on. 'behavior': the policy that sampled the "
+            "tokens (the engine's log-probs). 'trainer': the trainer's policy when the update on the batch "
+            "starts (decoupled PPO; one extra forward pass per batch). 'auto': 'trainer' when "
+            "importance_weights or ratio_mask is set, otherwise the backend's default."
+        ),
+    )
+    importance_weights: Literal["none", "token", "sequence"] = Field(
+        "none",
+        description=(
+            "Weigh the policy loss by the truncated importance ratio between the proximal and the behaviour "
+            "policy, per token or per training sequence (product of its token ratios)."
+        ),
+    )
+    importance_cap: float | None = Field(
+        2.0, ge=1.0, description="Upper bound of the importance weights (null = untruncated)."
+    )
+    ratio_mask: Literal["none", "token", "sequence", "sequence_mean"] = Field(
+        "none",
+        description=(
+            "Drop from the policy loss the tokens, or whole training sequences, whose proximal/behaviour "
+            "importance ratio is outside [ratio_mask_low, ratio_mask_high]. 'sequence' tests the product "
+            "of a sequence's token ratios, 'sequence_mean' their geometric mean."
+        ),
+    )
+    ratio_mask_low: float = Field(
+        0.5, gt=0.0, le=1.0, description="Lower bound of the accepted importance ratio."
+    )
+    ratio_mask_high: float = Field(5.0, ge=1.0, description="Upper bound of the accepted importance ratio.")
+    score_centering: bool = Field(
+        False,
+        description=(
+            "Subtract the expected score under the sampling policy from the policy gradient "
+            "(arXiv:2609.20807). Needs the engine's top-k next-token log-probs and the 'behavior' anchor."
+        ),
+    )
+    score_centering_top_k: int = Field(
+        128, ge=1, description="Number of most likely next tokens the engine records per sampled token."
+    )
+
+    @model_validator(mode="after")
+    def _check(self) -> OffPolicyConfig:
+        if self.corrects and self.anchor == "behavior":
+            raise ValueError(
+                "off_policy.importance_weights / off_policy.ratio_mask compare the proximal with the behaviour "
+                "policy, which are the same policy under off_policy.anchor='behavior'; use anchor 'trainer'"
+            )
+        if self.score_centering and self.decoupled:
+            raise ValueError(
+                "off_policy.score_centering weighs scores by the ratio of the current to the behaviour policy "
+                "and needs off_policy.anchor='behavior' (or 'auto' without importance_weights / ratio_mask)"
+            )
+        return self
+
+    @property
+    def corrects(self) -> bool:
+        """Importance weights or a ratio mask are applied to the policy loss."""
+        return self.importance_weights != "none" or self.ratio_mask != "none"
+
+    @property
+    def decoupled(self) -> bool:
+        """The proximal policy is the trainer's, separate from the behaviour policy."""
+        return self.anchor == "trainer" or (self.anchor == "auto" and self.corrects)
+
+
 class AlgorithmConfig(_Model):
     name: Literal["grpo", "dapo", "rloo", "reinforce", "ppo", "sft"] = Field(
         "grpo",
@@ -113,8 +184,12 @@ class AlgorithmConfig(_Model):
     advantage_std_norm: bool = Field(
         True, description="Divide by std in group normalisation (False = Dr.GRPO style)."
     )
-    loss_agg: Literal["token", "sequence"] = Field(
-        "token", description="Average the loss over all response tokens or per sequence first."
+    loss_agg: Literal["token", "sequence", "rollout"] = Field(
+        "token",
+        description=(
+            "Average the loss over all response tokens, per training sequence first, or per rollout "
+            "first ('rollout': every episode counts equally however many sequences its turns form)."
+        ),
     )
     entropy_coef: float = Field(0.0, ge=0.0)
     num_epochs: int = Field(1, ge=1, description="Optimizer passes over each rollout batch.")
@@ -125,6 +200,9 @@ class AlgorithmConfig(_Model):
     gamma: float = Field(1.0, ge=0.0, le=1.0, description="Discount for multi-turn per-turn rewards.")
     lam: float = Field(1.0, ge=0.0, le=1.0, description="GAE lambda (ppo only).")
     value_coef: float = Field(0.5, ge=0.0, description="Value loss weight (ppo only).")
+    off_policy: OffPolicyConfig = Field(
+        default_factory=OffPolicyConfig, description="Off-policy corrections (off by default)."
+    )
 
 
 class RolloutConfig(_Model):
@@ -144,6 +222,14 @@ class RolloutConfig(_Model):
         0,
         ge=0,
         description="Generate up to N batches ahead of training (off-policy staleness bound). 0 = synchronous.",
+    )
+    turn_rendering: Literal["tokens", "template"] = Field(
+        "tokens",
+        description=(
+            "How a multi-turn prompt is built. 'tokens': the sampled tokens of earlier turns stay in the "
+            "context and only new messages are rendered. 'template': the chat template re-renders the "
+            "whole conversation every turn."
+        ),
     )
     device: str | None = Field(None, description="Device for the 'hf' backend (cpu/mps/cuda); auto if unset.")
     extra: dict[str, Any] = Field(default_factory=dict, description="Engine-specific options passed through.")
@@ -215,6 +301,14 @@ class LoggingConfig(_Model):
     log_every: int = Field(1, ge=1)
     save_trajectories: bool = Field(True, description="Write sampled rollouts to trajectories.jsonl.")
     trajectories_per_step: int = Field(8, ge=0)
+    save_transcripts: bool = Field(
+        True,
+        description="Include the full conversation and per-turn details of every saved rollout.",
+    )
+    success_threshold: float = Field(
+        1.0,
+        description="Total reward at or above which an episode counts as solved (success-rate and pass@k metrics).",
+    )
     wandb_project: str | None = None
     tensorboard: bool = False
 
@@ -256,6 +350,18 @@ class RunConfig(_Model):
                 raise ValueError(f"rollout_gpus + trainer_gpus = {r + t} exceeds {total} GPUs")
         if not self.rewards and self.env.type == "single_turn":
             raise ValueError("single_turn env needs at least one reward in `rewards`")
+        off, ro = self.algorithm.off_policy, self.rollout
+        if off.score_centering and (
+            ro.temperature <= 0.0
+            or ro.top_k > 0
+            or ro.top_p < 1.0
+            or float(ro.extra.get("min_p") or 0.0) > 0.0
+            or float(ro.extra.get("repetition_penalty") or 1.0) != 1.0
+        ):
+            raise ValueError(
+                "off_policy.score_centering needs the full sampling distribution: rollout.temperature > 0 and "
+                "no top_k / top_p / min_p / repetition_penalty truncation"
+            )
         return self
 
     @property

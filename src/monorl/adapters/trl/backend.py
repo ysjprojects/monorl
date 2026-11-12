@@ -277,6 +277,9 @@ class TRLPipelineBackend:
                 int(trainer.state.global_step) + 1,
                 trajectories,
                 max_items=config.logging.trajectories_per_step,
+                phase="train",
+                save_transcripts=config.logging.save_transcripts,
+                success_threshold=config.logging.success_threshold,
             )
 
         return on_scored

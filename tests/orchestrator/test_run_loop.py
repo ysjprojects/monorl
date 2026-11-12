@@ -254,7 +254,9 @@ def test_multi_turn_env_rewards_are_discounted_and_masked(make_config: Any) -> N
     assert first == (len("ABC") + 1) + (len("AGAIN1") + 1) + (len("AGAIN2") + 1)
 
 
-def test_prefix_mismatch_is_counted_and_masks_final_turn_only(make_config: Any) -> None:
+def test_sampled_tokens_stay_in_context_so_an_episode_is_one_sequence(make_config: Any) -> None:
+    """The fake engine samples a token its text does not re-tokenise to. Token rendering keeps it
+    in the next prompt, so both turns of every episode are trained as one sequence."""
     cfg = make_config(
         env={"type": "fake_multi", "max_turns": 2},
         rollout={"extra": {"fake_mode": "always_right", "fake_mismatch": True}},
@@ -262,11 +264,34 @@ def test_prefix_mismatch_is_counted_and_masks_final_turn_only(make_config: Any) 
     )
     result = run(cfg)
     metrics = _rows(Path(result.run_dir))[0]
-    assert metrics["tokens/prefix_mismatch"] == 4.0
+    assert metrics["tokens/prefix_mismatch"] == 0.0 and metrics["tokens/sequences"] == 4.0
     batch = fakes.TRAINERS[-1].batches[0]
-    assert (
-        batch.response_mask[0].sum().item() == len("AGAIN1") + 2
-    )  # final completion only (+ mismatch token + EOS)
+    assert len(batch) == 4
+    # both completions (+ mismatch token + EOS each) are loss positions of the one sequence
+    assert batch.response_mask[0].sum().item() == (len("ABC") + 2) + (len("AGAIN1") + 2)
+    assert (batch.input_ids[0] == 9999).sum().item() == 2
+
+
+def test_template_rendering_trains_mismatching_turns_as_separate_sequences(make_config: Any) -> None:
+    """With ``turn_rendering: template`` the re-rendered chat loses the odd token, so the second
+    prompt does not extend the first turn: each turn becomes its own sequence, none is dropped."""
+    cfg = make_config(
+        env={"type": "fake_multi", "max_turns": 2},
+        rollout={
+            "turn_rendering": "template",
+            "extra": {"fake_mode": "always_right", "fake_mismatch": True},
+        },
+        trainer={"max_steps": 1},
+    )
+    result = run(cfg)
+    metrics = _rows(Path(result.run_dir))[0]
+    assert metrics["tokens/prefix_mismatch"] == 4.0 and metrics["tokens/sequences"] == 8.0
+    assert metrics["rollout/num_sequences"] == 4.0
+    batch = fakes.TRAINERS[-1].batches[0]
+    assert len(batch) == 8
+    assert batch.response_mask[:2].sum(dim=1).tolist() == [len("ABC") + 2, len("AGAIN1") + 2]
+    assert batch.group_ids[0] == batch.group_ids[1]
+    assert batch.rewards[0].item() == batch.rewards[1].item()
 
 
 def test_eval_every_logs_greedy_eval_metrics(make_config: Any, tmp_path: Path) -> None:

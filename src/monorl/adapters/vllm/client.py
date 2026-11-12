@@ -8,7 +8,11 @@ Endpoints used (vLLM v0.33.0 unless noted):
 
 * ``POST /v1/completions`` (``vllm/entrypoints/openai/completion/protocol.py``): ``prompt`` as a
   list of token-id lists, ``return_token_ids=true`` → ``choices[i].token_ids`` /
-  ``prompt_token_ids``; ``logprobs=0`` → ``choices[i].logprobs.token_logprobs``.
+  ``prompt_token_ids``; ``logprobs=0`` → ``choices[i].logprobs.token_logprobs``. With
+  ``SamplingParams.top_logprobs = k``: ``logprobs=k`` and ``return_tokens_as_token_ids=true`` →
+  ``choices[i].logprobs.top_logprobs`` (``{"token_id:<id>": logprob}`` per position). The server
+  must allow that many: ``--max-logprobs`` ≥ ``k`` (``k + 1`` for the chat endpoint; default 20)
+  and ``--logprobs-mode processed_logprobs``.
 * ``POST /v1/chat/completions`` (``vllm/entrypoints/openai/chat_completion/protocol.py``) for
   prompts with image parts: ``messages`` with ``image_url`` data URLs, ``logprobs=true,
   top_logprobs=0`` and ``return_token_ids=true``. The chat endpoint's logprob entries only carry
@@ -164,9 +168,15 @@ class VllmServerClient:
                         "return_token_ids": True,
                         **sampling_kwargs(params),
                     }
+                    if params.top_logprobs > 0:
+                        body["return_tokens_as_token_ids"] = True
                     resp = self._post("/v1/completions", call=call, json=body)
                     grouped = completions_from_choices(
-                        resp.json()["choices"], ids, params.n, want_logprobs=params.logprobs
+                        resp.json()["choices"],
+                        ids,
+                        params.n,
+                        want_logprobs=params.logprobs,
+                        top_logprobs=params.top_logprobs,
                     )
                     for i, comps in zip(text_idx, grouped, strict=True):
                         result[i] = comps
@@ -178,7 +188,7 @@ class VllmServerClient:
                     }
                     resp = self._post("/v1/chat/completions", call=call, json=body)
                     result[i] = completions_from_chat_response(
-                        resp.json(), params.n, want_logprobs=params.logprobs
+                        resp.json(), params.n, want_logprobs=params.logprobs, top_logprobs=params.top_logprobs
                     )
         finally:
             with self._calls_lock:

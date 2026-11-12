@@ -17,7 +17,9 @@ Stage kinds:
   (at most ``max_per_prompt`` per prompt, optionally deduplicated / length-filtered), optionally
   mixes in extra SFT datasets, and writes a chat-format jsonl (prompt + chosen response) for the
   next SFT stage.
-* ``eval`` — greedy evaluation of the current policy on a dataset; logs ``eval/reward_mean``.
+* ``eval`` — evaluation of the current policy on a dataset: greedy by default, or ``num_samples``
+  sampled completions per prompt (adds ``eval/pass_at_k``); logs ``eval/reward_mean`` and the
+  other ``eval/*`` metrics.
 """
 
 from __future__ import annotations
@@ -90,6 +92,14 @@ class EvalStage(_Model):
     )
     rollout_overrides: dict[str, Any] = Field(default_factory=dict)
     max_prompts: int | None = Field(None, ge=1)
+    num_samples: int = Field(
+        1,
+        ge=1,
+        description=(
+            "Completions per prompt. 1 evaluates greedily; more samples that many at the rollout "
+            "temperature and reports eval/pass_at_k."
+        ),
+    )
 
 
 Stage = Annotated[TrainStage | RejectionSampleStage | EvalStage, Field(discriminator="type")]

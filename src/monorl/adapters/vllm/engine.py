@@ -52,7 +52,7 @@ from monorl.adapters.vllm.common import (
     tokens_prompt_kwargs,
 )
 from monorl.config.schema import RunConfig
-from monorl.core.errors import BackendUnavailable, GenerationCancelled
+from monorl.core.errors import BackendUnavailable, ConfigError, GenerationCancelled
 from monorl.core.types import Completion, PromptInput, SamplingParams
 
 log = logging.getLogger(__name__)
@@ -90,7 +90,8 @@ class VllmEngine:
     ``config.rollout.extra`` keys honoured: ``in_process`` (default ``True``: run the engine core
     in this process so ``collective_rpc`` hands tensors over by reference), ``enforce_eager``,
     ``max_num_seqs``, ``max_num_batched_tokens``, ``logprobs_mode`` (default
-    ``processed_logprobs`` so logprobs reflect temperature/top-p, as TRL does),
+    ``processed_logprobs`` so logprobs reflect temperature/top-p, as TRL does; score centering
+    requires it and raises ``max_logprobs`` to ``algorithm.off_policy.score_centering_top_k``),
     plus an ``engine_kwargs`` dict passed verbatim to ``vllm.LLM``. ``limit_mm_per_prompt``
     (``{"image": N}`` or an int) bounds images per prompt for VLM runs.
 
@@ -150,6 +151,16 @@ class VllmEngine:
         mm_limit = limit_mm_per_prompt(extra)
         if mm_limit is not None:
             engine_kwargs["limit_mm_per_prompt"] = mm_limit
+        off_policy = config.algorithm.off_policy
+        if off_policy.score_centering:
+            if engine_kwargs["logprobs_mode"] != "processed_logprobs":
+                raise ConfigError(
+                    "algorithm.off_policy.score_centering needs the sampling distribution's top-k logprobs: "
+                    f"rollout.extra.logprobs_mode must be 'processed_logprobs', got "
+                    f"{engine_kwargs['logprobs_mode']!r}"
+                )
+            # vLLM rejects SamplingParams.logprobs above ModelConfig.max_logprobs (default 20).
+            engine_kwargs["max_logprobs"] = max(20, off_policy.score_centering_top_k)
         engine_kwargs.update(extra.get("engine_kwargs", {}))
         self._vllm = vllm
         self._llm = vllm.LLM(config.model.name_or_path, **engine_kwargs)
@@ -190,7 +201,9 @@ class VllmEngine:
             raise RuntimeError(f"vllm returned {len(outputs)} outputs for {len(prompts)} prompts")
         result: list[list[Completion]] = []
         for p_ids, out in zip(ids, outputs, strict=True):
-            comps = completions_from_request_output(out, p_ids, want_logprobs=params.logprobs)
+            comps = completions_from_request_output(
+                out, p_ids, want_logprobs=params.logprobs, top_logprobs=params.top_logprobs
+            )
             if len(comps) != params.n:
                 raise RuntimeError(f"vllm returned {len(comps)} completions for n={params.n}")
             result.append(comps)

@@ -126,6 +126,34 @@ def test_full_pipeline_manifest_and_handoff(make_pipeline: Any, tmp_path: Path) 
     assert "stage 1/5" in log and "stage 5/5" in log
 
 
+def test_eval_stage_with_several_samples_reports_pass_at_k(make_pipeline: Any) -> None:
+    stage = {
+        "type": "eval",
+        "name": "eval",
+        "max_prompts": 3,
+        "num_samples": 2,
+        "rollout_overrides": {"temperature": 0.7},
+    }
+    # one episode at a time: the fake engine answers right, wrong, right, wrong, ...
+    config = make_pipeline([stage], rollout={"extra": {"max_parallel_episodes": 1}})
+    result = run_pipeline(config)
+    assert result.state == "succeeded", result.error
+    (eval_stage,) = result.stages
+    summary = eval_stage["summary"]
+    assert summary["eval/num_samples"] == 6.0  # every completion counts
+    assert summary["eval/reward_mean"] == 0.5 and summary["eval/success_rate"] == 0.5
+    assert summary["eval/pass_at_k"] == 1.0  # each prompt has one right completion out of two
+    assert all(call["temperature"] == 0.7 for call in fakes.ENGINES[-1].calls)
+
+    rows = [r for _, r in iter_trajectories(eval_stage["run_dir"])]
+    assert len(rows) == 6 and {r["phase"] for r in rows} == {"eval"}
+    groups: dict[str, list[bool]] = {}
+    for r in rows:
+        groups.setdefault(r["group_id"], []).append(r["success"])
+    assert sorted(map(sorted, groups.values())) == [[False, True]] * 3
+    assert all(r["threads"][0][-1] == {"role": "assistant", "content": r["response"]} for r in rows)
+
+
 def test_mix_datasets_and_filters(make_pipeline: Any, tmp_path: Path) -> None:
     mix_file = fakes.write_jsonl(
         tmp_path / "mix.jsonl",

@@ -90,12 +90,14 @@ so engines never need adapter support.
 ## Async rollouts
 
 `rollout.async_steps_ahead: N` lets a producer thread generate up to `N` batches ahead of the
-trainer (bounded staleness). Batches carry the policy version they were sampled under;
-`old_logprobs` from the sampling policy make the PPO/GRPO ratio correct for slightly off-policy
-data, and `algorithm.clip_eps` bounds the update. `N = 0` (default) is fully synchronous;
-`N = 1` typically hides most generation latency in disaggregated runs. In colocated runs the
-engine cannot generate while it sleeps, so async only helps with `enable_sleep_mode: false` and
-enough memory for both.
+trainer (bounded staleness). Batches carry the policy version they were sampled under
+(`policy/staleness`); `old_logprobs` from the sampling policy make the PPO/GRPO ratio correct for
+slightly off-policy data, and `algorithm.clip_eps` bounds the update. For more staleness, or
+engines that differ numerically from the trainer, `algorithm.off_policy` adds decoupled PPO,
+truncated importance weights, ratio masks and score centering ([`OFF_POLICY.md`](OFF_POLICY.md)).
+`N = 0` (default) is fully synchronous; `N = 1` typically hides most generation latency in
+disaggregated runs. In colocated runs the engine cannot generate while it sleeps, so async only
+helps with `enable_sleep_mode: false` and enough memory for both.
 
 Episodes within a step are always parallel: `group_size × prompts_per_step` episodes run as
 concurrent tasks against the environment pool (remote MEP/1 servers advertise

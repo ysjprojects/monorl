@@ -213,6 +213,7 @@ class EpisodeRollout:
                     tokenizer=self.engine_tokenizer(trainer),
                     params=params,
                     max_parallel=parallel,
+                    turn_rendering=self.config.rollout.turn_rendering,
                 )
             finally:
                 engine.shutdown()

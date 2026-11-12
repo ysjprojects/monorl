@@ -13,10 +13,23 @@ class TrainBatch:
     """Right-padded ``[B, T]`` tensors. ``response_mask`` marks positions whose token was produced
     by the policy (loss positions); prompt and padding positions are 0.
 
-    ``advantages`` is per-token (``[B, T]``); builders broadcast a per-sequence advantage across
+    ``advantages`` is per-token (``[B, T]``); builders broadcast a per-trajectory advantage across
     the response positions. ``old_logprobs``/``ref_logprobs`` are ``[B, T]`` aligned with
     ``input_ids`` (logprob of ``input_ids[:, t]`` given ``input_ids[:, :t]``), zero outside the
     response mask.
+
+    ``old_logprobs`` is the *proximal* policy of the clipped ratio. ``behavior_logprobs`` (same
+    layout) is set only when that differs from the policy that sampled the tokens: it then holds
+    the sampling log-probs, from which ``algorithm.off_policy`` importance weights and ratio masks
+    are computed. ``behavior_top_ids``/``behavior_top_logprobs`` (``[B, T, K]``) are the sampler's
+    ``K`` most likely tokens for position ``t`` and their log-probs, independent of the token that
+    was sampled (score centering); entries beyond what the engine returned and positions outside
+    the response mask hold id 0 and ``-inf``.
+
+    ``loss_weights`` (``[B, T]``, zero outside the response mask) are per-token weights of the
+    loss mean. Builders set them for ``algorithm.loss_agg="rollout"``, where one trajectory may
+    span several rows: each of its tokens weighs one over its total number of response tokens, so
+    every trajectory counts equally. ``None`` means the plain token or per-sequence mean.
 
     ``extra`` carries additional model inputs (multimodal processor tensors). Every value is
     batch-aligned so :meth:`slice` stays correct: a tensor is indexed along dim 0 (e.g.
@@ -36,6 +49,10 @@ class TrainBatch:
     old_logprobs: torch.Tensor | None = None
     ref_logprobs: torch.Tensor | None = None
     position_ids: torch.Tensor | None = None
+    loss_weights: torch.Tensor | None = None
+    behavior_logprobs: torch.Tensor | None = None
+    behavior_top_ids: torch.Tensor | None = None
+    behavior_top_logprobs: torch.Tensor | None = None
     meta: dict[str, Any] = field(default_factory=dict)
     extra: dict[str, Any] = field(default_factory=dict)
 
@@ -56,6 +73,10 @@ class TrainBatch:
             old_logprobs=mv(self.old_logprobs),
             ref_logprobs=mv(self.ref_logprobs),
             position_ids=mv(self.position_ids),
+            loss_weights=mv(self.loss_weights),
+            behavior_logprobs=mv(self.behavior_logprobs),
+            behavior_top_ids=mv(self.behavior_top_ids),
+            behavior_top_logprobs=mv(self.behavior_top_logprobs),
             meta=dict(self.meta),
             extra={k: _move_extra(v, device) for k, v in self.extra.items()},
         )
@@ -76,6 +97,10 @@ class TrainBatch:
             old_logprobs=sl(self.old_logprobs),
             ref_logprobs=sl(self.ref_logprobs),
             position_ids=sl(self.position_ids),
+            loss_weights=sl(self.loss_weights),
+            behavior_logprobs=sl(self.behavior_logprobs),
+            behavior_top_ids=sl(self.behavior_top_ids),
+            behavior_top_logprobs=sl(self.behavior_top_logprobs),
             meta=dict(self.meta),
             extra={k: _slice_extra(v, start, stop) for k, v in self.extra.items()},
         )

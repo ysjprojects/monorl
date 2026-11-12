@@ -7,7 +7,7 @@ from typing import Any
 import fakes
 import pytest
 
-from monorl.core.types import Sample, SamplingParams
+from monorl.core.types import Sample, SamplingParams, Trajectory, Turn
 from monorl.orchestrator.batching import prefix_chain_ok
 from monorl.orchestrator.episodes import (
     EpisodeAborted,
@@ -117,6 +117,98 @@ def test_tools_are_passed_to_chat_template_from_turn_zero(make_config: Any) -> N
     # the engine received raw ids (already templated) on turn 0 because tools were present
     assert traj.turns[0].prompt_token_ids == chat_prompt_ids(tok, _sample().messages, tools)
     assert prefix_chain_ok(traj)
+
+
+def test_token_rendering_keeps_sampled_tokens_and_template_rendering_drops_them(make_config: Any) -> None:
+    """The engine samples a token (9999) that its text does not re-tokenise to."""
+    cfg = make_config(env={"type": "fake_multi", "max_turns": 2})
+
+    def episode(turn_rendering: str) -> Any:
+        engine = _engine(make_config, fake_mode="always_right", fake_mismatch=True)
+        return run_episode(
+            EpisodeSpec(sample=_sample(), group_id="g", engine=engine),
+            env_factory=lambda: fakes.FakeMultiTurnEnv(cfg),
+            tokenizer=engine.tokenizer,
+            params=SamplingParams(n=1),
+            turn_rendering=turn_rendering,
+        )
+
+    tokens = episode("tokens")
+    assert 9999 in tokens.turns[0].completion.token_ids
+    assert prefix_chain_ok(tokens) and 9999 in tokens.turns[1].prompt_token_ids
+
+    template = episode("template")
+    assert not prefix_chain_ok(template)
+    assert template.turns[1].prompt_token_ids == chat_prompt_ids(fakes.FakeTokenizer(), template.messages[:3])
+    # what the conversation says is the same either way
+    assert tokens.messages == template.messages
+    assert [t.message_index for t in tokens.turns] == [1, 3]
+
+
+class _ScriptedDriver:
+    """An ``EpisodeDriver``: runs the whole episode itself instead of being stepped."""
+
+    def __init__(self, fail: bool = False) -> None:
+        self.fail = fail
+        self.closed = False
+        self.kwargs: dict[str, Any] = {}
+
+    def run_episode(self, sample: Sample, **kwargs: Any) -> Trajectory:
+        self.kwargs = kwargs
+        if self.fail:
+            raise RuntimeError("agent crashed")
+        completion = kwargs["engine"].generate([list(sample.messages)], kwargs["params"])[0][0]
+        return Trajectory(
+            sample=sample,
+            group_id=kwargs["group_id"],
+            messages=[*sample.messages, {"role": "assistant", "content": completion.text}],
+            turns=[Turn(prompt_token_ids=list(completion.prompt_token_ids), completion=completion)],
+        )
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def test_episode_driver_runs_the_episode_itself(make_config: Any) -> None:
+    engine = _engine(make_config, fake_mode="always_right")
+    drivers: list[_ScriptedDriver] = []
+
+    def factory() -> _ScriptedDriver:
+        drivers.append(_ScriptedDriver())
+        return drivers[-1]
+
+    abort = threading.Event()
+    specs = [
+        EpisodeSpec(sample=_sample("abc", sid="0"), group_id="g0", engine=engine),
+        EpisodeSpec(sample=_sample("xyz", sid="1"), group_id="g1", engine=engine),
+    ]
+    trajs = run_episodes(
+        specs,
+        env_factory=factory,
+        tokenizer=engine.tokenizer,
+        params=SamplingParams(n=1),
+        max_parallel=1,
+        abort=abort,
+        turn_rendering="template",
+    )
+    assert [(t.group_id, t.last_response_text) for t in trajs] == [("g0", "ABC"), ("g1", "XYZ")]
+    assert len(drivers) == 2 and all(d.closed for d in drivers)
+    for driver in drivers:
+        assert driver.kwargs["engine"] is engine and driver.kwargs["tokenizer"] is engine.tokenizer
+        assert driver.kwargs["abort"] is abort and driver.kwargs["turn_rendering"] == "template"
+
+
+def test_episode_driver_is_closed_when_it_fails(make_config: Any) -> None:
+    engine = _engine(make_config)
+    driver = _ScriptedDriver(fail=True)
+    with pytest.raises(RuntimeError, match="agent crashed"):
+        run_episode(
+            EpisodeSpec(sample=_sample(), group_id="g", engine=engine),
+            env_factory=lambda: driver,
+            tokenizer=engine.tokenizer,
+            params=SamplingParams(n=1),
+        )
+    assert driver.closed
 
 
 def test_run_episodes_parallel_preserves_order_and_closes_envs(make_config: Any) -> None:

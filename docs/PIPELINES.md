@@ -45,9 +45,17 @@ stages:
     data_from: previous           # data.uri = the preceding rejection_sample output (chat format)
     overrides: {algorithm: {name: sft}}
   - type: eval
-    name: eval                    # greedy episodes on `data` (default: base data.eval_uri, else data)
+    name: eval                    # episodes on `data` (default: base data.eval_uri, else data)
     max_prompts: 32
+    num_samples: 1                # 1 = greedy; k > 1 = k sampled completions per prompt (pass@k)
+    rollout_overrides: {}         # e.g. {temperature: 0.8} for the sampled completions
 ```
+
+An eval stage with `num_samples: 1` decodes greedily. With `num_samples: k > 1` it samples `k`
+completions per prompt at the rollout temperature (after `rollout_overrides`), groups them per
+prompt and additionally reports `eval/pass_at_k`, the fraction of prompts with at least one
+completion whose reward reaches `logging.success_threshold`; `eval/reward_mean` and the other
+`eval/*` metrics are then taken over all completions and `eval/num_samples` counts completions.
 
 Rules checked at load time: stage names are unique; `data_from: previous` needs a
 `rejection_sample` stage right before it. All stage configs are also built once with placeholder
@@ -125,7 +133,13 @@ Metrics written by sampling stages: rejection `rs/prompts`, `rs/sampled`, `rs/ac
 `time/rollout` per prompt chunk (`step` = chunk index, phase `rejection`; chunk size =
 `trainer.prompts_per_step` or `rollout.extra.rejection_prompts_per_step`) and a final phase
 `summary` row with totals; eval `eval/reward_mean`, `eval/reward_std`, `eval/reward/<name>`,
-`eval/num_samples`, `eval/time` (phase `eval`).
+`eval/num_samples`, `eval/time` and the agent metrics `eval/success_rate`, `eval/pass_at_k` (only
+with `num_samples > 1`), `eval/turns_mean`, `eval/turns_max`, `eval/done_frac`,
+`eval/truncated_frac`, `eval/context_tokens_mean`, `eval/context_tokens_max` and, when reported,
+`eval/tool_calls_mean`, `eval/invalid_calls_mean`, `eval/threads_mean` (phase `eval`; see
+`docs/ARCHITECTURE.md`), plus `eval/chunk_reward_mean` per prompt chunk. Both stages write their
+sampled episodes to `trajectories.jsonl` (phase `rejection` / `eval`, at most
+`logging.trajectories_per_step` per chunk).
 
 ## Resume and cancellation
 

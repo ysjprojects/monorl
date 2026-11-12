@@ -52,6 +52,7 @@ from monorl.adapters.sglang.common import (
     expand_requests,
     group_outputs,
     is_media_prompt,
+    logprob_kwargs,
 )
 from monorl.config.schema import RunConfig
 from monorl.core.errors import BackendUnavailable, GenerationCancelled, WeightSyncError
@@ -181,8 +182,7 @@ class SGLangEngine:
                         self._engine.async_generate(
                             input_ids=input_ids,
                             sampling_params=sampling,
-                            return_logprob=params.logprobs,
-                            logprob_start_len=-1,
+                            **logprob_kwargs(params),
                             **kwargs,
                         )
                     )

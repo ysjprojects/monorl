@@ -179,6 +179,9 @@ def test_unsupported_settings_raise(nemo_config: RunConfig, tmp_path: Path) -> N
         compile_config(_with(nemo_config, rollout={"backend": "sglang"}), tmp_path)
     with pytest.raises(ConfigError, match="nemo_rl"):
         compile_config(_with(nemo_config, trainer={"extra": {"nemo_rl": ["not", "a", "dict"]}}), tmp_path)
+    with pytest.raises(ConfigError, match="harness"):
+        harness = {"type": "harness", "params": {"command": ["agent"]}}
+        compile_config(_with(nemo_config, env=harness), tmp_path)
 
 
 def test_colocated_vs_disaggregated_vllm_cfg(nemo_config: RunConfig, tmp_path: Path) -> None:

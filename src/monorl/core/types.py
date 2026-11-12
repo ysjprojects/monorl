@@ -6,6 +6,8 @@ Tensor batches live in :mod:`monorl.core.batch`.
 
 from __future__ import annotations
 
+from array import array
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any, Literal, TypedDict
 
@@ -114,6 +116,38 @@ class SamplingParams:
     seed: int | None = None
     logprobs: bool = True
     """Return per-token logprobs under the generating policy (needed for importance ratios)."""
+    top_logprobs: int = 0
+    """Also return, for every generated token, this many most likely next tokens with their
+    logprobs (:attr:`Completion.top_logprobs`); 0 disables."""
+
+
+@dataclass(slots=True)
+class TopLogprobs:
+    """The ``k`` most likely next tokens at every generated position of a completion and their
+    logprobs, most likely first, as flat row-major arrays: rank ``j`` of position ``i`` is entry
+    ``i * k + j``. Kept as C arrays (int32 / float32) because there are ``k`` entries per sampled
+    token. Positions with fewer candidates are padded with token id 0 and ``-inf``."""
+
+    k: int
+    token_ids: array[int]
+    logprobs: array[float]
+
+    def __len__(self) -> int:
+        """Number of positions."""
+        return len(self.token_ids) // self.k if self.k else 0
+
+    @classmethod
+    def from_positions(cls, positions: Sequence[Sequence[tuple[int, float]]], k: int) -> TopLogprobs:
+        """From one ``(token_id, logprob)`` list per position, most likely first."""
+        token_ids, logprobs = array("i"), array("f")
+        for candidates in positions:
+            candidates = candidates[:k]
+            pad = k - len(candidates)
+            token_ids.extend(int(token) for token, _ in candidates)
+            token_ids.extend([0] * pad)
+            logprobs.extend(float(logprob) for _, logprob in candidates)
+            logprobs.extend([float("-inf")] * pad)
+        return cls(k=k, token_ids=token_ids, logprobs=logprobs)
 
 
 @dataclass(slots=True)
@@ -124,6 +158,10 @@ class Completion:
     finish_reason: FinishReason = "stop"
     prompt_token_ids: list[int] | None = None
     """Exact prompt tokens the engine conditioned on (post chat template)."""
+    top_logprobs: TopLogprobs | None = None
+    """The ``SamplingParams.top_logprobs`` most likely next tokens at every generated position,
+    under the same distribution as ``logprobs`` and whatever token was sampled. ``None`` unless
+    requested."""
 
 
 @dataclass(slots=True)
@@ -136,6 +174,10 @@ class Turn:
     reward: float = 0.0
     """Per-turn reward from the environment (0 for single-turn tasks)."""
     info: dict[str, Any] = field(default_factory=dict)
+    thread: int = 0
+    """Conversation this turn belongs to: an index into :attr:`Trajectory.threads`."""
+    message_index: int | None = None
+    """Position of this turn's assistant message in its thread (``None`` when not recorded)."""
 
 
 @dataclass(slots=True)
@@ -151,6 +193,14 @@ class Trajectory:
     reward_breakdown: dict[str, float] = field(default_factory=dict)
     done: bool = True
     info: dict[str, Any] = field(default_factory=dict)
+    extra_threads: list[list[Message]] = field(default_factory=list)
+    """Further conversations of the episode — the context before a compaction, a sub-agent — as
+    threads ``1..N``. ``messages`` is thread 0: the conversation the episode ended in."""
+
+    @property
+    def threads(self) -> list[list[Message]]:
+        """Every conversation of the episode; :attr:`Turn.thread` indexes into this list."""
+        return [self.messages, *self.extra_threads]
 
     @property
     def response_text(self) -> str:

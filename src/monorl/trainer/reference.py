@@ -143,7 +143,9 @@ class PolicyLossOutput(Protocol):
 
 
 LossFn = Callable[..., PolicyLossOutput]
-"""``(logprobs, old_logprobs, advantages, response_mask, *, algorithm, ref_logprobs=None, entropy=None)``."""
+"""``(logprobs, old_logprobs, advantages, response_mask, *, algorithm, ref_logprobs=None, entropy=None)``;
+``loss_weights``, ``behavior_logprobs`` and ``top_logprobs``/``behavior_top_logprobs`` are passed as
+further keywords only for batches that carry them."""
 
 
 def _default_loss_fn(algorithm: Any) -> LossFn:
@@ -153,10 +155,17 @@ def _default_loss_fn(algorithm: Any) -> LossFn:
 
 
 def sequence_logprobs_and_entropy(
-    logits: torch.Tensor, input_ids: torch.Tensor, temperature: float, *, entropy: bool
-) -> tuple[torch.Tensor, torch.Tensor | None]:
-    """``[B,T]`` logprob of ``input_ids[:, t]`` given the prefix (position 0 is 0) and, optionally,
-    the entropy of the predictive distribution at every position (position 0 is 0)."""
+    logits: torch.Tensor,
+    input_ids: torch.Tensor,
+    temperature: float,
+    *,
+    entropy: bool,
+    top_ids: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
+    """``[B,T]`` logprob of ``input_ids[:, t]`` given the prefix (position 0 is 0), optionally the
+    entropy of the predictive distribution at every position (position 0 is 0) and, for
+    ``top_ids`` (``[B,T,K]`` candidate tokens per position), their ``[B,T,K]`` logprobs under the
+    same distribution (position 0 is 0)."""
     scaled = logits[:, :-1].float() / temperature
     logp_all = torch.log_softmax(scaled, dim=-1)
     lp = logp_all.gather(-1, input_ids[:, 1:, None]).squeeze(-1)
@@ -165,7 +174,10 @@ def sequence_logprobs_and_entropy(
     if entropy:
         ent = -(logp_all.exp() * logp_all).sum(-1)
         ent = torch.nn.functional.pad(ent, (1, 0))
-    return lp, ent
+    top = None
+    if top_ids is not None:
+        top = torch.nn.functional.pad(logp_all.gather(-1, top_ids[:, 1:]), (0, 0, 1, 0))
+    return lp, ent, top
 
 
 class ReferenceTrainer:
@@ -299,12 +311,19 @@ class ReferenceTrainer:
         # Sequence-mode loss averages over sequences that have at least one response token (the
         # loss skips empty ones), so the micro-batch weights must use that count too.
         local_scored = int((batch.response_mask.sum(dim=1) > 0).sum().item())
-        total_tokens, total_seqs, total_scored = local_tokens, local_seqs, local_scored
+        # With per-token loss weights (loss_agg="rollout") a micro-batch counts by its weight mass.
+        local_mass = float(batch.loss_weights.sum().item()) if batch.loss_weights is not None else 0.0
+        total_tokens, total_seqs, total_scored, total_mass = (
+            local_tokens,
+            local_seqs,
+            local_scored,
+            local_mass,
+        )
         if (
             self._dist is not None
         ):  # weights use global counts so the summed gradient is the full-batch gradient
-            counts = self._dist.all_gather_object((local_tokens, local_seqs, local_scored))
-            total_tokens, total_seqs, total_scored = (sum(c[i] for c in counts) for i in range(3))
+            counts = self._dist.all_gather_object((local_tokens, local_seqs, local_scored, local_mass))
+            total_tokens, total_seqs, total_scored, total_mass = (sum(c[i] for c in counts) for i in range(4))
         total_tokens = max(total_tokens, 1)
         total_scored = max(total_scored, 1)
         mbs = self.config.trainer.micro_batch_size
@@ -318,15 +337,25 @@ class ReferenceTrainer:
             micro = batch.slice(start, start + mbs)
             micro_tokens = int(micro.response_mask.sum().item())
             micro_scored = int((micro.response_mask.sum(dim=1) > 0).sum().item())
-            weight = micro_tokens / total_tokens if token_agg else micro_scored / total_scored
+            if micro.loss_weights is not None:
+                weight = float(micro.loss_weights.sum().item()) / max(total_mass, 1e-8)
+            else:
+                weight = micro_tokens / total_tokens if token_agg else micro_scored / total_scored
             if micro_tokens == 0:
                 continue
             with self._autocast():
                 logits = self._forward(self.model, micro)
-            logprobs, entropy = sequence_logprobs_and_entropy(
-                logits, micro.input_ids, self.temperature, entropy=True
+            logprobs, entropy, top_logprobs = sequence_logprobs_and_entropy(
+                logits, micro.input_ids, self.temperature, entropy=True, top_ids=micro.behavior_top_ids
             )
             loss_kwargs: dict[str, Any] = {}
+            if micro.loss_weights is not None:
+                loss_kwargs["loss_weights"] = micro.loss_weights
+            if micro.behavior_logprobs is not None:
+                loss_kwargs["behavior_logprobs"] = micro.behavior_logprobs
+            if top_logprobs is not None:
+                loss_kwargs["top_logprobs"] = top_logprobs
+                loss_kwargs["behavior_top_logprobs"] = micro.behavior_top_logprobs
             if self.config.algorithm.name == "sft" and self.config.algorithm.sft_label_smoothing > 0:
                 from monorl.algorithms import mean_logprob_all_tokens
 
@@ -397,7 +426,7 @@ class ReferenceTrainer:
                 micro = prepared.slice(start, start + mbs)
                 with self._autocast():
                     logits = self._forward(model, micro)
-                lp, _ = sequence_logprobs_and_entropy(
+                lp, _, _ = sequence_logprobs_and_entropy(
                     logits, micro.input_ids, self.temperature, entropy=False
                 )
                 out[start : start + len(micro)] = lp * micro.response_mask.float()
@@ -511,6 +540,10 @@ class ReferenceTrainer:
     def _prepare(self, batch: TrainBatch) -> TrainBatch:
         if batch.input_ids.shape[1] > self.max_seq_len:
             width = batch.input_ids.shape[1]
+
+            def cut(t: torch.Tensor | None) -> torch.Tensor | None:
+                return None if t is None else t[:, : self.max_seq_len]
+
             batch = TrainBatch(
                 input_ids=batch.input_ids[:, : self.max_seq_len],
                 attention_mask=batch.attention_mask[:, : self.max_seq_len],
@@ -527,6 +560,10 @@ class ReferenceTrainer:
                 position_ids=None
                 if batch.position_ids is None
                 else batch.position_ids[:, : self.max_seq_len],
+                loss_weights=cut(batch.loss_weights),
+                behavior_logprobs=cut(batch.behavior_logprobs),
+                behavior_top_ids=cut(batch.behavior_top_ids),
+                behavior_top_logprobs=cut(batch.behavior_top_logprobs),
                 meta=batch.meta,
                 extra={
                     k: v[:, : self.max_seq_len]

@@ -123,9 +123,13 @@ def test_flatten_marks_env_tokens_with_zero_mask() -> None:
 
 
 def test_flatten_prefix_mismatch_trains_last_completion_only() -> None:
+    """TRL takes one sequence per rollout: the final turn's chain, here the final turn alone, whose
+    whole prompt is context."""
     flat = flatten_for_trl(_two_turn_trajectory(chain_ok=False))
-    assert flat["completion_ids"] == [99, 21, 30, 31, 40]
-    assert flat["env_mask"] == [0, 0, 0, 0, 1]
+    assert flat["prompt_ids"] == [10, 11, 99, 21, 30, 31]
+    assert flat["completion_ids"] == [40]
+    assert flat["env_mask"] == [1]
+    assert flat["logprobs"] == pytest.approx([-0.3])
 
 
 def test_sampling_params_from_grpo_args() -> None:

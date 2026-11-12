@@ -13,7 +13,10 @@ Everything here is verified against SGLang v0.5.23:
   ``meta_info.finish_reason`` is ``{"type": "stop"|"length"|"abort", ...}``
   (``schedule_batch.py`` ``FINISH_*.to_json``) and, with ``return_logprob``,
   ``meta_info.output_token_logprobs`` is a list of ``(logprob, token_id, text_or_None)``
-  (``detokenize_logprob_tokens``).
+  (``detokenize_logprob_tokens``). ``top_logprobs_num=k`` adds ``meta_info.output_top_logprobs``:
+  per output token the ``k`` most likely tokens as such tuples (``detokenize_top_logprobs_tokens``),
+  the ``topk`` of the distribution the token was sampled from (``srt/layers/sampler.py``,
+  ``srt/layers/logprob_processor.py`` ``get_top_logprobs``), whatever token was sampled.
 * ``python/sglang/srt/utils/common.py`` ``MultiprocessingSerializer.serialize(obj, output_str)``:
   ``ForkingPickler`` dump, optionally base64 — mirrored by :func:`serialize_for_sglang` so the
   HTTP client can build ``/update_weights_from_tensor`` payloads without importing sglang.
@@ -41,7 +44,14 @@ import torch.multiprocessing  # noqa: F401  (registers tensor/storage reducers o
 
 from monorl.config.schema import RunConfig
 from monorl.core.errors import ConfigError
-from monorl.core.types import Completion, FinishReason, PromptInput, SamplingParams, messages_have_media
+from monorl.core.types import (
+    Completion,
+    FinishReason,
+    PromptInput,
+    SamplingParams,
+    TopLogprobs,
+    messages_have_media,
+)
 
 SGLANG_VERSIONS = ">=0.5.23,<0.6"
 FRAMEWORK = "sglang"
@@ -236,6 +246,29 @@ def output_logprobs(meta_info: Mapping[str, Any]) -> list[float] | None:
     return out
 
 
+def logprob_kwargs(params: SamplingParams) -> dict[str, Any]:
+    """``Engine.generate`` / ``GenerateReqInput`` logprob arguments for ``params``: output-token
+    logprobs only (``logprob_start_len=-1``), plus the top-k per token when requested."""
+    kwargs: dict[str, Any] = {
+        "return_logprob": params.logprobs or params.top_logprobs > 0,
+        "logprob_start_len": -1,
+    }
+    if params.top_logprobs > 0:
+        kwargs["top_logprobs_num"] = params.top_logprobs
+    return kwargs
+
+
+def output_top_logprobs(meta_info: Mapping[str, Any], k: int) -> TopLogprobs | None:
+    """The top-``k`` per output token from ``meta_info.output_top_logprobs``
+    ``[[(logprob, token_id, text), ...], ...]``; ``None`` when a position carries none."""
+    positions = meta_info.get("output_top_logprobs")
+    if positions is None or not all(positions):
+        return None
+    return TopLogprobs.from_positions(
+        [[(int(entry[1]), float(entry[0])) for entry in position] for position in positions], k
+    )
+
+
 def output_token_ids(output: Mapping[str, Any]) -> list[int]:
     ids = output.get("output_ids")
     if ids is None:
@@ -249,7 +282,7 @@ def output_token_ids(output: Mapping[str, Any]) -> list[int]:
 
 
 def completion_from_output(
-    output: Mapping[str, Any], *, prompt_ids: list[int], want_logprobs: bool
+    output: Mapping[str, Any], *, prompt_ids: list[int], want_logprobs: bool, top_logprobs: int = 0
 ) -> Completion:
     meta = output.get("meta_info") or {}
     token_ids = output_token_ids(output)
@@ -259,12 +292,19 @@ def completion_from_output(
             f"sglang returned {len(logprobs)} output logprobs for {len(token_ids)} output tokens "
             f"(request {meta.get('id')!r})"
         )
+    top = output_top_logprobs(meta, top_logprobs) if top_logprobs > 0 else None
+    if top is not None and len(top) != len(token_ids):
+        raise ValueError(
+            f"sglang returned top logprobs for {len(top)} of {len(token_ids)} output tokens "
+            f"(request {meta.get('id')!r})"
+        )
     return Completion(
         text=output.get("text") or "",
         token_ids=token_ids,
         logprobs=logprobs,
         finish_reason=map_finish_reason(meta.get("finish_reason")),
         prompt_token_ids=list(prompt_ids),
+        top_logprobs=top,
     )
 
 
@@ -283,7 +323,15 @@ def group_outputs(
     for i, ids in enumerate(prompt_ids):
         chunk = outputs[i * params.n : (i + 1) * params.n]
         grouped.append(
-            [completion_from_output(o, prompt_ids=ids, want_logprobs=params.logprobs) for o in chunk]
+            [
+                completion_from_output(
+                    o,
+                    prompt_ids=ids,
+                    want_logprobs=params.logprobs,
+                    top_logprobs=params.top_logprobs,
+                )
+                for o in chunk
+            ]
         )
     return grouped
 

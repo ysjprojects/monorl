@@ -53,8 +53,9 @@ RESERVED_EXTRA_KEYS = frozenset({"verl_python"})
 
 # monorl AlgorithmConfig.kl_estimator -> actor.kl_loss_type (verl/trainer/ppo/core_algos.py kl_penalty)
 KL_LOSS_TYPE = {"k1": "kl", "k2": "mse", "k3": "low_var_kl"}
-# monorl loss_agg -> actor.loss_agg_mode (verl/trainer/ppo/core_algos.py agg_loss)
-LOSS_AGG_MODE = {"token": "token-mean", "sequence": "seq-mean-token-mean"}
+# monorl loss_agg -> actor.loss_agg_mode (verl/trainer/ppo/core_algos.py agg_loss); verl trains one
+# sequence per rollout, so "rollout" is its per-sequence mean
+LOSS_AGG_MODE = {"token": "token-mean", "sequence": "seq-mean-token-mean", "rollout": "seq-mean-token-mean"}
 # monorl model.dtype -> rollout.dtype (rollout.yaml); "auto" keeps verl's bf16 default
 ROLLOUT_DTYPE = {"bfloat16": "bfloat16", "float16": "float16", "float32": "float32"}
 ROLLOUT_BACKENDS = ("vllm", "sglang")
@@ -66,6 +67,9 @@ ENV_TYPES = ("single_turn", "tool_calling")
 OVERLONG_BUFFER_FRACTION = 0.2
 DAPO_GEN_BATCH_MULTIPLIER = 2
 DAPO_MAX_NUM_GEN_BATCHES = 10
+# monorl off_policy.ratio_mask -> algorithm.rollout_correction.rollout_rs
+# (verl/trainer/ppo/rollout_corr_helper.py compute_rollout_rejection_mask)
+ROLLOUT_RS = {"token": "token_k1", "sequence": "seq_sum_k1", "sequence_mean": "seq_mean_k1"}
 
 
 def adv_estimator(config: RunConfig) -> str:
@@ -80,6 +84,40 @@ def adv_estimator(config: RunConfig) -> str:
     # reinforce: verl's REINFORCE++ normalises across the batch; the *_baseline variant subtracts
     # the per-prompt mean first, which is what monorl's group normalisation means.
     return "reinforce_plus_plus_baseline" if algo.advantage_norm == "group" else "reinforce_plus_plus"
+
+
+def rollout_correction(config: RunConfig) -> dict[str, Any] | None:
+    """``algorithm.rollout_correction`` (``verl/trainer/config/algorithm/rollout_correction.yaml``)
+    for ``algorithm.off_policy``; ``None`` keeps verl's default (decoupled, metrics only).
+
+    ``anchor='behavior'`` is verl's bypass mode, anything else its decoupled mode. Importance
+    weights are ``rollout_is`` truncated at ``rollout_is_threshold``. A ratio mask is verl's
+    rejection sampling on the k1 statistic ``-log(pi_old / pi_rollout)``, kept inside
+    ``[log lower, log upper]``: the ratio band ``[low, high]`` is therefore ``1/high_1/low``.
+    verl removes rejected tokens from the response mask, so unlike monorl's reference loss they
+    also leave the denominator of the loss mean.
+    """
+    off = config.algorithm.off_policy
+    if off.score_centering:
+        raise ConfigError(
+            "algorithm.off_policy.score_centering has no verl equivalent (verl v0.9.1 rollout correction "
+            "has importance weights and rejection sampling only); use trainer.backend='reference'"
+        )
+    if off.anchor == "auto" and not off.corrects:
+        return None
+    correction: dict[str, Any] = {"bypass_mode": not off.decoupled}
+    if off.importance_weights != "none":
+        if off.importance_cap is None:
+            raise ConfigError(
+                "algorithm.off_policy.importance_cap=null has no verl equivalent (rollout_is weights are "
+                "always truncated at rollout_is_threshold); set a cap"
+            )
+        correction["rollout_is"] = off.importance_weights
+        correction["rollout_is_threshold"] = off.importance_cap
+    if off.ratio_mask != "none":
+        correction["rollout_rs"] = ROLLOUT_RS[off.ratio_mask]
+        correction["rollout_rs_threshold"] = f"{1.0 / off.ratio_mask_high!r}_{1.0 / off.ratio_mask_low!r}"
+    return correction
 
 
 def deep_merge(base: dict[str, Any], extra: dict[str, Any]) -> dict[str, Any]:
@@ -300,6 +338,10 @@ def compile_config(
         tree["algorithm"]["use_kl_in_reward"] = algo.kl_coef > 0
         tree["algorithm"]["kl_ctrl"] = {"type": "fixed", "kl_coef": algo.kl_coef}
         tree["algorithm"]["kl_penalty"] = KL_LOSS_TYPE[algo.kl_estimator]
+
+    correction = rollout_correction(config)
+    if correction is not None:
+        tree["algorithm"]["rollout_correction"] = correction
 
     if cluster.placement == "disaggregated" and cluster.rollout_gpus and cluster.trainer_gpus:
         # Standalone rollout pool (rollout.yaml nnodes/n_gpus_per_node) with the v1 separate trainer.

@@ -92,6 +92,12 @@ def _check_supported(config: RunConfig) -> None:
         )
     if algo.name == "sft":
         return
+    if config.env.type == "harness":
+        raise ConfigError(
+            "env.type='harness' is not supported with trainer.backend='nemo_rl': NeMo-RL steps environments "
+            "through its EnvironmentInterface, while a harness agent runs the whole episode itself; use "
+            "trainer.backend='reference' or 'trl'"
+        )
     if algo.num_epochs != 1:
         raise ConfigError(
             "algorithm.num_epochs > 1 has no NeMo-RL equivalent (one optimizer pass per rollout batch)"
@@ -434,6 +440,72 @@ def _cluster(config: RunConfig) -> dict[str, Any]:
     }
 
 
+def _importance_sampling(config: RunConfig, async_rollouts: bool) -> dict[str, Any]:
+    """``loss_fn`` importance-sampling keys (``ClippedPGLossConfig``) for ``algorithm.off_policy``.
+
+    ``ClippedPGLossFn`` is always decoupled: it clips against ``prev_logprobs`` (the policy before
+    the update) and multiplies the loss by ``exp(prev_logprobs - generation_logprobs)``, per token or
+    per sequence, truncated by ``tis`` (clamp), ``icepop`` (zero outside the band, raw weight
+    inside) or ``seq-mask-tis`` (zero sequences by geometric-mean ratio, raw token weights).
+    Without explicit options the correction is on exactly when rollouts are asynchronous.
+    """
+    off = config.algorithm.off_policy
+    keys: dict[str, Any] = {
+        "use_importance_sampling_correction": async_rollouts,
+        "truncated_importance_sampling_type": None,
+        "truncated_importance_sampling_ratio": None,
+        "truncated_importance_sampling_ratio_min": None,
+        "sequence_level_importance_ratios": False,
+    }
+    if off.score_centering:
+        raise ConfigError(
+            "algorithm.off_policy.score_centering has no NeMo-RL equivalent (ClippedPGLossFn has "
+            "importance-sampling corrections only); use trainer.backend='reference'"
+        )
+    if off.anchor == "behavior":
+        raise ConfigError(
+            "algorithm.off_policy.anchor='behavior' has no NeMo-RL equivalent: ClippedPGLossFn always clips "
+            "against prev_logprobs, the trainer's policy before the update"
+        )
+    if off.anchor == "auto" and not off.corrects:
+        return keys
+    weights, mask, cap = off.importance_weights, off.ratio_mask, off.importance_cap
+    if weights == "none":
+        if mask != "none":
+            raise ConfigError(
+                f"algorithm.off_policy.ratio_mask={mask!r} without importance_weights has no NeMo-RL "
+                "equivalent: its icepop / seq-mask-tis filters keep the importance weight of accepted tokens"
+            )
+        if async_rollouts:
+            raise ConfigError(
+                "algorithm.off_policy.importance_weights='none' is not available with rollout.async_steps_ahead "
+                "> 0 on NeMo-RL: async GRPO asserts loss_fn.use_importance_sampling_correction"
+            )
+        keys["use_importance_sampling_correction"] = False
+        return keys
+    keys["use_importance_sampling_correction"] = True
+    keys["sequence_level_importance_ratios"] = weights == "sequence"
+    band = {
+        "truncated_importance_sampling_ratio": off.ratio_mask_high,
+        "truncated_importance_sampling_ratio_min": off.ratio_mask_low,
+    }
+    if mask == "none":
+        if cap is not None:
+            keys.update(truncated_importance_sampling_type="tis", truncated_importance_sampling_ratio=cap)
+    elif mask == weights and (cap is None or cap >= off.ratio_mask_high):
+        keys.update(truncated_importance_sampling_type="icepop", **band)
+    elif mask == "sequence_mean" and weights == "token" and cap is None:
+        keys.update(truncated_importance_sampling_type="seq-mask-tis", **band)
+    else:
+        raise ConfigError(
+            f"algorithm.off_policy importance_weights={weights!r} (cap {cap}) with ratio_mask={mask!r} has no "
+            "NeMo-RL equivalent. Supported: weights alone ('tis'); a mask at the level of the weights with "
+            "importance_cap null or >= ratio_mask_high ('icepop'); ratio_mask='sequence_mean' with "
+            "importance_weights='token' and importance_cap null ('seq-mask-tis')"
+        )
+    return keys
+
+
 def _override(config: RunConfig, compiled: dict[str, Any]) -> dict[str, Any]:
     override = config.trainer.extra.get("nemo_rl") or {}
     if not isinstance(override, dict):
@@ -594,11 +666,7 @@ def compile_config(config: RunConfig, run_dir: str | Path) -> dict[str, Any]:
         "ratio_clip_max": algo.clip_eps_high if algo.clip_eps_high is not None else algo.clip_eps,
         "ratio_clip_c": None,
         "use_on_policy_kl_approximation": False,
-        "use_importance_sampling_correction": async_rollouts,
-        "truncated_importance_sampling_type": None,
-        "truncated_importance_sampling_ratio": None,
-        "truncated_importance_sampling_ratio_min": None,
-        "sequence_level_importance_ratios": False,
+        **_importance_sampling(config, async_rollouts),
         "token_level_loss": algo.loss_agg == "token",
         "force_on_policy_ratio": False,
         "use_kl_in_reward": False,

@@ -16,6 +16,7 @@ All protocols are ``runtime_checkable`` so the registry can validate factories c
 from __future__ import annotations
 
 import os
+import threading
 from collections.abc import Iterable, Iterator, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
@@ -159,6 +160,34 @@ class Environment(Protocol):
     def reset(self, sample: Sample) -> list[Message]: ...
 
     def step(self, action: Completion) -> StepResult: ...
+
+    def close(self) -> None: ...
+
+
+@runtime_checkable
+class EpisodeDriver(Protocol):
+    """An environment that runs a whole episode itself instead of being stepped turn by turn: an
+    external agent harness that calls the policy through the capture gateway
+    (:mod:`monorl.gateway`). The environment factory may return either kind; the episode runner
+    calls ``run_episode`` when the object has it and ``reset``/``step`` otherwise.
+
+    ``run_episode`` returns the finished :class:`Trajectory` (unscored: rewards are applied by the
+    caller, per-turn environment rewards go in ``Turn.reward``). It must honour ``abort`` by
+    raising ``monorl.orchestrator.episodes.EpisodeAborted``. ``turn_rendering`` is
+    ``rollout.turn_rendering`` (``"tokens"`` or ``"template"``).
+    """
+
+    def run_episode(
+        self,
+        sample: Sample,
+        *,
+        group_id: str,
+        engine: RolloutEngine,
+        tokenizer: Any,
+        params: SamplingParams,
+        abort: threading.Event | None = None,
+        turn_rendering: str = "tokens",
+    ) -> Trajectory: ...
 
     def close(self) -> None: ...
 
