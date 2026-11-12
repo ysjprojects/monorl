@@ -1,18 +1,22 @@
 """Built-in environments provider.
 
 Names: ``single_turn`` (prompt is the whole episode), ``tool_calling`` (multi-turn tool use),
-``remote`` (MEP/1 client for Go/C++/any-language env servers). ``openenv`` and ``hermes`` are
-adapter-owned (:mod:`monorl.adapters`) and resolved lazily by the registry.
+``remote`` (MEP/1 client for Go/C++/any-language env servers), ``harness`` (an external agent
+program that calls the policy through the capture gateway, :mod:`monorl.gateway`). ``openenv``
+and ``hermes`` are adapter-owned (:mod:`monorl.adapters`) and resolved lazily by the registry.
 
-``make_env(config)`` builds a fresh environment for one episode from ``config.env``.
+``make_env(config)`` builds a fresh environment for one episode from ``config.env``: a stepped
+:class:`~monorl.core.interfaces.Environment`, or for ``harness`` an
+:class:`~monorl.core.interfaces.EpisodeDriver` that runs the whole episode.
 """
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from monorl.core.interfaces import Environment
+from monorl.core.interfaces import Environment, EpisodeDriver
 from monorl.core.registry import registry
+from monorl.envs.harness import HarnessEnv, make_harness_env
 from monorl.envs.protocol import EnvSpec
 from monorl.envs.remote import RemoteEnv, make_remote_env
 from monorl.envs.single_turn import SingleTurnEnv
@@ -55,7 +59,13 @@ def _make_remote(config: RunConfig, **kwargs: Any) -> RemoteEnv:
     return make_remote_env(config.env.params, max_turns=_max_turns_override(config), seed=kwargs.get("seed"))
 
 
-def make_env(config: RunConfig, **kwargs: Any) -> Environment:
+def _make_harness(config: RunConfig, **kwargs: Any) -> HarnessEnv:
+    return make_harness_env(
+        config.env.params, max_turns=_max_turns_override(config), model=config.model.name_or_path
+    )
+
+
+def make_env(config: RunConfig, **kwargs: Any) -> Environment | EpisodeDriver:
     return registry.get("env", config.env.type)(config, **kwargs)
 
 
@@ -63,10 +73,12 @@ def register(registry: Registry) -> None:
     registry.register("env", "single_turn", _make_single_turn)
     registry.register("env", "tool_calling", _make_tool_calling)
     registry.register("env", "remote", _make_remote)
+    registry.register("env", "harness", _make_harness)
 
 
 __all__ = [
     "EnvSpec",
+    "HarnessEnv",
     "RemoteEnv",
     "SingleTurnEnv",
     "Tool",

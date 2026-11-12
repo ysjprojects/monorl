@@ -1,0 +1,63 @@
+# GRPO where the environment is an external agent program (`env.type: harness`), entirely on CPU
+# with SmolLM2-135M-Instruct. Every episode starts `python -m monorl.gateway.agents.calc`, a small
+# tool-using loop that speaks OpenAI chat completions (function calling) to the capture gateway
+# monorl serves from the policy being trained; its system prompt and two worked examples show the
+# model how to call the calculator. Each policy call is recorded with its exact tokens and
+# logprobs, so the calculator round trip of an episode trains as one token-contiguous sequence.
+# Reward: exact match on the last number of the agent's final answer. Swap `env.params.command`
+# for your own OpenAI-SDK script or agent CLI (docs/GATEWAY.md).
+run_name: grpo-harness-calc-cpu
+seed: 42
+model:
+  name_or_path: HuggingFaceTB/SmolLM2-135M-Instruct
+  dtype: float32
+data:
+  uri: hf://openai/gsm8k
+  hf_config_name: main
+  split: train
+  format: prompt_answer
+  prompt_field: question
+  answer_field: answer
+  max_prompt_tokens: 512
+  limit: 256
+algorithm:
+  name: grpo
+  kl_coef: 0.0
+  advantage_norm: group
+rollout:
+  backend: hf
+  group_size: 4
+  max_new_tokens: 96
+  temperature: 1.0
+  device: cpu
+  # a tool call ends the turn; the gateway parses it and answers with OpenAI `tool_calls`
+  stop: ["</tool_call>"]
+  turn_rendering: tokens
+trainer:
+  backend: reference
+  learning_rate: 2.0e-6
+  prompts_per_step: 2
+  micro_batch_size: 2
+  max_steps: 20
+  precision: fp32
+  save_every: 10
+  max_seq_len: 1536
+  device: cpu
+rewards:
+  - type: exact_match
+    weight: 1.0
+    params:
+      extract: last_number
+      scope: last
+env:
+  type: harness
+  # policy calls per episode; the agent stops by itself after --max-steps
+  max_turns: 3
+  params:
+    command: ["{python}", "-m", "monorl.gateway.agents.calc", "--task-file", "{task_file}", "--max-steps", "3"]
+    timeout: 600
+cluster:
+  mode: local
+logging:
+  run_root: ~/.monorl/runs
+  trajectories_per_step: 4
