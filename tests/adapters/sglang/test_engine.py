@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
+
 import pytest
 import torch
 from fake_sglang import Engine as FakeEngine
 from fake_sglang import MultiprocessingSerializer, make_config
 
 from monorl.adapters.sglang.engine import SGLangEngine, import_sglang
-from monorl.core.errors import BackendUnavailable, WeightSyncError
+from monorl.core.errors import BackendUnavailable, GenerationCancelled, WeightSyncError
 from monorl.core.interfaces import RolloutEngine
 from monorl.core.types import SamplingParams
 
@@ -66,7 +68,7 @@ def test_generate_chat_prompt_uses_template_ids_and_logprobs(engine):
     text = tok.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
     expected_ids = tok(text, add_special_tokens=False)["input_ids"]
     call = fake_of(engine).calls[-1]
-    assert call.method == "generate"
+    assert call.method == "async_generate"
     assert call.kwargs["prompt"] is None
     assert call.kwargs["input_ids"] == [expected_ids]
     assert call.kwargs["return_logprob"] is True
@@ -82,6 +84,7 @@ def test_generate_chat_prompt_uses_template_ids_and_logprobs(engine):
             "repetition_penalty": 1.0,
             "skip_special_tokens": True,
             "stop": ["\n"],
+            "no_stop_trim": True,
         }
     ]
     for c in groups[0]:
@@ -155,6 +158,30 @@ def test_generate_refuses_while_asleep(engine):
     engine.sleep()
     with pytest.raises(RuntimeError, match="asleep"):
         engine.generate([[1]], SamplingParams())
+
+
+# -- cancel --------------------------------------------------------------------------------------
+def test_cancel_aborts_running_generate_in_the_scheduler(engine):
+    fake = fake_of(engine)
+    fake.script.hold = True  # the scheduler never answers: a long generation
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        running = pool.submit(engine.generate, [[1, 2], [3]], SamplingParams(n=2, seed=7))
+        assert fake.generating.wait(5)
+        engine.cancel()
+        engine.cancel()  # repeated calls are harmless
+        with pytest.raises(GenerationCancelled):
+            running.result(timeout=5)
+    assert len(fake.tokenizer_manager.aborted) == 4  # one AbortReq per dispatched request
+    fake.script.hold = False
+    groups = engine.generate([[9]], SamplingParams(n=1))
+    assert groups[0][0].prompt_token_ids == [9] and len(fake.tokenizer_manager.aborted) == 4
+
+
+def test_cancel_while_idle_does_not_affect_the_next_generate(engine):
+    engine.cancel()
+    groups = engine.generate([[5, 6]], SamplingParams(n=2, logprobs=False))
+    assert [c.prompt_token_ids for c in groups[0]] == [[5, 6], [5, 6]]
+    assert fake_of(engine).tokenizer_manager.aborted == []
 
 
 # -- weights -------------------------------------------------------------------------------------

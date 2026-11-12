@@ -63,6 +63,15 @@ class RolloutEngine(Protocol):
     When a prompt is ``list[int]`` the engine conditions on those exact token ids; when it is a
     chat (``list[Message]``) the engine applies the tokenizer chat template with
     ``add_generation_prompt=True`` and records the resulting ids in ``Completion.prompt_token_ids``.
+    A completion ended by one of ``params.stop`` keeps that stop string at the end of
+    ``Completion.text`` (``finish_reason == "stop"``): environments parse closing tags such as
+    ``</tool_call>`` from it, and a chat re-rendered from the text has to match the sampled tokens.
+
+    Optional capability (duck-typed, not a protocol member): ``cancel() -> None`` aborts the
+    ``generate`` calls that are in flight — they raise
+    :class:`~monorl.core.errors.GenerationCancelled` instead of returning — without shutting the
+    engine down. It is safe to call from any thread, a no-op when nothing is generating, and
+    ``generate`` calls made afterwards run normally.
     """
 
     def generate(self, prompts: Sequence[PromptInput], params: SamplingParams) -> list[list[Completion]]: ...

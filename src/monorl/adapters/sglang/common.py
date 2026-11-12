@@ -169,7 +169,10 @@ def image_data_urls(image_data: list[list[Any] | None] | None) -> list[list[str]
 
 
 def sampling_dict(params: SamplingParams, *, n: int | None = None, seed: int | None = None) -> dict[str, Any]:
-    """``SamplingParams`` → sglang ``sampling_params`` dict (``SamplingParams.__init__`` keys)."""
+    """``SamplingParams`` → sglang ``sampling_params`` dict (``SamplingParams.__init__`` keys).
+
+    ``no_stop_trim`` keeps a matched stop string in the text (sglang's detokenizer trims it by
+    default), as the ``RolloutEngine`` contract requires."""
     out: dict[str, Any] = {
         "n": params.n if n is None else n,
         "max_new_tokens": params.max_new_tokens,
@@ -182,6 +185,7 @@ def sampling_dict(params: SamplingParams, *, n: int | None = None, seed: int | N
     }
     if params.stop:
         out["stop"] = list(params.stop)
+        out["no_stop_trim"] = True
     if seed is not None:
         out["sampling_seed"] = int(seed)
     return out

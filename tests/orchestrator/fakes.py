@@ -18,6 +18,7 @@ from typing import Any
 import torch
 
 from monorl.config.schema import DataConfig, RunConfig
+from monorl.core.errors import GenerationCancelled
 from monorl.core.registry import registry
 from monorl.core.types import (
     Completion,
@@ -191,6 +192,36 @@ class FakeEngine:
 
     def shutdown(self) -> None:
         self.shutdown_count += 1
+
+
+class SlowCancellableEngine(FakeEngine):
+    """:class:`FakeEngine` whose ``generate`` takes ``rollout.extra["fake_generate_seconds"]``
+    (default 60; also the ``generate_seconds`` attribute) and implements the optional ``cancel()``
+    capability: the calls in flight raise :class:`GenerationCancelled` at once. ``generating`` is
+    set once a call is in flight; ``calls`` only lists calls that ran to completion."""
+
+    def __init__(self, config: RunConfig, replica: int = 0, **kwargs: Any) -> None:
+        # own state first: the base constructor publishes the instance in ``ENGINES``
+        self.generate_seconds = float(config.rollout.extra.get("fake_generate_seconds", 60.0))
+        self.generating = threading.Event()
+        self.cancel_calls = 0
+        self._cancel_cv = threading.Condition()
+        self._cancel_epoch = 0
+        super().__init__(config, replica, **kwargs)
+
+    def generate(self, prompts: Sequence[Any], params: SamplingParams) -> list[list[Completion]]:
+        with self._cancel_cv:
+            epoch = self._cancel_epoch
+            self.generating.set()
+            if self._cancel_cv.wait_for(lambda: self._cancel_epoch != epoch, timeout=self.generate_seconds):
+                raise GenerationCancelled("fake generation cancelled")
+        return super().generate(prompts, params)
+
+    def cancel(self) -> None:
+        with self._cancel_cv:
+            self.cancel_calls += 1
+            self._cancel_epoch += 1
+            self._cancel_cv.notify_all()
 
 
 # -- trainer ----------------------------------------------------------------------------------

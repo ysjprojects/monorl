@@ -29,3 +29,8 @@ class EnvironmentError_(MonorlError):
 
 class WeightSyncError(MonorlError):
     pass
+
+
+class GenerationCancelled(MonorlError):
+    """A ``RolloutEngine.generate`` call was aborted through the engine's ``cancel()`` before it
+    finished."""

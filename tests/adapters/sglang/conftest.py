@@ -41,6 +41,7 @@ def fake_sglang():
         if is_registered("sglang"):
             revert("sglang")
         remove_fake_sglang()
+        Engine.close_loops()
         Engine.instances.clear()
 
 

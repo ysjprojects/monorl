@@ -4,28 +4,39 @@ Mirrored upstream files (tag v0.5.23):
 
 * ``python/sglang/version.py`` — ``sglang.__version__``.
 * ``python/sglang/srt/entrypoints/engine.py`` — ``Engine(**ServerArgs kwargs)``, ``generate(...)``,
+  ``async_generate(...)`` and the ``loop`` the synchronous methods run on,
   ``update_weights_from_tensor(named_tensors, load_format, flush_cache)`` (serialises once per TP
   rank with ``MultiprocessingSerializer`` — ``_serialize_tensors_per_rank``),
   ``update_weights_from_disk(model_path, load_format)``, ``release_memory_occupation(tags)``,
   ``resume_memory_occupation(tags)``, ``flush_cache()``, ``shutdown()``.
 * ``python/sglang/srt/utils/common.py`` (re-exported by ``sglang/srt/utils/__init__.py``) —
   ``MultiprocessingSerializer.serialize(obj, output_str)`` / ``deserialize(data)``.
-* ``python/sglang/srt/managers/tokenizer_manager.py`` — ``TokenizerManager.detokenize_logprob_tokens``
-  and the ``{"text", "output_ids", "meta_info"}`` output shape of ``_handle_batch_output``.
+* ``python/sglang/srt/managers/tokenizer_manager.py`` — ``TokenizerManager.detokenize_logprob_tokens``,
+  ``abort_request(rid, abort_all)`` and the ``{"text", "output_ids", "meta_info"}`` output shape of
+  ``_handle_batch_output``.
 * ``python/sglang/srt/sampling/sampling_params.py`` — ``SamplingParams`` keyword names.
 """
 
 from __future__ import annotations
 
+import asyncio
 import base64
+import functools
 import io
 import pickle
+import queue
+import select
+import socket
 import sys
+import threading
 import types
+from collections.abc import Callable
 from dataclasses import dataclass
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from multiprocessing.reduction import ForkingPickler
 from typing import Any
 
+import httpx
 import torch.multiprocessing  # noqa: F401  (registers tensor reducers, as sglang does via torch)
 
 SGLANG_FAKE_VERSION = "0.5.23"
@@ -87,6 +98,12 @@ class SamplingParams:
 
 # -- sglang.srt.managers.tokenizer_manager ---------------------------------------------------------
 class TokenizerManager:
+    def __init__(self) -> None:
+        self.aborted: list[str] = []  # rids sent to the scheduler in an AbortReq
+
+    def abort_request(self, rid: str = "", abort_all: bool = False) -> None:
+        self.aborted.append("*" if abort_all else rid)
+
     def detokenize_logprob_tokens(self, token_logprobs_val, token_logprobs_idx, decode_to_text):
         if not decode_to_text:
             return [
@@ -118,6 +135,7 @@ class EngineScript:
     include_output_ids: bool = True
     logprob_type: type = float
     raise_on_release: Exception | None = None
+    hold: bool = False  # async_generate: the scheduler never answers (a long generation)
 
 
 class Engine:
@@ -132,7 +150,21 @@ class Engine:
         self.calls: list[FakeCall] = []
         self.script = EngineScript()
         self.shut_down = False
+        self.tokenizer_manager = TokenizerManager()
+        self.generating = threading.Event()  # set once a held async_generate is waiting
         Engine.instances.append(self)
+
+    @functools.cached_property
+    def loop(self) -> asyncio.AbstractEventLoop:
+        """``Engine.loop`` (``_ensure_event_loop`` in ``__init__`` upstream; on first use here so
+        that engines which never generate leave no loop to close)."""
+        return asyncio.new_event_loop()
+
+    @classmethod
+    def close_loops(cls) -> None:
+        for engine in cls.instances:
+            if "loop" in vars(engine):
+                engine.loop.close()
 
     # Signature mirrors Engine.generate at v0.5.23 (positional names matter for the seed patch).
     def generate(
@@ -171,9 +203,91 @@ class Engine:
         *,
         cache_salt=None,
     ):
+        return self._generate(
+            "generate",
+            prompt=prompt,
+            sampling_params=sampling_params,
+            input_ids=input_ids,
+            image_data=image_data,
+            return_logprob=return_logprob,
+            logprob_start_len=logprob_start_len,
+            stream=stream,
+        )
+
+    # Signature of Engine.async_generate at v0.5.23 (same parameters as generate).
+    async def async_generate(
+        self,
+        prompt=None,
+        sampling_params=None,
+        input_ids=None,
+        image_data=None,
+        audio_data=None,
+        video_data=None,
+        mm_hashes=None,
+        mm_content_hashes=None,
+        return_logprob=False,
+        logprob_start_len=None,
+        top_logprobs_num=None,
+        token_ids_logprob=None,
+        lora_path=None,
+        custom_logit_processor=None,
+        require_reasoning=False,
+        return_hidden_states=False,
+        return_routed_experts=False,
+        routed_experts_start_len=0,
+        stream=False,
+        bootstrap_host=None,
+        bootstrap_port=None,
+        bootstrap_room=None,
+        routed_dp_rank=None,
+        disagg_prefill_dp_rank=None,
+        kv_hints=None,
+        data_parallel_rank=None,
+        external_trace_header=None,
+        rid=None,
+        session_params=None,
+        priority=None,
+        session_id=None,
+        *,
+        cache_salt=None,
+    ):
+        outputs = self._generate(
+            "async_generate",
+            prompt=prompt,
+            sampling_params=sampling_params,
+            input_ids=input_ids,
+            image_data=image_data,
+            return_logprob=return_logprob,
+            logprob_start_len=logprob_start_len,
+            stream=stream,
+        )
+        if self.script.hold:
+            self.generating.set()
+            try:
+                await asyncio.get_running_loop().create_future()
+            except BaseException:
+                # TokenizerManager.generate_request: a failure after dispatch, a cancelled task
+                # included, aborts every dispatched request (_release_req_states_on_failure).
+                for out in outputs if isinstance(outputs, list) else [outputs]:
+                    self.tokenizer_manager.abort_request(out["meta_info"]["id"])
+                raise
+        return outputs
+
+    def _generate(
+        self,
+        method: str,
+        *,
+        prompt: Any,
+        sampling_params: Any,
+        input_ids: Any,
+        image_data: Any,
+        return_logprob: Any,
+        logprob_start_len: Any,
+        stream: Any,
+    ) -> Any:
         self.calls.append(
             FakeCall(
-                "generate",
+                method,
                 {
                     "prompt": prompt,
                     "sampling_params": sampling_params,
@@ -276,6 +390,60 @@ class Engine:
 
     def methods(self) -> list[str]:
         return [c.method for c in self.calls]
+
+
+# -- sglang.launch_server, as seen from a socket --------------------------------------------------
+class LoopbackServer:
+    """Serves an ``httpx.MockTransport``-style ``handler`` on 127.0.0.1, to observe what a real
+    server sees when the client drops a request.
+
+    While ``stall`` is set a POST is read and left unanswered, as during a long generation: its
+    path goes on ``stalled`` at once and on ``disconnects`` when the client closes the connection
+    — what ``request.is_disconnected()`` reports to sglang's ``/generate`` waiter.
+    """
+
+    def __init__(self, handler: Callable[[httpx.Request], httpx.Response]) -> None:
+        self.stall = False
+        self.stalled: queue.Queue[str] = queue.Queue()
+        self.disconnects: queue.Queue[str] = queue.Queue()
+        owner = self
+
+        class Handler(BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
+            def log_message(self, format: str, *args: Any) -> None:
+                pass
+
+            def do_POST(self) -> None:
+                body = self.rfile.read(int(self.headers.get("content-length", 0)))
+                if owner.stall:
+                    owner.stalled.put(self.path)
+                    self.close_connection = True
+                    readable, _, _ = select.select([self.connection], [], [], 10)
+                    try:  # end of stream (or a reset) while no request is pending: the client left
+                        gone = bool(readable) and self.connection.recv(1, socket.MSG_PEEK) == b""
+                    except ConnectionError:
+                        gone = True
+                    if gone:
+                        owner.disconnects.put(self.path)
+                    return
+                url = f"http://{self.headers['host']}{self.path}"
+                response = handler(httpx.Request("POST", url, headers=dict(self.headers), content=body))
+                self.send_response(response.status_code)
+                self.send_header("content-type", response.headers.get("content-type", "text/plain"))
+                self.send_header("content-length", str(len(response.content)))
+                self.end_headers()
+                self.wfile.write(response.content)
+
+        self._httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.url = f"http://127.0.0.1:{self._httpd.server_address[1]}"
+        self._thread = threading.Thread(target=self._httpd.serve_forever, args=(0.01,), daemon=True)
+        self._thread.start()
+
+    def close(self) -> None:
+        self._httpd.shutdown()
+        self._thread.join()
+        self._httpd.server_close()
 
 
 # -- module tree ----------------------------------------------------------------------------------

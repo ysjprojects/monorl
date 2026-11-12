@@ -64,7 +64,8 @@ def sampling_kwargs(params: SamplingParams) -> dict[str, Any]:
     """Keyword arguments for ``vllm.SamplingParams`` (also the ``/v1/completions`` body subset).
 
     ``logprobs=0`` requests exactly the sampled token's logprob per position; ``None`` disables
-    logprob computation entirely.
+    logprob computation entirely. ``include_stop_str_in_output`` keeps a matched stop string in the
+    text (vLLM cuts it off by default), as the ``RolloutEngine`` contract requires.
     """
     return {
         "n": params.n,
@@ -75,6 +76,7 @@ def sampling_kwargs(params: SamplingParams) -> dict[str, Any]:
         "min_p": params.min_p,
         "repetition_penalty": params.repetition_penalty,
         "stop": list(params.stop),
+        "include_stop_str_in_output": True,
         "seed": params.seed,
         "logprobs": 0 if params.logprobs else None,
     }
@@ -191,6 +193,7 @@ def chat_completion_kwargs(params: SamplingParams) -> dict[str, Any]:
         "min_p": params.min_p,
         "repetition_penalty": params.repetition_penalty,
         "stop": list(params.stop),
+        "include_stop_str_in_output": True,
         "seed": params.seed,
         "logprobs": bool(params.logprobs),
         "top_logprobs": 0,

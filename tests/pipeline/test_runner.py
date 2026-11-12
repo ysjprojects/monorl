@@ -6,6 +6,8 @@ from __future__ import annotations
 import json
 import os
 import signal
+import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +15,7 @@ import fakes
 import pytest
 import yaml
 
+from monorl.core.registry import registry
 from monorl.core.reporting import iter_metrics, iter_trajectories, read_status
 from monorl.pipeline import PipelineResult, read_manifest, run_pipeline
 from monorl.pipeline.stages import DATASET_FILE, MANIFEST_FILE, PIPELINE_CONFIG_FILE
@@ -348,3 +351,46 @@ def test_init_from_base_vs_previous(make_pipeline: Any, init_from: str) -> None:
         assert b_model == config.base.model.name_or_path
     else:
         assert b_model == str(Path(result.stages[0]["run_dir"]) / "final")
+
+
+@pytest.mark.parametrize("stage_type", ["rejection_sample", "eval"])
+def test_sigterm_aborts_sampling_stage_generation_in_flight(
+    make_pipeline: Any, monkeypatch: pytest.MonkeyPatch, stage_type: str
+) -> None:
+    """The real batching proxy in front of an engine whose ``generate`` takes 60 s unless
+    cancelled: the stage must end ``cancelled`` without waiting for the generation."""
+    from monorl.orchestrator import loop
+    from monorl.rollout import BatchingEngine
+
+    monkeypatch.setattr(loop, "_resolve_batching_engine", lambda: BatchingEngine)
+    registry.register("rollout_engine", "fake", fakes.SlowCancellableEngine, overwrite=True)
+    sampling: dict[str, Any] = {"type": stage_type, "name": "sampling"}
+    if stage_type == "rejection_sample":
+        sampling.update(num_samples=2, min_reward=0.0)
+    config = make_pipeline([sampling, {"type": "eval", "name": "after"}])
+
+    def sigterm_once_generating() -> None:
+        deadline = time.monotonic() + 30
+        while not fakes.ENGINES and time.monotonic() < deadline:
+            time.sleep(0.005)
+        if fakes.ENGINES and fakes.ENGINES[-1].generating.wait(30):
+            _sigterm_self()
+
+    threading.Thread(target=sigterm_once_generating, daemon=True).start()
+    t0 = time.monotonic()
+    try:
+        result = run_pipeline(config)
+    finally:
+        registry.register("rollout_engine", "fake", fakes.FakeEngine, overwrite=True)
+    assert time.monotonic() - t0 < 20.0
+    assert result.state == "cancelled"
+    assert [s["state"] for s in result.stages] == ["cancelled", "pending"]
+    stage = result.stages[0]
+    assert read_status(stage["run_dir"])["state"] == "cancelled"
+    assert list(Path(stage["run_dir"]).glob(f"{DATASET_FILE}*")) == []  # neither dataset nor partial file
+    assert len(fakes.ENGINES) == 1
+    engine = fakes.ENGINES[0]
+    assert engine.calls == [] and engine.cancel_calls >= 1  # no generation ran to completion
+    assert engine.shutdown_count >= 1
+    leftovers = ("monorl-episode", "monorl-batching")
+    assert not [t.name for t in threading.enumerate() if t.name.startswith(leftovers)]

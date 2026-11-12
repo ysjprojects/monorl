@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import threading
+import time
 from typing import Any
 
 import fakes
@@ -15,6 +16,7 @@ from monorl.orchestrator.episodes import (
     run_episode,
     run_episodes,
 )
+from monorl.rollout import BatchingEngine
 
 
 def _sample(text: str = "abc", sid: str = "0") -> Sample:
@@ -178,3 +180,159 @@ def test_abort_event_raises_episode_aborted(make_config: Any) -> None:
             params=SamplingParams(n=1),
             abort=abort,
         )
+
+
+# -- abort during generation -------------------------------------------------------------------
+
+
+def _episode_threads() -> list[str]:
+    return [t.name for t in threading.enumerate() if t.name.startswith("monorl-episode")]
+
+
+def _set_when(event: threading.Event, abort: threading.Event) -> None:
+    def fire() -> None:
+        if event.wait(10):
+            abort.set()
+
+    threading.Thread(target=fire, daemon=True).start()
+
+
+@pytest.mark.parametrize(
+    ("max_parallel", "batched"), [(1, False), (4, False), (4, True)], ids=["inline", "pool", "pool-batched"]
+)
+def test_abort_cancels_generation_in_flight(make_config: Any, max_parallel: int, batched: bool) -> None:
+    cfg = make_config(env={"type": "fake_multi", "max_turns": 2})
+    slow = fakes.SlowCancellableEngine(cfg)  # a generate call takes 60 s unless cancelled
+    engine: Any = BatchingEngine(slow, max_batch_size=4, max_wait_ms=5) if batched else slow
+    envs: list[fakes.FakeMultiTurnEnv] = []
+
+    def factory() -> fakes.FakeMultiTurnEnv:
+        env = fakes.FakeMultiTurnEnv(cfg)
+        envs.append(env)
+        return env
+
+    abort = threading.Event()
+    _set_when(slow.generating, abort)
+    specs = [EpisodeSpec(sample=_sample(sid=str(i)), group_id=f"g{i}", engine=engine) for i in range(4)]
+    t0 = time.monotonic()
+    try:
+        with pytest.raises(EpisodeAborted):
+            run_episodes(
+                specs,
+                env_factory=factory,
+                tokenizer=slow.tokenizer,
+                params=SamplingParams(n=1),
+                max_parallel=max_parallel,
+                abort=abort,
+            )
+        assert time.monotonic() - t0 < 10.0
+        assert _episode_threads() == []
+        # inline: the specs after the aborted one never start; pool: up to one env per worker
+        assert (len(envs) == 1 if max_parallel == 1 else 1 <= len(envs) <= 4) and all(e.closed for e in envs)
+        assert slow.calls == [] and slow.cancel_calls >= 1  # nothing ran to completion
+    finally:
+        if batched:
+            engine.shutdown()
+
+
+def test_abort_cancels_a_generate_submitted_after_the_first_cancel(make_config: Any) -> None:
+    cfg = make_config(env={"type": "fake_multi", "max_turns": 2})
+    engine = fakes.SlowCancellableEngine(cfg)
+    engine.generate_seconds = 0.0  # turn 0 answers at once
+    abort = threading.Event()
+
+    class AbortBetweenCheckAndGenerate(fakes.FakeTokenizer):
+        """Turn 1 is templated after the episode's abort check and before its ``generate``: set
+        the abort there and hold the episode until the first ``cancel()`` has found nothing."""
+
+        def apply_chat_template(self, messages: Any, **kwargs: Any) -> Any:
+            if len(messages) > 1 and not abort.is_set():
+                engine.generate_seconds = 60.0
+                abort.set()
+                deadline = time.monotonic() + 10
+                while engine.cancel_calls == 0 and time.monotonic() < deadline:
+                    time.sleep(0.002)
+            return super().apply_chat_template(messages, **kwargs)
+
+    env = fakes.FakeMultiTurnEnv(cfg)
+    t0 = time.monotonic()
+    with pytest.raises(EpisodeAborted):
+        run_episodes(
+            [EpisodeSpec(sample=_sample(), group_id="g", engine=engine)],
+            env_factory=lambda: env,
+            tokenizer=AbortBetweenCheckAndGenerate(),
+            params=SamplingParams(n=1),
+            max_parallel=1,
+            abort=abort,
+        )
+    assert time.monotonic() - t0 < 10.0
+    assert len(engine.calls) == 1 and engine.cancel_calls >= 2  # turn 0 completed, turn 1 was cut
+    assert env.closed and _episode_threads() == []
+
+
+def test_abort_waits_for_env_step_in_flight_and_skips_engines_without_cancel(make_config: Any) -> None:
+    cfg = make_config(env={"type": "fake_multi", "max_turns": 2})
+    fast = fakes.FakeEngine(make_config(rollout={"extra": {"fake_mode": "always_right"}}))  # no cancel()
+    slow = fakes.SlowCancellableEngine(cfg)
+    in_step = threading.Event()
+    release_step = threading.Event()
+
+    class GatedEnv(fakes.FakeMultiTurnEnv):
+        """The episode of sample "0" blocks in ``step`` until released."""
+
+        def __init__(self) -> None:
+            super().__init__(cfg)
+            self.steps_finished = 0
+            self.gated = False
+
+        def reset(self, sample: Sample) -> Any:
+            self.gated = sample.id == "0"
+            return super().reset(sample)
+
+        def step(self, action: Any) -> Any:
+            if self.gated:
+                in_step.set()
+                assert release_step.wait(10)
+            result = super().step(action)
+            self.steps_finished += 1
+            return result
+
+    envs: list[GatedEnv] = []
+    lock = threading.Lock()
+
+    def factory() -> GatedEnv:
+        env = GatedEnv()
+        with lock:
+            envs.append(env)
+        return env
+
+    abort = threading.Event()
+
+    def fire() -> None:
+        if in_step.wait(10) and slow.generating.wait(10):
+            abort.set()
+            time.sleep(0.3)  # well past the cancel of the other episode's generation
+            release_step.set()
+
+    threading.Thread(target=fire, daemon=True).start()
+    specs = [
+        EpisodeSpec(sample=_sample(sid="0"), group_id="g0", engine=fast),
+        EpisodeSpec(sample=_sample(sid="1"), group_id="g1", engine=slow),
+    ]
+    t0 = time.monotonic()
+    with pytest.raises(EpisodeAborted):
+        run_episodes(
+            specs,
+            env_factory=factory,
+            tokenizer=fast.tokenizer,
+            params=SamplingParams(n=1),
+            max_parallel=2,
+            abort=abort,
+        )
+    assert time.monotonic() - t0 < 10.0
+    assert release_step.is_set()  # did not return while the env step was still running
+    gated = next(e for e in envs if e.gated)
+    assert gated.steps_finished == 1  # the step in flight completed; turn 2 never started
+    assert len(fast.calls) == 1 and slow.calls == []
+    assert len(envs) == 2 and all(e.closed for e in envs)
+    assert _episode_threads() == []

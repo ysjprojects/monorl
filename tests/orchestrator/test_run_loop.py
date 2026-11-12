@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -362,3 +364,34 @@ def test_config_yaml_records_resolved_run_name(make_config: Any) -> None:
     saved = yaml.safe_load((Path(result.run_dir) / "config.yaml").read_text())
     assert saved["run_name"] == Path(result.run_dir).name
     assert json.loads((Path(result.run_dir) / "status.json").read_text())["state"] == "succeeded"
+
+
+def test_cancel_aborts_async_producer_generation_in_flight(make_config: Any) -> None:
+    """Async rollouts: the signal arrives while the producer generates and nothing is training,
+    so the run must stop without waiting out the (60 s) generation."""
+    import os
+    import signal
+
+    registry.register("rollout_engine", "fake", fakes.SlowCancellableEngine, overwrite=True)
+
+    def interrupt() -> None:
+        deadline = time.monotonic() + 30
+        while not fakes.ENGINES and time.monotonic() < deadline:
+            time.sleep(0.005)
+        if fakes.ENGINES and fakes.ENGINES[-1].generating.wait(30):
+            os.kill(os.getpid(), signal.SIGINT)
+
+    threading.Thread(target=interrupt, daemon=True).start()
+    t0 = time.monotonic()
+    try:
+        result = run(make_config(trainer={"max_steps": 3}, rollout={"async_steps_ahead": 1}))
+    finally:
+        registry.register("rollout_engine", "fake", fakes.FakeEngine, overwrite=True)
+    assert time.monotonic() - t0 < 20.0
+    assert result.state == "cancelled" and result.final_step == 0
+    engine = fakes.ENGINES[-1]
+    assert engine.calls == [] and engine.cancel_calls >= 1  # no generation ran to completion
+    assert engine.shutdown_count >= 1
+    assert read_status(Path(result.run_dir))["state"] == "cancelled"
+    leftovers = ("monorl-episode", "monorl-rollout-producer")
+    assert not [t.name for t in threading.enumerate() if t.name.startswith(leftovers)]

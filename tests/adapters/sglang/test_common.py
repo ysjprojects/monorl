@@ -57,6 +57,7 @@ def test_sampling_dict_maps_every_field_to_pinned_names():
         "repetition_penalty": 1.1,
         "skip_special_tokens": True,
         "stop": ["</s>", "\n\n"],
+        "no_stop_trim": True,  # the text must keep e.g. a closing </tool_call>
     }
     # every key is a real sglang SamplingParams keyword (sampling_params.py @ v0.5.23)
     SglangSamplingParams(**d)
@@ -65,7 +66,7 @@ def test_sampling_dict_maps_every_field_to_pinned_names():
 def test_sampling_dict_top_k_disabled_and_no_stop():
     d = sampling_dict(SamplingParams(top_k=-1, stop=[]))
     assert d["top_k"] == -1
-    assert "stop" not in d
+    assert "stop" not in d and "no_stop_trim" not in d
     assert "sampling_seed" not in d
     assert sampling_dict(SamplingParams(top_k=0))["top_k"] == -1
 

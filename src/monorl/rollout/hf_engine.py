@@ -33,6 +33,7 @@ from transformers import AutoTokenizer, GenerationConfig
 from transformers.generation import StoppingCriteria, StoppingCriteriaList, StopStringCriteria
 
 from monorl.config.schema import RunConfig
+from monorl.core.errors import GenerationCancelled
 from monorl.core.types import Completion, FinishReason, PromptInput, SamplingParams
 from monorl.rollout.media import (
     auto_model_class,
@@ -155,9 +156,28 @@ class _FinishRecorder(StoppingCriteria):
                 self.num_tokens[i] = total_steps
 
 
+class _CancelSwitch(StoppingCriteria):
+    """One per ``generate`` call: once ``cancelled`` is set, every row stops at the next decoding
+    step, so ``model.generate`` unwinds through its normal exit path."""
+
+    def __init__(self) -> None:
+        self.cancelled = False
+
+    def __call__(
+        self, input_ids: torch.LongTensor, scores: torch.FloatTensor, **kwargs: Any
+    ) -> torch.BoolTensor:
+        return torch.full((input_ids.shape[0],), self.cancelled, dtype=torch.bool, device=input_ids.device)
+
+    def check(self) -> None:
+        if self.cancelled:
+            raise GenerationCancelled("generation cancelled")
+
+
 class HFRolloutEngine:
     """Transformers-backed sampler. One model per instance; ``generate`` is serialised by a lock
-    (wrap in :class:`~monorl.rollout.BatchingEngine` to coalesce parallel episodes)."""
+    (wrap in :class:`~monorl.rollout.BatchingEngine` to coalesce parallel episodes). ``cancel()``
+    stops the running ``generate`` within one decoding step and fails the calls waiting for the
+    lock; all of them raise :class:`GenerationCancelled`."""
 
     def __init__(self, config: RunConfig, *, replica: int = 0) -> None:
         self.config = config
@@ -176,13 +196,21 @@ class HFRolloutEngine:
         self.model.to(self.device)
         self.model.eval()
         self.model.requires_grad_(False)
-        self._lock = threading.Lock()
-        self._asleep = False
+        self._init_call_state()
         eos = self.model.generation_config.eos_token_id
         if eos is None:
             eos = self._tokenizer.eos_token_id
         self._eos_ids: list[int] = [eos] if isinstance(eos, int) else list(eos)
         self._pad_id: int = self._tokenizer.pad_token_id
+
+    def _init_call_state(self) -> None:
+        """Locks and per-call bookkeeping ``generate``/``cancel``/``sleep`` rely on. Subclasses that
+        build the engine around an existing model without running ``__init__`` call this instead."""
+        self._lock = threading.Lock()
+        self._calls: set[_CancelSwitch] = set()
+        """Switches of the ``generate`` calls that have not returned yet (running or waiting)."""
+        self._calls_lock = threading.Lock()
+        self._asleep = False
 
     # -- RolloutEngine --------------------------------------------------------------------
     @property
@@ -199,12 +227,27 @@ class HFRolloutEngine:
             return []
         if params.n < 1:
             raise ValueError("SamplingParams.n must be >= 1")
-        encoded = [encode_prompt(p, self._tokenizer, self._processor) for p in prompts]
-        with self._lock:
-            if self._asleep:
-                raise RuntimeError("engine is asleep; call wake_up() before generate()")
-            with self._seeded(params.seed):
-                return self._generate_locked(encoded, params)
+        switch = _CancelSwitch()
+        with self._calls_lock:
+            self._calls.add(switch)
+        try:
+            encoded = [encode_prompt(p, self._tokenizer, self._processor) for p in prompts]
+            with self._lock:
+                if self._asleep:
+                    raise RuntimeError("engine is asleep; call wake_up() before generate()")
+                switch.check()  # cancelled while encoding or waiting for another generate
+                with self._seeded(params.seed):
+                    return self._generate_locked(encoded, params, switch)
+        finally:
+            with self._calls_lock:
+                self._calls.discard(switch)
+
+    def cancel(self) -> None:
+        """Abort the ``generate`` calls in flight (they raise :class:`GenerationCancelled`); a
+        no-op when idle. The engine stays usable: later calls run normally."""
+        with self._calls_lock:
+            for switch in self._calls:
+                switch.cancelled = True
 
     def update_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> None:
         with self._lock, torch.no_grad():
@@ -316,7 +359,7 @@ class HFRolloutEngine:
 
     @torch.no_grad()
     def _generate_locked(
-        self, encoded: list[_EncodedPrompt], params: SamplingParams
+        self, encoded: list[_EncodedPrompt], params: SamplingParams, switch: _CancelSwitch
     ) -> list[list[Completion]]:
         greedy = params.temperature <= 0.0
         n = 1 if greedy else params.n
@@ -336,9 +379,10 @@ class HFRolloutEngine:
             input_ids=input_ids,
             attention_mask=attention_mask,
             generation_config=self._generation_config(params, n // expand),
-            stopping_criteria=StoppingCriteriaList([recorder]),
+            stopping_criteria=StoppingCriteriaList([recorder, switch]),
             **model_kwargs,
         )
+        switch.check()  # the sequences were cut short, not finished
         prompt_width = input_ids.shape[1]
         generated = out.sequences[:, prompt_width:]
         total_steps = generated.shape[1]

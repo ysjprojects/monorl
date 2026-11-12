@@ -11,6 +11,13 @@ Built against SGLang v0.5.23 (``python/sglang/srt/entrypoints/engine.py``):
   output-token logprobs only. ``image_data`` is one entry per request (list of PIL images, or
   ``None`` for text-only requests); ids of multimodal prompts come from the ``AutoProcessor``
   chat template (``monorl.rollout.media``) and are re-expanded by sglang's multimodal processor.
+* ``Engine.generate`` blocks in ``Engine.loop.run_until_complete(...)`` on the caller's thread.
+  :meth:`SGLangEngine.generate` runs the equivalent coroutine ``Engine.async_generate`` (same
+  arguments and result) as a task on that loop instead, so ``cancel()`` can cancel the task from
+  another thread. ``TokenizerManager.generate_request`` (``srt/managers/tokenizer_manager.py``)
+  handles the cancellation itself: its ``except BaseException`` cleanup
+  (``_release_req_states_on_failure``) sends ``abort_request(rid)`` to the scheduler for every
+  request already dispatched and drops the rest.
 * ``Engine.update_weights_from_tensor(named_tensors, load_format=None, flush_cache=True)`` takes
   ``List[Tuple[str, torch.Tensor]]`` and serialises them itself with
   ``MultiprocessingSerializer`` once per TP rank (``_serialize_tensors_per_rank``); returns
@@ -24,6 +31,7 @@ Built against SGLang v0.5.23 (``python/sglang/srt/entrypoints/engine.py``):
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import threading
@@ -46,7 +54,7 @@ from monorl.adapters.sglang.common import (
     is_media_prompt,
 )
 from monorl.config.schema import RunConfig
-from monorl.core.errors import BackendUnavailable, WeightSyncError
+from monorl.core.errors import BackendUnavailable, GenerationCancelled, WeightSyncError
 from monorl.core.types import Completion, PromptInput, SamplingParams
 from monorl.rollout.hf_engine import load_tokenizer
 
@@ -77,6 +85,16 @@ def import_sglang() -> Any:
     return sglang
 
 
+class _GenerateCall:
+    """One ``generate`` call that has not returned yet; fields are guarded by the engine's
+    ``_calls_lock``."""
+
+    def __init__(self) -> None:
+        self.cancelled = False
+        self.task: asyncio.Task[Any] | None = None
+        """The ``Engine.async_generate`` task the call is running, if it got that far."""
+
+
 def _engine_class() -> Any:
     """Import ``Engine`` with the ``sglang`` patchset applied (version-gated, idempotent)."""
     import_sglang()
@@ -105,6 +123,9 @@ class SGLangEngine:
 
     Prompts are tokenised here with the HF tokenizer and always sent as ``input_ids`` so
     multi-turn continuations stay byte-exact and RadixAttention prefix cache hits are maximal.
+
+    ``cancel()`` cancels the running ``generate`` (sglang aborts its requests in the scheduler)
+    and fails the calls waiting for the lock; all of them raise :class:`GenerationCancelled`.
     """
 
     def __init__(self, config: RunConfig, *, replica: int = 0) -> None:
@@ -118,6 +139,8 @@ class SGLangEngine:
         self._sleep_tags: list[str] | None = config.rollout.extra.get("sleep_tags")
         self._kwargs = engine_kwargs(config)
         self._lock = threading.Lock()
+        self._calls: set[_GenerateCall] = set()
+        self._calls_lock = threading.Lock()
         self._asleep = False
         self._closed = False
         log.info("starting sglang Engine replica %d: %s", replica, self._kwargs)
@@ -135,27 +158,56 @@ class SGLangEngine:
     def generate(self, prompts: Sequence[PromptInput], params: SamplingParams) -> list[list[Completion]]:
         if not prompts:
             return []
-        processor = self._load_processor() if any(is_media_prompt(p) for p in prompts) else None
-        encoded = [encode_prompt(self._tokenizer, processor, p) for p in prompts]
-        prompt_ids = [ids for ids, _ in encoded]
-        input_ids, sampling = expand_requests(prompt_ids, params)
-        image_data = expand_image_data([images for _, images in encoded], params)
-        kwargs: dict[str, Any] = {}
-        if image_data is not None:
-            kwargs["image_data"] = image_data
-        with self._lock:
-            if self._asleep:
-                raise RuntimeError("sglang engine is asleep; call wake_up() before generate()")
-            outputs = self._engine.generate(
-                input_ids=input_ids,
-                sampling_params=sampling,
-                return_logprob=params.logprobs,
-                logprob_start_len=-1,
-                **kwargs,
-            )
+        call = _GenerateCall()
+        with self._calls_lock:
+            self._calls.add(call)
+        try:
+            processor = self._load_processor() if any(is_media_prompt(p) for p in prompts) else None
+            encoded = [encode_prompt(self._tokenizer, processor, p) for p in prompts]
+            prompt_ids = [ids for ids, _ in encoded]
+            input_ids, sampling = expand_requests(prompt_ids, params)
+            image_data = expand_image_data([images for _, images in encoded], params)
+            kwargs: dict[str, Any] = {}
+            if image_data is not None:
+                kwargs["image_data"] = image_data
+            with self._lock:
+                if self._asleep:
+                    raise RuntimeError("sglang engine is asleep; call wake_up() before generate()")
+                loop = self._engine.loop
+                with self._calls_lock:
+                    if call.cancelled:  # while encoding or waiting for another generate
+                        raise GenerationCancelled("generation cancelled")
+                    call.task = loop.create_task(
+                        self._engine.async_generate(
+                            input_ids=input_ids,
+                            sampling_params=sampling,
+                            return_logprob=params.logprobs,
+                            logprob_start_len=-1,
+                            **kwargs,
+                        )
+                    )
+                try:
+                    outputs = loop.run_until_complete(call.task)
+                except asyncio.CancelledError:
+                    if call.cancelled:
+                        raise GenerationCancelled("generation cancelled") from None
+                    raise
+        finally:
+            with self._calls_lock:
+                self._calls.discard(call)
         if isinstance(outputs, dict):
             outputs = [outputs]
         return group_outputs(outputs, prompt_ids, params)
+
+    def cancel(self) -> None:
+        """Abort the ``generate`` calls in flight (they raise :class:`GenerationCancelled`); a
+        no-op when idle. The engine stays usable: later calls run normally."""
+        with self._calls_lock:
+            for call in self._calls:
+                call.cancelled = True
+                if call.task is not None:
+                    # The task belongs to the thread running the engine's loop.
+                    call.task.get_loop().call_soon_threadsafe(call.task.cancel)
 
     def update_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> None:
         with self._lock:

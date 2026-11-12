@@ -121,6 +121,7 @@ def test_chat_completion_messages_and_kwargs(image_path: Path) -> None:
     kw = chat_completion_kwargs(SamplingParams(n=3, max_new_tokens=5, top_k=-1, logprobs=True, seed=7))
     assert kw["n"] == 3 and kw["max_completion_tokens"] == 5 and kw["top_k"] == 0 and kw["seed"] == 7
     assert kw["logprobs"] is True and kw["top_logprobs"] == 0 and kw["return_token_ids"] is True
+    assert kw["include_stop_str_in_output"] is True
     assert chat_completion_kwargs(SamplingParams(logprobs=False))["logprobs"] is False
 
 
@@ -259,6 +260,7 @@ def test_client_routes_image_prompts_through_chat_completions(
     out = client.generate(
         [_chat(image_path), text, _chat(image_path)], SamplingParams(n=2, logprobs=True, max_new_tokens=4)
     )
+    client.shutdown()
 
     paths = [r.url.path for r in server.requests]
     assert paths == ["/v1/completions", "/v1/chat/completions", "/v1/chat/completions"]

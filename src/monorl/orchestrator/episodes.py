@@ -21,13 +21,15 @@ environments are rejected.
 
 from __future__ import annotations
 
+import contextlib
+import logging
 import threading
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any
 
-from monorl.core.errors import MonorlError
+from monorl.core.errors import GenerationCancelled, MonorlError
 from monorl.core.interfaces import Environment, RolloutEngine
 from monorl.core.types import (
     Completion,
@@ -40,9 +42,15 @@ from monorl.core.types import (
     messages_have_media,
 )
 
+log = logging.getLogger(__name__)
+
+CANCEL_INTERVAL_S = 0.05
+"""How often ``run_episodes`` re-issues ``engine.cancel()`` while an abort is being carried out."""
+
 
 class EpisodeAborted(MonorlError):
-    """Raised inside an episode when the abort event is set (async producer shutdown)."""
+    """Raised inside an episode when the abort event is set (async producer shutdown, cancelled
+    sampling stage) or its ``generate`` call was cancelled."""
 
 
 def chat_prompt_ids(tokenizer: Any, messages: Sequence[Message], tools: Any = None) -> list[int]:
@@ -77,7 +85,8 @@ def run_episode(
     env = env_factory()
     try:
         messages: list[Message] = list(env.reset(spec.sample))
-        tools = getattr(env, "tools", None)
+        # ``[]`` (remote/OpenEnv environments without tools) means no tool schemas, like ``None``.
+        tools = getattr(env, "tools", None) or None
         max_turns = max(1, int(getattr(env, "max_turns", 1)))
         turns: list[Turn] = []
         done = False
@@ -94,7 +103,10 @@ def run_episode(
                 prompt = list(messages)
             else:
                 prompt = chat_prompt_ids(tokenizer, messages, tools)
-            completion = spec.engine.generate([prompt], params)[0][0]
+            try:
+                completion = spec.engine.generate([prompt], params)[0][0]
+            except GenerationCancelled as e:
+                raise EpisodeAborted(f"episode {spec.group_id} aborted during generation") from e
             if completion.prompt_token_ids is not None:
                 prompt_ids = list(completion.prompt_token_ids)
             elif isinstance(prompt[0], dict):
@@ -139,21 +151,63 @@ def run_episodes(
     """Run every spec to completion, ``max_parallel`` episodes at a time; order is preserved.
 
     The first episode failure is re-raised after the other in-flight episodes finish.
+
+    Once ``abort`` is set the episodes raise :class:`EpisodeAborted`: at their next turn boundary,
+    or straight out of a ``generate`` call in flight when the spec's engine implements ``cancel()``
+    (see :class:`~monorl.core.interfaces.RolloutEngine`). ``cancel()`` aborts every call in flight
+    on that engine, so an engine must not be shared with work that is meant to outlive the abort.
+    An ``env.step`` in flight finishes first. Either way this returns or raises only after every
+    episode thread has ended and every environment is closed.
     """
     if not specs:
         return []
     workers = max(1, min(int(max_parallel), len(specs)))
     kwargs = {"env_factory": env_factory, "tokenizer": tokenizer, "params": params, "abort": abort}
-    if workers == 1:
-        return [run_episode(spec, **kwargs) for spec in specs]
-    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="monorl-episode") as pool:
-        futures = [pool.submit(run_episode, spec, **kwargs) for spec in specs]
-        try:
-            return [f.result() for f in futures]
-        except BaseException:
-            for f in futures:
-                f.cancel()
-            raise
+    with _cancel_generation_on_abort(specs, abort):
+        if workers == 1:
+            return [run_episode(spec, **kwargs) for spec in specs]
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="monorl-episode") as pool:
+            futures = [pool.submit(run_episode, spec, **kwargs) for spec in specs]
+            try:
+                return [f.result() for f in futures]
+            except BaseException:
+                for f in futures:
+                    f.cancel()
+                raise
+
+
+@contextlib.contextmanager
+def _cancel_generation_on_abort(
+    specs: Sequence[EpisodeSpec], abort: threading.Event | None
+) -> Iterator[None]:
+    """While the block runs, a watcher thread answers ``abort`` by calling ``cancel()`` on each
+    distinct engine that has one — and keeps calling it every :data:`CANCEL_INTERVAL_S`, because an
+    episode that was between two checks submits its next ``generate`` after the first cancel. The
+    watcher has ended when the block exits, so no cancel can hit a later caller of the engines."""
+    engines = list({id(s.engine): s.engine for s in specs if hasattr(s.engine, "cancel")}.values())
+    if abort is None or not engines:
+        yield
+        return
+    finished = threading.Event()
+
+    def watch() -> None:
+        while not finished.wait(CANCEL_INTERVAL_S):
+            if not abort.is_set():
+                continue
+            for engine in list(engines):
+                try:
+                    engine.cancel()
+                except Exception:  # noqa: BLE001 - the abort still takes effect at turn boundaries
+                    log.exception("%s.cancel() failed; not cancelling it again", type(engine).__name__)
+                    engines.remove(engine)
+
+    watcher = threading.Thread(target=watch, name="monorl-episode-cancel", daemon=True)
+    watcher.start()
+    try:
+        yield
+    finally:
+        finished.set()
+        watcher.join()
 
 
 def _assistant_message(completion: Completion) -> Message:

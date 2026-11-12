@@ -6,10 +6,19 @@ Shapes are copied from the upstream files cited next to each class; nothing here
 
 from __future__ import annotations
 
+import itertools
+import queue
+import select
+import socket
+import threading
+import time
 import types
+from collections.abc import Callable
 from dataclasses import dataclass, field
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
+import httpx
 import torch
 
 from monorl.adapters.vllm.worker import MonorlWorkerExtension
@@ -68,6 +77,7 @@ class SamplingParams:
     stop: str | list[str] | None = None
     stop_token_ids: list[int] | None = None
     ignore_eos: bool = False
+    include_stop_str_in_output: bool = False
     max_tokens: int | None = 16
     min_tokens: int = 0
     logprobs: int | None = None
@@ -208,16 +218,53 @@ class _VllmConfig:
 
 
 class FakeLLMEngine:
+    """``LLMEngine`` (vllm/v1/engine/llm_engine.py:54): the request queue behind ``LLM.enqueue``
+    with ``has_unfinished_requests`` (:203), ``step`` (:319) and ``abort_request`` (:224).
+
+    ``step`` finishes one request per call, newest first (upstream promises no order). While
+    ``hold`` is set it finishes none, like a step in the middle of a long generation, and sets
+    ``stepping``.
+    """
+
     def __init__(self, enable_sleep_mode: bool) -> None:
         self.vllm_config = _VllmConfig(_ModelConfig(enable_sleep_mode))
         self.engine_core = FakeEngineCore()
+        self.unfinished: dict[str, RequestOutput] = {}  # internal request id -> its final output
+        self.aborted: list[str] = []  # internal ids removed by abort_request
+        self.hold = False
+        self.stepping = threading.Event()
+
+    def has_unfinished_requests(self) -> bool:
+        return bool(self.unfinished)
+
+    def step(self) -> list[RequestOutput]:
+        if self.hold:
+            self.stepping.set()
+            time.sleep(0.001)
+            return []
+        return [self.unfinished.popitem()[1]]
+
+    def abort_request(self, request_ids: list[str], internal: bool = False) -> None:
+        # OutputProcessor.abort_requests (vllm/v1/engine/output_processor.py:599): ``internal``
+        # ids are the ones add_request returned; otherwise they are matched as external ids.
+        for request_id in request_ids:
+            matched = (
+                [request_id]
+                if internal
+                else [k for k, out in self.unfinished.items() if out.request_id == request_id]
+            )
+            for key in matched:
+                if self.unfinished.pop(key, None) is not None:
+                    self.aborted.append(key)
 
 
 class FakeLLM:
     """``vllm.LLM`` (vllm/entrypoints/llm.py:62): records constructor kwargs and every call.
 
-    ``generate`` is deterministic: completion ``i`` of prompt ``p`` emits ``script`` tokens
-    (``[p, i, 7]``) with logprob ``-(k+1)/10`` and finish reason from ``finish_reasons``.
+    ``enqueue`` (:483) is deterministic: completion ``i`` of prompt ``p`` will emit ``script``
+    tokens (``[p, i, 7]``) with logprob ``-(k+1)/10`` and finish reason from ``finish_reasons``.
+    Like upstream it returns the engine's internal request ids (``<counter>-<suffix>``,
+    ``InputProcessor.assign_request_id``) while ``RequestOutput.request_id`` is the counter value.
     """
 
     instances: list[FakeLLM] = []
@@ -230,16 +277,24 @@ class FakeLLM:
         tp = int(kwargs.get("tensor_parallel_size", 1))
         self.workers = [_make_worker(r) for r in range(tp)]
         self.llm_engine = FakeLLMEngine(bool(kwargs.get("enable_sleep_mode", False)))
+        self.request_counter = itertools.count()
         self.calls: list[tuple[str, Any]] = []
         FakeLLM.instances.append(self)
 
-    def generate(
-        self, prompts: Any, sampling_params: Any = None, *, use_tqdm: Any = True, **kw: Any
-    ) -> list[Any]:
+    def enqueue(
+        self,
+        prompts: Any,
+        sampling_params: Any = None,
+        lora_request: Any = None,
+        priority: Any = None,
+        use_tqdm: Any = True,
+        tokenization_kwargs: Any = None,
+        mm_processor_kwargs: Any = None,
+    ) -> list[str]:
         self.calls.append(
-            ("generate", {"prompts": prompts, "sampling_params": sampling_params, "use_tqdm": use_tqdm})
+            ("enqueue", {"prompts": prompts, "sampling_params": sampling_params, "use_tqdm": use_tqdm})
         )
-        outs = []
+        request_ids = []
         for p, prompt in enumerate(prompts):
             comps = []
             for i in range(sampling_params.n):
@@ -255,8 +310,12 @@ class FakeLLM:
                 fr = FakeLLM.finish_reasons[(p * sampling_params.n + i) % len(FakeLLM.finish_reasons)]
                 comps.append(CompletionOutput(i, f"text-{p}-{i}", token_ids, None, lps, fr))
             comps.reverse()  # upstream order is not guaranteed; the adapter must sort by index
-            outs.append(RequestOutput(f"req-{p}", None, list(prompt["prompt_token_ids"]), None, comps, True))
-        return outs
+            external_id = str(next(self.request_counter))
+            request_ids.append(f"{external_id}-{int(external_id):08x}")
+            self.llm_engine.unfinished[request_ids[-1]] = RequestOutput(
+                external_id, None, list(prompt["prompt_token_ids"]), None, comps, True
+            )
+        return request_ids
 
     def collective_rpc(
         self, method: str, timeout: float | None = None, args: tuple = (), kwargs: dict | None = None
@@ -294,6 +353,59 @@ class FakePlatform:
 def register_api_routers(args: Any, app: Any, supported_tasks: Any, model_config: Any = None) -> None:
     """vllm/entrypoints/launchers/api_server/routers.py:12, bound by name in launchers/app.py:15."""
     app.state.registered = (args, supported_tasks, model_config)
+
+
+class LoopbackServer:
+    """Serves an ``httpx.MockTransport``-style ``handler`` on 127.0.0.1, to observe what a real
+    server sees when the client drops a request.
+
+    While ``stall`` is set a POST is read and left unanswered, as during a long generation: its
+    path goes on ``stalled`` at once and on ``disconnects`` when the client closes the connection
+    — the ``http.disconnect`` vLLM's ``with_cancellation`` aborts the generation on.
+    """
+
+    def __init__(self, handler: Callable[[httpx.Request], httpx.Response]) -> None:
+        self.stall = False
+        self.stalled: queue.Queue[str] = queue.Queue()
+        self.disconnects: queue.Queue[str] = queue.Queue()
+        owner = self
+
+        class Handler(BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
+            def log_message(self, format: str, *args: Any) -> None:
+                pass
+
+            def do_POST(self) -> None:
+                body = self.rfile.read(int(self.headers.get("content-length", 0)))
+                if owner.stall:
+                    owner.stalled.put(self.path)
+                    self.close_connection = True
+                    readable, _, _ = select.select([self.connection], [], [], 10)
+                    try:  # end of stream (or a reset) while no request is pending: the client left
+                        gone = bool(readable) and self.connection.recv(1, socket.MSG_PEEK) == b""
+                    except ConnectionError:
+                        gone = True
+                    if gone:
+                        owner.disconnects.put(self.path)
+                    return
+                url = f"http://{self.headers['host']}{self.path}"
+                response = handler(httpx.Request("POST", url, headers=dict(self.headers), content=body))
+                self.send_response(response.status_code)
+                self.send_header("content-type", response.headers.get("content-type", "text/plain"))
+                self.send_header("content-length", str(len(response.content)))
+                self.end_headers()
+                self.wfile.write(response.content)
+
+        self._httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.url = f"http://127.0.0.1:{self._httpd.server_address[1]}"
+        self._thread = threading.Thread(target=self._httpd.serve_forever, args=(0.01,), daemon=True)
+        self._thread.start()
+
+    def close(self) -> None:
+        self._httpd.shutdown()
+        self._thread.join()
+        self._httpd.server_close()
 
 
 def build_fake_vllm() -> dict[str, types.ModuleType]:

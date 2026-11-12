@@ -5,9 +5,16 @@ Built against vLLM v0.33.0:
 * ``vllm/entrypoints/llm.py`` ``LLM(model, *, tokenizer, trust_remote_code, tensor_parallel_size,
   dtype, revision, seed, gpu_memory_utilization, **EngineArgs)`` — ``max_model_len``,
   ``enable_sleep_mode``, ``worker_extension_cls``, ``logprobs_mode`` are ``EngineArgs`` fields
-  (``vllm/engine/arg_utils.py``). ``LLM.generate(prompts, sampling_params, use_tqdm=...)``,
-  ``LLM.collective_rpc(method, timeout, args, kwargs)``, ``LLM.sleep(level, mode)``,
-  ``LLM.wake_up(tags)``, ``LLM.reset_prefix_cache()``.
+  (``vllm/engine/arg_utils.py``). ``LLM.collective_rpc(method, timeout, args, kwargs)``,
+  ``LLM.sleep(level, mode)``, ``LLM.wake_up(tags)``, ``LLM.reset_prefix_cache()``.
+* ``LLM.generate`` is ``LLM.enqueue(prompts, sampling_params, use_tqdm=...)`` (returns the engine
+  request ids) followed by ``OfflineInferenceMixin._run_engine``
+  (``vllm/entrypoints/common/offline.py``): ``while llm_engine.has_unfinished_requests():
+  llm_engine.step()``, finished outputs sorted by ``int(request_id)``. That loop cannot be
+  interrupted and ``LLMEngine`` is not thread-safe, so :meth:`VllmEngine.generate` enqueues and
+  drives the same loop itself; between two steps it honours ``cancel()`` with
+  ``LLMEngine.abort_request(request_ids, internal=True)`` (``vllm/v1/engine/llm_engine.py``), the
+  call upstream uses to roll back a failed enqueue.
 * ``vllm/inputs/llm.py`` ``TokensPrompt(prompt_token_ids=..., multi_modal_data={"image": [...]})``;
   multimodal chats are tokenised with the model's ``AutoProcessor`` chat template (same recipe as
   ``monorl.rollout.hf_engine``) so the ids carry the image placeholder tokens vLLM expands.
@@ -45,7 +52,7 @@ from monorl.adapters.vllm.common import (
     tokens_prompt_kwargs,
 )
 from monorl.config.schema import RunConfig
-from monorl.core.errors import BackendUnavailable
+from monorl.core.errors import BackendUnavailable, GenerationCancelled
 from monorl.core.types import Completion, PromptInput, SamplingParams
 
 log = logging.getLogger(__name__)
@@ -86,6 +93,10 @@ class VllmEngine:
     ``processed_logprobs`` so logprobs reflect temperature/top-p, as TRL does),
     plus an ``engine_kwargs`` dict passed verbatim to ``vllm.LLM``. ``limit_mm_per_prompt``
     (``{"image": N}`` or an int) bounds images per prompt for VLM runs.
+
+    ``cancel()`` stops the running ``generate`` within one engine step (its requests are aborted
+    in the engine) and fails the calls waiting for the lock; all of them raise
+    :class:`GenerationCancelled`.
     """
 
     def __init__(self, config: RunConfig, *, replica: int = 0) -> None:
@@ -107,6 +118,9 @@ class VllmEngine:
         self._processor: Any | None = None  # AutoProcessor, loaded on the first multimodal prompt
         self._processor_loaded = False
         self._lock = threading.RLock()
+        self._calls: set[threading.Event] = set()
+        """Cancel flags of the ``generate`` calls that have not returned yet (running or waiting)."""
+        self._calls_lock = threading.Lock()
         self._chunk_bytes = int(extra.get("chunk_bytes", 512 * 1024 * 1024))
         self._sleep_level = int(extra.get("sleep_level", 1))
         self._sleep_enabled = bool(config.rollout.enable_sleep_mode) and bool(
@@ -155,14 +169,23 @@ class VllmEngine:
             return []
         from vllm.inputs import TokensPrompt
 
-        processor = self._load_processor() if any(is_media_prompt(p) for p in prompts) else None
-        encoded = [encode_prompt(self._tokenizer, processor, p) for p in prompts]
-        ids = [e[0] for e in encoded]
-        vllm_prompts = [TokensPrompt(**tokens_prompt_kwargs(p_ids, images)) for p_ids, images in encoded]
-        sp = self._vllm.SamplingParams(**sampling_kwargs(params))
-        with self._lock:
-            self._wake(_ALL_TAGS)
-            outputs = self._llm.generate(vllm_prompts, sampling_params=sp, use_tqdm=False)
+        cancelled = threading.Event()
+        with self._calls_lock:
+            self._calls.add(cancelled)
+        try:
+            processor = self._load_processor() if any(is_media_prompt(p) for p in prompts) else None
+            encoded = [encode_prompt(self._tokenizer, processor, p) for p in prompts]
+            ids = [e[0] for e in encoded]
+            vllm_prompts = [TokensPrompt(**tokens_prompt_kwargs(p_ids, images)) for p_ids, images in encoded]
+            sp = self._vllm.SamplingParams(**sampling_kwargs(params))
+            with self._lock:
+                if cancelled.is_set():  # while encoding or waiting for another generate
+                    raise GenerationCancelled("generation cancelled")
+                self._wake(_ALL_TAGS)
+                outputs = self._run(vllm_prompts, sp, cancelled)
+        finally:
+            with self._calls_lock:
+                self._calls.discard(cancelled)
         if len(outputs) != len(prompts):
             raise RuntimeError(f"vllm returned {len(outputs)} outputs for {len(prompts)} prompts")
         result: list[list[Completion]] = []
@@ -172,6 +195,13 @@ class VllmEngine:
                 raise RuntimeError(f"vllm returned {len(comps)} completions for n={params.n}")
             result.append(comps)
         return result
+
+    def cancel(self) -> None:
+        """Abort the ``generate`` calls in flight (they raise :class:`GenerationCancelled`); a
+        no-op when idle. The engine stays usable: later calls run normally."""
+        with self._calls_lock:
+            for cancelled in self._calls:
+                cancelled.set()
 
     def update_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> None:
         with self._lock:
@@ -212,6 +242,21 @@ class VllmEngine:
             torch.cuda.empty_cache()
 
     # -- internals ------------------------------------------------------------------------
+    def _run(self, prompts: list[Any], sampling_params: Any, cancelled: threading.Event) -> list[Any]:
+        """``LLM.generate`` with a cancellation point between engine steps: the finished
+        ``RequestOutput`` per prompt, in prompt order."""
+        engine = self._llm.llm_engine
+        request_ids = self._llm.enqueue(prompts, sampling_params=sampling_params, use_tqdm=False)
+        outputs: list[Any] = []
+        while engine.has_unfinished_requests():
+            if cancelled.is_set():
+                engine.abort_request(request_ids, internal=True)
+                raise GenerationCancelled("generation cancelled")
+            outputs.extend(out for out in engine.step() if out.finished)
+        # Requests finish in any order; ids come from the LLM's request counter.
+        outputs.sort(key=lambda out: int(out.request_id))
+        return outputs
+
     def _wake(self, tags: tuple[str, ...]) -> None:
         """Re-map only the memory tags that are currently released."""
         pending = [t for t in tags if t in self._sleeping_tags]

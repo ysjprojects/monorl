@@ -5,16 +5,17 @@ from __future__ import annotations
 import base64
 import json
 import pickle
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Any
 
 import httpx
 import pytest
 import torch
-from fake_sglang import make_config
+from fake_sglang import LoopbackServer, make_config
 
 from monorl.adapters.sglang.client import SGLangServerClient
-from monorl.core.errors import ConfigError, WeightSyncError
+from monorl.core.errors import ConfigError, GenerationCancelled, WeightSyncError
 from monorl.core.interfaces import RolloutEngine
 from monorl.core.types import SamplingParams
 
@@ -89,6 +90,16 @@ def client(server, run_config_dict):
     c.shutdown()
 
 
+@pytest.fixture
+def loopback(server, run_config_dict):
+    """A client talking to ``server`` over a real loopback connection."""
+    web = LoopbackServer(server.handler)
+    c = SGLangServerClient(make_config(run_config_dict, extra={"mode": "server", "url": web.url}))
+    yield web, c
+    c.shutdown()
+    web.close()
+
+
 def test_client_is_rollout_engine_and_needs_url(client, run_config_dict):
     assert isinstance(client, RolloutEngine)
     assert client.url == "http://sgl.test:30000"
@@ -122,6 +133,7 @@ def test_generate_request_body_chat_and_tokens(client, server):
                 "repetition_penalty": 1.0,
                 "skip_special_tokens": True,
                 "stop": ["x"],
+                "no_stop_trim": True,
             }
         ]
         * 2
@@ -150,6 +162,31 @@ def test_generate_length_and_error_status(client, server):
     assert client.generate([], SamplingParams()) == []
 
 
+def test_cancel_disconnects_every_running_generate_request(loopback):
+    web, client = loopback
+    web.stall = True  # the server holds the requests: long generations
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        running = [pool.submit(client.generate, [[1, 2]], SamplingParams(n=1)) for _ in range(2)]
+        assert [web.stalled.get(timeout=5) for _ in running] == ["/generate"] * 2
+        client.cancel()
+        client.cancel()  # repeated calls are harmless
+        for call in running:
+            with pytest.raises(GenerationCancelled):
+                call.result(timeout=5)
+    # the server saw both clients leave
+    assert [web.disconnects.get(timeout=5) for _ in running] == ["/generate"] * 2
+    web.stall = False
+    groups = client.generate([[1, 2, 3]], SamplingParams(n=2))
+    assert [c.text for c in groups[0]] == ["t00", "t01"]
+
+
+def test_cancel_while_idle_does_not_affect_the_next_generate(loopback):
+    _, client = loopback
+    client.cancel()
+    groups = client.generate([[1, 2, 3]], SamplingParams(n=2))
+    assert [c.prompt_token_ids for c in groups[0]] == [[1, 2, 3], [1, 2, 3]]
+
+
 def test_update_weights_posts_base64_payload_per_rank_then_flushes(client, server):
     w = torch.arange(4, dtype=torch.float32)
     client.update_weights([("layer.w", w)])
@@ -171,6 +208,7 @@ def test_update_weights_buckets(server, run_config_dict):
     cfg = make_config(run_config_dict, extra={"mode": "server", "url": "http://s", "bucket_bytes": 8})
     c = SGLangServerClient(cfg, transport=httpx.MockTransport(server.handler))
     c.update_weights([(f"w{i}", torch.zeros(2, dtype=torch.float32)) for i in range(3)])
+    c.shutdown()
     assert server.paths() == ["/get_server_info"] + ["/update_weights_from_tensor"] * 3 + ["/flush_cache"]
 
 
@@ -218,6 +256,8 @@ def test_sleep_tags_and_disabled(server, run_config_dict):
     off.sleep()
     off.wake_up()
     assert len(server.requests) == n
+    c.shutdown()
+    off.shutdown()
 
 
 def test_server_info_and_tp_fallback(server, run_config_dict):
@@ -233,3 +273,5 @@ def test_server_info_and_tp_fallback(server, run_config_dict):
     c2 = SGLangServerClient(cfg, transport=httpx.MockTransport(no_tp))
     c2.update_weights([("w", torch.zeros(1))])
     assert len(server.requests[-2][2]["serialized_named_tensors"]) == 3
+    c.shutdown()
+    c2.shutdown()

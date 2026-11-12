@@ -231,3 +231,20 @@ def test_multimodal_episode_rejects_tool_schemas(make_config: Any) -> None:
             tokenizer=engine.tokenizer,
             params=SamplingParams(n=1),
         )
+
+
+def test_multimodal_episode_runs_against_env_with_empty_tool_list(make_config: Any) -> None:
+    """Remote and OpenEnv environments expose ``tools = []`` when they define none."""
+    cfg = make_config(
+        env={"type": "fake_multi", "max_turns": 2, "params": {"tools": []}},
+        rollout={"extra": {"fake_mode": "always_right"}},
+    )
+    engine = _RecordingEngine(fakes.FakeEngine(cfg))
+    traj = run_episode(
+        EpisodeSpec(sample=_image_sample(), group_id="g", engine=engine),
+        env_factory=lambda: fakes.FakeMultiTurnEnv(cfg),
+        tokenizer=engine.tokenizer,
+        params=SamplingParams(n=1),
+    )
+    assert len(traj.turns) == 2
+    assert engine.prompt_kinds == ["chat", "chat"]

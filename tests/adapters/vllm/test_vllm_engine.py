@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import os
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 import torch
@@ -10,7 +11,7 @@ from vllm_fakes import GPU_WORKER_ATTRS, CompletionOutput, FakeLLM, FakePlatform
 from monorl.adapters.vllm.common import WORKER_EXTENSION_CLS, chunk_weights, sampling_kwargs
 from monorl.adapters.vllm.worker import MonorlWorkerExtension
 from monorl.config.schema import RunConfig
-from monorl.core.errors import BackendUnavailable, ConfigError
+from monorl.core.errors import BackendUnavailable, ConfigError, GenerationCancelled
 from monorl.core.interfaces import RolloutEngine
 from monorl.core.registry import registry
 from monorl.core.types import SamplingParams
@@ -101,6 +102,7 @@ def test_sampling_param_mapping(fake_vllm, vllm_config: RunConfig) -> None:
     assert sp.top_k == 0  # -1 (monorl "off") -> 0 (vLLM "off")
     assert sp.min_p == 0.05 and sp.repetition_penalty == 1.1
     assert sp.stop == ["</s>", "\n\n"] and sp.seed == 5
+    assert sp.include_stop_str_in_output is True  # the text must keep e.g. a closing </tool_call>
     assert sp.logprobs == 0  # sampled-token logprob only
     assert sampling_kwargs(SamplingParams(top_k=40, logprobs=False))["top_k"] == 40
     assert sampling_kwargs(SamplingParams(logprobs=False))["logprobs"] is None
@@ -149,7 +151,36 @@ def test_finish_reason_mapping(fake_vllm, vllm_config: RunConfig) -> None:
 def test_generate_empty(fake_vllm, vllm_config: RunConfig) -> None:
     eng = _engine(vllm_config)
     assert eng.generate([], SamplingParams()) == []
-    assert "generate" not in FakeLLM.instances[-1].names()
+    assert "enqueue" not in FakeLLM.instances[-1].names()
+
+
+# -- cancel ---------------------------------------------------------------------------------------
+
+
+def test_cancel_aborts_running_generate_in_the_engine(fake_vllm, vllm_config: RunConfig) -> None:
+    eng = _engine(vllm_config)
+    core = FakeLLM.instances[-1].llm_engine
+    core.hold = True  # engine steps finish nothing: a long generation
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        running = pool.submit(eng.generate, [[1], [2]], SamplingParams(n=2))
+        assert core.stepping.wait(5)
+        eng.cancel()
+        eng.cancel()  # repeated calls are harmless
+        with pytest.raises(GenerationCancelled):
+            running.result(timeout=5)
+    assert len(core.aborted) == 2 and not core.has_unfinished_requests()
+    # the engine is clean: the next call gets its own outputs only
+    core.hold = False
+    out = eng.generate([[9], [8]], SamplingParams(n=1))
+    assert [[c.prompt_token_ids for c in group] for group in out] == [[[9]], [[8]]]
+
+
+def test_cancel_while_idle_does_not_affect_the_next_generate(fake_vllm, vllm_config: RunConfig) -> None:
+    eng = _engine(vllm_config)
+    eng.cancel()
+    out = eng.generate([[5, 6]], SamplingParams(n=2))
+    assert [c.text for c in out[0]] == ["text-0-0", "text-0-1"]
+    assert FakeLLM.instances[-1].llm_engine.aborted == []
 
 
 # -- weights --------------------------------------------------------------------------------------

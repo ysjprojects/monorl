@@ -19,10 +19,20 @@ Endpoints used (vLLM v0.33.0 unless noted):
   (``vllm/entrypoints/serve/dev/sleep/api_router.py``, enabled by ``VLLM_SERVER_DEV_MODE=1``).
 * ``POST /reset_prefix_cache`` (``vllm/entrypoints/serve/dev/cache/api_router.py``).
 * ``POST /update_named_param``, ``POST /load_weights_from_path`` — monorl additions.
+
+``cancel()`` relies on the server dropping a generation whose client went away: both completion
+routes are wrapped in ``with_cancellation`` (``vllm/entrypoints/serve/utils/api_utils.py``), which
+cancels the handler on ``http.disconnect``, and ``AsyncLLM.generate``
+(``vllm/v1/engine/async_llm.py``) aborts its request in the engine when it is cancelled. The
+requests therefore run as tasks of an ``httpx.AsyncClient`` on a private event-loop thread:
+cancelling a task closes its connection, which a thread blocked in a synchronous ``httpx.Client``
+call could not be made to do.
 """
 
 from __future__ import annotations
 
+import asyncio
+import concurrent.futures
 import logging
 import os
 import threading
@@ -44,7 +54,7 @@ from monorl.adapters.vllm.common import (
     tensor_to_bytes,
 )
 from monorl.config.schema import RunConfig
-from monorl.core.errors import ConfigError
+from monorl.core.errors import ConfigError, GenerationCancelled
 from monorl.core.types import Completion, PromptInput, SamplingParams
 
 log = logging.getLogger(__name__)
@@ -69,11 +79,25 @@ def server_url(config: RunConfig, replica: int) -> str:
     return str(url).rstrip("/")
 
 
+class _GenerateCall:
+    """One ``generate`` call that has not returned yet; fields are guarded by the client's
+    ``_calls_lock``."""
+
+    def __init__(self) -> None:
+        self.cancelled = False
+        self.request: concurrent.futures.Future[httpx.Response] | None = None
+        """The HTTP request the call is blocked on, if any."""
+
+
 class VllmServerClient:
     """``rollout_engine: vllm`` with ``rollout.extra.mode='server'``.
 
     ``rollout.extra`` keys: ``url``/``urls``, ``model_name`` (served model name, defaults to
     ``model.name_or_path``), ``timeout`` seconds per request (default: none), ``sleep_level``.
+
+    ``cancel()`` disconnects the completion requests in flight, which makes the server abort
+    their generation, and fails the ``generate`` calls waiting for the lock; all of them raise
+    :class:`GenerationCancelled`.
     """
 
     def __init__(
@@ -81,7 +105,7 @@ class VllmServerClient:
         config: RunConfig,
         *,
         replica: int = 0,
-        transport: httpx.BaseTransport | None = None,
+        transport: httpx.AsyncBaseTransport | None = None,
         tokenizer: Any | None = None,
     ) -> None:
         extra = config.rollout.extra
@@ -90,18 +114,25 @@ class VllmServerClient:
         self._model_name = str(extra.get("model_name") or config.model.name_or_path)
         self._sleep_level = int(extra.get("sleep_level", 1))
         self._sleep_enabled = bool(config.rollout.enable_sleep_mode)
-        timeout = extra.get("timeout")
-        self._client = httpx.Client(
-            base_url=self._url,
-            timeout=httpx.Timeout(None if timeout is None else float(timeout)),
-            transport=transport,
-        )
         if tokenizer is None:
             from monorl.rollout.hf_engine import load_tokenizer
 
             tokenizer = load_tokenizer(config)
         self._tokenizer = tokenizer
+        timeout = extra.get("timeout")
+        self._client = httpx.AsyncClient(
+            base_url=self._url,
+            timeout=httpx.Timeout(None if timeout is None else float(timeout)),
+            transport=transport,
+        )
+        self._loop = asyncio.new_event_loop()
+        self._loop_thread = threading.Thread(
+            target=self._loop.run_forever, name=f"monorl-vllm-client-{replica}", daemon=True
+        )
+        self._loop_thread.start()
         self._lock = threading.RLock()
+        self._calls: set[_GenerateCall] = set()
+        self._calls_lock = threading.Lock()
         self._sleeping_tags: set[str] = set()  # vLLM memory tags currently released
 
     # -- RolloutEngine --------------------------------------------------------------------
@@ -119,33 +150,49 @@ class VllmServerClient:
         text_idx = [i for i, p in enumerate(prompts) if not is_media_prompt(p)]
         media_idx = [i for i, p in enumerate(prompts) if is_media_prompt(p)]
         result: list[list[Completion] | None] = [None] * len(prompts)
-        with self._lock:
-            self._wake(_ALL_TAGS)
-            if text_idx:
-                ids = [prompt_token_ids(self._tokenizer, prompts[i]) for i in text_idx]
-                body: dict[str, Any] = {
-                    "model": self._model_name,
-                    "prompt": ids,
-                    "return_token_ids": True,
-                    **sampling_kwargs(params),
-                }
-                resp = self._post("/v1/completions", json=body)
-                grouped = completions_from_choices(
-                    resp.json()["choices"], ids, params.n, want_logprobs=params.logprobs
-                )
-                for i, comps in zip(text_idx, grouped, strict=True):
-                    result[i] = comps
-            for i in media_idx:
-                body = {
-                    "model": self._model_name,
-                    "messages": chat_completion_messages(prompts[i]),  # type: ignore[arg-type]
-                    **chat_completion_kwargs(params),
-                }
-                resp = self._post("/v1/chat/completions", json=body)
-                result[i] = completions_from_chat_response(
-                    resp.json(), params.n, want_logprobs=params.logprobs
-                )
+        call = _GenerateCall()
+        with self._calls_lock:
+            self._calls.add(call)
+        try:
+            with self._lock:
+                self._wake(_ALL_TAGS)
+                if text_idx:
+                    ids = [prompt_token_ids(self._tokenizer, prompts[i]) for i in text_idx]
+                    body: dict[str, Any] = {
+                        "model": self._model_name,
+                        "prompt": ids,
+                        "return_token_ids": True,
+                        **sampling_kwargs(params),
+                    }
+                    resp = self._post("/v1/completions", call=call, json=body)
+                    grouped = completions_from_choices(
+                        resp.json()["choices"], ids, params.n, want_logprobs=params.logprobs
+                    )
+                    for i, comps in zip(text_idx, grouped, strict=True):
+                        result[i] = comps
+                for i in media_idx:
+                    body = {
+                        "model": self._model_name,
+                        "messages": chat_completion_messages(prompts[i]),  # type: ignore[arg-type]
+                        **chat_completion_kwargs(params),
+                    }
+                    resp = self._post("/v1/chat/completions", call=call, json=body)
+                    result[i] = completions_from_chat_response(
+                        resp.json(), params.n, want_logprobs=params.logprobs
+                    )
+        finally:
+            with self._calls_lock:
+                self._calls.discard(call)
         return [r for r in result if r is not None]
+
+    def cancel(self) -> None:
+        """Abort the ``generate`` calls in flight (they raise :class:`GenerationCancelled`); a
+        no-op when idle. The client stays usable: later calls run normally."""
+        with self._calls_lock:
+            for call in self._calls:
+                call.cancelled = True
+                if call.request is not None:
+                    call.request.cancel()
 
     def update_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> None:
         with self._lock:
@@ -186,7 +233,12 @@ class VllmServerClient:
             self._wake(_ALL_TAGS)
 
     def shutdown(self) -> None:
-        self._client.close()
+        if self._loop.is_closed():
+            return
+        asyncio.run_coroutine_threadsafe(self._client.aclose(), self._loop).result()
+        self._loop.call_soon_threadsafe(self._loop.stop)
+        self._loop_thread.join()
+        self._loop.close()
 
     # -- internals ------------------------------------------------------------------------
     def _wake(self, tags: tuple[str, ...]) -> None:
@@ -198,8 +250,22 @@ class VllmServerClient:
         self._post("/wake_up", params=[("tags", t) for t in pending])
         self._sleeping_tags.difference_update(pending)
 
-    def _post(self, path: str, **kwargs: Any) -> httpx.Response:
-        resp = self._client.post(path, **kwargs)
+    def _post(self, path: str, *, call: _GenerateCall | None = None, **kwargs: Any) -> httpx.Response:
+        """POST on the client's event loop and wait for the response. With ``call`` the request
+        belongs to that ``generate`` call and :meth:`cancel` can abandon it."""
+        with self._calls_lock:
+            if call is not None and call.cancelled:
+                raise GenerationCancelled("generation cancelled")
+            request = asyncio.run_coroutine_threadsafe(self._client.post(path, **kwargs), self._loop)
+            if call is not None:
+                call.request = request
+        try:
+            resp = request.result()
+        except concurrent.futures.CancelledError:  # only cancel() cancels a request
+            raise GenerationCancelled("generation cancelled") from None
+        except BaseException:
+            request.cancel()  # interrupted while waiting (KeyboardInterrupt): drop the request too
+            raise
         if resp.status_code >= 400:
             raise RuntimeError(f"vLLM server {self._url}{path} -> {resp.status_code}: {resp.text[:500]}")
         return resp

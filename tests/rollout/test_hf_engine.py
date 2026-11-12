@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -7,6 +9,7 @@ import torch
 from transformers import AutoModelForCausalLM
 
 from monorl.config.schema import RunConfig
+from monorl.core.errors import GenerationCancelled
 from monorl.core.interfaces import RolloutEngine
 from monorl.core.types import SamplingParams
 from monorl.rollout.hf_engine import HFRolloutEngine, _FinishRecorder, chat_prompt_ids
@@ -122,6 +125,7 @@ def test_stop_string_sets_finish_reason(engine: HFRolloutEngine) -> None:
     assert len(stopped.token_ids) < 8
     assert stopped.token_ids == full.token_ids[: len(stopped.token_ids)]
     assert len(stopped.logprobs) == len(stopped.token_ids)
+    assert stopped.text.endswith(stop_text)  # the stop string stays in the text (RolloutEngine contract)
 
 
 def test_finish_recorder_eos_and_length() -> None:
@@ -217,3 +221,51 @@ def test_top_k_minus_one_disables_truncation(engine: HFRolloutEngine) -> None:
     gc = engine._generation_config(SamplingParams(n=1, max_new_tokens=1, temperature=1.0, top_k=7), 1)
     effective, _ = engine.model._prepare_generation_config(gc)
     assert effective.top_k == 7
+
+
+def test_cancel_interrupts_generation_and_engine_stays_usable(
+    engine: HFRolloutEngine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    prompts = [[{"role": "user", "content": "hi there"}]]
+    short = SamplingParams(n=2, max_new_tokens=6, temperature=1.0, seed=11, logprobs=True)
+    before = engine.generate(prompts, short)
+    engine.cancel()  # idle: must not leak into the next call
+
+    decoding = threading.Event()
+    model_generate = engine.model.generate
+
+    def spy(*args, **kwargs):
+        decoding.set()
+        return model_generate(*args, **kwargs)
+
+    monkeypatch.setattr(engine.model, "generate", spy)
+    # 2000 steps take seconds on this model. EOS cannot end the call early: with this seed the
+    # random-init policy (uniform-ish over a 49k vocab) emits none, and both rows would have to.
+    long = SamplingParams(n=2, max_new_tokens=2000, temperature=1.0, seed=3, logprobs=True)
+    rng_state = torch.random.get_rng_state()
+    outcome: dict[str, object] = {}
+
+    def run() -> None:
+        try:
+            outcome["result"] = engine.generate(prompts, long)
+        except BaseException as e:  # noqa: BLE001 - recorded for the assertions
+            outcome["error"] = e
+
+    thread = threading.Thread(target=run, daemon=True)
+    thread.start()
+    assert decoding.wait(30)
+    time.sleep(0.1)  # a few decoding steps in
+    t0 = time.monotonic()
+    engine.cancel()
+    thread.join(30)
+    assert not thread.is_alive()
+    assert isinstance(outcome.get("error"), GenerationCancelled), outcome
+    assert time.monotonic() - t0 < 3.0
+    assert torch.equal(torch.random.get_rng_state(), rng_state)  # the seeded RNG fork was unwound
+    assert not engine.model.training
+
+    after = engine.generate(prompts, short)
+    assert len(after) == 1 and len(after[0]) == short.n
+    for c in after[0]:
+        assert c.logprobs is not None and len(c.logprobs) == len(c.token_ids) >= 1
+    assert [(c.token_ids, c.logprobs) for c in after[0]] == [(c.token_ids, c.logprobs) for c in before[0]]

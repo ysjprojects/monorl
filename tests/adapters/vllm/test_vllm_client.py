@@ -2,16 +2,18 @@ from __future__ import annotations
 
 import json
 import math
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 import httpx
 import pytest
 import torch
+from vllm_fakes import LoopbackServer
 
 from monorl.adapters.vllm.client import VllmServerClient
 from monorl.adapters.vllm.common import tensor_from_bytes
 from monorl.config.schema import RunConfig
-from monorl.core.errors import ConfigError
+from monorl.core.errors import ConfigError, GenerationCancelled
 from monorl.core.interfaces import RolloutEngine
 from monorl.core.registry import registry
 from monorl.core.types import SamplingParams
@@ -83,11 +85,23 @@ def server() -> FakeServer:
 
 
 @pytest.fixture
-def client(server: FakeServer, vllm_config: RunConfig) -> VllmServerClient:
+def client(server: FakeServer, vllm_config: RunConfig):
     vllm_config.rollout.extra = {"mode": "server", "url": "http://vllm.test:8000/", "model_name": "policy"}
     eng = registry.get("rollout_engine", "vllm")(vllm_config, transport=httpx.MockTransport(server.handler))
     assert isinstance(eng, VllmServerClient) and isinstance(eng, RolloutEngine)
-    return eng
+    yield eng
+    eng.shutdown()
+
+
+@pytest.fixture
+def loopback(server: FakeServer, vllm_config: RunConfig):
+    """A client talking to ``server`` over a real loopback connection."""
+    web = LoopbackServer(server.handler)
+    vllm_config.rollout.extra = {"mode": "server", "url": web.url, "model_name": "policy"}
+    eng = VllmServerClient(vllm_config)
+    yield web, eng
+    eng.shutdown()
+    web.close()
 
 
 def test_server_mode_needs_url(vllm_config: RunConfig) -> None:
@@ -99,7 +113,9 @@ def test_server_mode_needs_url(vllm_config: RunConfig) -> None:
 def test_urls_per_replica(vllm_config: RunConfig, server: FakeServer, tiny_model_dir) -> None:
     vllm_config.rollout.extra = {"mode": "server", "urls": ["http://a:1", "http://b:2/"]}
     transport = httpx.MockTransport(server.handler)
-    assert VllmServerClient(vllm_config, replica=1, transport=transport).url == "http://b:2"
+    second = VllmServerClient(vllm_config, replica=1, transport=transport)
+    assert second.url == "http://b:2"
+    second.shutdown()
     with pytest.raises(ConfigError, match="replica 2"):
         VllmServerClient(vllm_config, replica=2, transport=transport)
 
@@ -118,6 +134,7 @@ def test_completions_request_body_and_parsing(client: VllmServerClient, server: 
     assert body["model"] == "policy" and body["return_token_ids"] is True
     assert body["n"] == 2 and body["max_tokens"] == 9 and body["temperature"] == 0.5
     assert body["top_k"] == 0 and body["stop"] == ["x"] and body["seed"] == 3 and body["logprobs"] == 0
+    assert body["include_stop_str_in_output"] is True  # the text must keep e.g. a closing </tool_call>
     assert len(out) == 2 and [len(g) for g in out] == [2, 2]
     assert [c.text for c in out[1]] == ["text-1-0", "text-1-1"]  # regrouped from shuffled choices
     assert out[1][1].token_ids == [1, 1, 7]
@@ -139,7 +156,7 @@ def test_choice_count_mismatch_is_an_error(client: VllmServerClient, server: Fak
     def bad(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json={"choices": []})
 
-    client._client = httpx.Client(base_url=client.url, transport=httpx.MockTransport(bad))
+    client._client = httpx.AsyncClient(base_url=client.url, transport=httpx.MockTransport(bad))
     with pytest.raises(ValueError, match="expected 2"):
         client.generate([[1]], SamplingParams(n=2))
 
@@ -155,7 +172,7 @@ def test_null_logprob_becomes_nan(client: VllmServerClient) -> None:
         }
         return httpx.Response(200, json={"choices": [choice]})
 
-    client._client = httpx.Client(base_url=client.url, transport=httpx.MockTransport(resp))
+    client._client = httpx.AsyncClient(base_url=client.url, transport=httpx.MockTransport(resp))
     lps = client.generate([[1]], SamplingParams(n=1))[0][0].logprobs
     assert math.isnan(lps[0]) and lps[1] == -0.5
 
@@ -204,6 +221,7 @@ def test_sleep_disabled_in_config(vllm_config: RunConfig, server: FakeServer) ->
     c = VllmServerClient(vllm_config, transport=httpx.MockTransport(server.handler))
     c.sleep()
     c.wake_up()
+    c.shutdown()
     assert server.paths() == []
 
 
@@ -215,4 +233,31 @@ def test_http_errors_surface(client: VllmServerClient, server: FakeServer) -> No
 
 def test_shutdown_closes_client(client: VllmServerClient) -> None:
     client.shutdown()
+    client.shutdown()
     assert client._client.is_closed
+
+
+# -- cancel ---------------------------------------------------------------------------------------
+
+
+def test_cancel_disconnects_the_running_completion_request(loopback) -> None:
+    web, client = loopback
+    web.stall = True  # the server holds the request: a long generation
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        running = pool.submit(client.generate, [[1], [2]], SamplingParams(n=2))
+        assert web.stalled.get(timeout=5) == "/v1/completions"
+        client.cancel()
+        client.cancel()  # repeated calls are harmless
+        with pytest.raises(GenerationCancelled):
+            running.result(timeout=5)
+    assert web.disconnects.get(timeout=5) == "/v1/completions"  # the server saw the client leave
+    web.stall = False
+    out = client.generate([[4, 5]], SamplingParams(n=2))
+    assert [c.text for c in out[0]] == ["text-0-0", "text-0-1"]
+
+
+def test_cancel_while_idle_does_not_affect_the_next_generate(loopback) -> None:
+    web, client = loopback
+    client.cancel()
+    out = client.generate([[4, 5]], SamplingParams(n=2))
+    assert [c.prompt_token_ids for c in out[0]] == [[4, 5], [4, 5]]

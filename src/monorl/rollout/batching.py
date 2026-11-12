@@ -6,6 +6,12 @@ Requests are split into per-prompt items. A worker thread takes the oldest item,
 prompts), runs ``engine.generate`` once and routes the ``n`` completions of each prompt back to
 its caller in the caller's original order. Items with different params are never mixed; they are
 served in subsequent engine calls.
+
+``cancel()`` fails every queued and in-flight request with
+:class:`~monorl.core.errors.GenerationCancelled` at once — the callers do not wait for the engine
+call that is serving them — and forwards to the wrapped engine's ``cancel()`` when it has one.
+Whatever that engine call still returns (or raises) is dropped; the worker then serves the
+requests made after the cancel.
 """
 
 from __future__ import annotations
@@ -18,6 +24,7 @@ from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field, fields
 from typing import TYPE_CHECKING, Any
 
+from monorl.core.errors import GenerationCancelled
 from monorl.core.types import Completion, PromptInput, SamplingParams
 
 if TYPE_CHECKING:
@@ -37,6 +44,9 @@ def params_key(params: SamplingParams) -> tuple[Any, ...]:
 
 @dataclass
 class _Request:
+    """One ``generate`` call. ``results``/``remaining``/``error``/``done`` change only under the
+    proxy's condition lock; once ``done`` is set the request is final and never touched again."""
+
     params: SamplingParams
     results: list[list[Completion] | None]
     remaining: int
@@ -62,6 +72,8 @@ class BatchingEngine:
         self.max_batch_size = max_batch_size
         self.max_wait = max(0.0, max_wait_ms) / 1000.0
         self._queue: deque[_Item] = deque()
+        self._serving: list[_Request] = []
+        """Requests with items in the batch the worker took off the queue and has not routed yet."""
         self._cv = threading.Condition()
         self._engine_lock = threading.Lock()
         self._worker: threading.Thread | None = None
@@ -102,6 +114,22 @@ class BatchingEngine:
         with self._engine_lock:
             self.engine.wake_up()
 
+    def cancel(self) -> None:
+        """Abort every ``generate`` call that is queued or being served: its caller raises
+        :class:`GenerationCancelled` immediately, even while the wrapped engine is still busy with
+        the batch. Calls made afterwards are served normally."""
+        with self._cv:
+            pending = {id(req): req for req in self._serving}
+            pending.update((id(item.request), item.request) for item in self._queue)
+            self._queue.clear()
+            for req in pending.values():
+                self._fail(req, GenerationCancelled("generation cancelled"))
+            self._cv.notify_all()
+        # Not under the engine lock: the worker holds it for the whole engine call being aborted.
+        engine_cancel = getattr(self.engine, "cancel", None)
+        if engine_cancel is not None:
+            engine_cancel()
+
     def shutdown(self) -> None:
         with self._cv:
             self._closed = True
@@ -125,17 +153,22 @@ class BatchingEngine:
     def _collect(self) -> list[_Item] | None:
         """Block until a batch is ready (or the proxy is closed). Called without the lock."""
         with self._cv:
-            while not self._queue and not self._closed:
-                self._cv.wait()
-            if not self._queue:
-                return None
-            head = self._queue[0]
-            deadline = time.monotonic() + self.max_wait
-            while self._count(head.key) < self.max_batch_size:
-                left = deadline - time.monotonic()
-                if left <= 0 or self._closed:
+            while True:
+                while not self._queue and not self._closed:
+                    self._cv.wait()
+                if not self._queue:
+                    return None
+                head = self._queue[0]
+                deadline = time.monotonic() + self.max_wait
+                # Only ``cancel`` removes items behind the worker's back, and it removes all of them.
+                while self._queue and self._queue[0] is head and self._count(head.key) < self.max_batch_size:
+                    left = deadline - time.monotonic()
+                    if left <= 0 or self._closed:
+                        break
+                    self._cv.wait(timeout=left)
+                if self._queue and self._queue[0] is head:
                     break
-                self._cv.wait(timeout=left)
+                # cancelled during the batching window: start over with what was queued since
             batch: list[_Item] = []
             keep: deque[_Item] = deque()
             for item in self._queue:
@@ -144,6 +177,7 @@ class BatchingEngine:
                 else:
                     keep.append(item)
             self._queue = keep
+            self._serving = list({id(item.request): item.request for item in batch}.values())
             return batch
 
     def _count(self, key: tuple[Any, ...]) -> int:
@@ -155,26 +189,41 @@ class BatchingEngine:
             if batch is None:
                 return
             self._serve(batch)
+            with self._cv:
+                self._serving = []
 
     def _serve(self, batch: list[_Item]) -> None:
-        requests = {id(item.request): item.request for item in batch}
+        requests = self._serving
         try:
             with self._engine_lock:
+                # cancelled while waiting for the engine (weight update, sleep, ...): nothing to run
+                if all(req.done.is_set() for req in requests):
+                    return
                 self.num_engine_calls += 1
                 outputs = self.engine.generate([item.prompt for item in batch], batch[0].request.params)
             if len(outputs) != len(batch):
                 raise RuntimeError(f"engine returned {len(outputs)} results for {len(batch)} prompts")
         except BaseException as e:  # noqa: BLE001 - propagate to every waiting caller
-            for req in requests.values():
-                req.error = e
-                req.done.set()
-            # Drop the rest of this request's items so no caller waits forever on a failed request.
+            failed = {id(req) for req in requests}
             with self._cv:
-                self._queue = deque(item for item in self._queue if id(item.request) not in requests)
+                for req in requests:
+                    self._fail(req, e)
+                # Drop the rest of this request's items so no caller waits forever on a failed request.
+                self._queue = deque(item for item in self._queue if id(item.request) not in failed)
             return
-        for item, completions in zip(batch, outputs, strict=True):
-            item.request.results[item.index] = completions
-        for req in requests.values():
-            req.remaining -= sum(1 for item in batch if item.request is req)
-            if req.remaining == 0:
-                req.done.set()
+        with self._cv:
+            for item, completions in zip(batch, outputs, strict=True):
+                req = item.request
+                if req.done.is_set():  # cancelled during the engine call: its completions are dropped
+                    continue
+                req.results[item.index] = completions
+                req.remaining -= 1
+                if req.remaining == 0:
+                    req.done.set()
+
+    @staticmethod
+    def _fail(req: _Request, error: BaseException) -> None:
+        """Finish ``req`` with ``error`` unless it already finished. Caller holds the lock."""
+        if not req.done.is_set():
+            req.error = error
+            req.done.set()

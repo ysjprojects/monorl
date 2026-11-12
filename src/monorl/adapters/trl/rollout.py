@@ -16,7 +16,6 @@ metadata) needed by ``env.reset`` arrive through :class:`GRPOHooks`, fed by the
 
 from __future__ import annotations
 
-import threading
 from collections.abc import Callable, Sequence
 from typing import Any
 
@@ -55,8 +54,7 @@ class TrainerPolicyEngine(HFRolloutEngine):
         self.dtype = next(model.parameters()).dtype
         self._processor = processing_class if is_vlm_processor(processing_class) else None
         self._tokenizer = processing_class.tokenizer if self._processor is not None else processing_class
-        self._lock = threading.Lock()
-        self._asleep = False
+        self._init_call_state()
         self._eos_ids = [int(t) for t in eos_token_ids]
         self._pad_id = int(self._tokenizer.pad_token_id)
 
