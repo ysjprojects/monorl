@@ -326,6 +326,13 @@ export default function DataStep({ config, set, patch }: StepProps) {
               <TextInput value={d.messages_field} onChange={(v) => set("data.messages_field", v)} nullable placeholder="auto" />
             )}
           </Field>
+          <Field path="data.tools_field" label="Tools field" description="Column holding the tool schemas (OpenAI-style function schemas) a chat row's prompts are rendered with. Default: a 'tools' column of a chat dataset.">
+            {columns.length ? (
+              <Select value={d.tools_field ?? ""} onChange={(v) => set("data.tools_field", v || null)} options={colOptions} />
+            ) : (
+              <TextInput value={d.tools_field} onChange={(v) => set("data.tools_field", v)} nullable placeholder="auto" />
+            )}
+          </Field>
           <Field path="data.image_field" label="Image field(s)" description="Column(s) holding images (HF Image feature, path/URI, bytes or base64); comma-separate several. Attached to the user message as image parts.">
             <TextInput value={imageFieldText(d.image_field)} onChange={(v) => set("data.image_field", parseImageField(v ?? ""))} placeholder={imageColumns.length ? imageColumns.join(", ") : "none (text-only)"} className="font-mono" />
           </Field>

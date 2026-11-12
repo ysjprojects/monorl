@@ -71,6 +71,7 @@ export interface DataConfig {
   answer_field: string | null;
   image_field: string | string[] | null;
   response_field: string | null;
+  tools_field: string | null;
   system_prompt: string | null;
   prompt_template: string | null;
   max_prompt_tokens: number;
@@ -102,6 +103,7 @@ export interface AlgorithmConfig {
   name: AlgorithmName;
   sft_label_smoothing: number;
   sft_train_on_prompt: boolean;
+  sft_turns: "last" | "all";
   kl_coef: number;
   kl_estimator: "k1" | "k2" | "k3";
   clip_eps: number;
@@ -113,9 +115,12 @@ export interface AlgorithmConfig {
   num_epochs: number;
   dynamic_sampling: boolean;
   overlong_penalty: number;
+  credit_assignment: "episode" | "turn";
   gamma: number;
   lam: number;
   value_coef: number;
+  /** `null` = plain squared error. */
+  value_clip: number | null;
   off_policy: OffPolicyConfig;
 }
 
@@ -134,6 +139,8 @@ export interface RolloutConfig {
   data_parallel_size: number;
   gpu_memory_utilization: number;
   max_model_len: number | null;
+  /** Context budget of an episode; `null` = `trainer.max_seq_len`. */
+  max_context_tokens: number | null;
   enable_sleep_mode: boolean;
   async_steps_ahead: number;
   turn_rendering: "tokens" | "template";
@@ -177,6 +184,8 @@ export const ENV_TYPES: EnvType[] = ["single_turn", "tool_calling", "remote", "h
 export interface EnvConfig {
   type: EnvType | string;
   max_turns: number;
+  retries: number;
+  max_failed_frac: number;
   params: JsonDict;
 }
 
@@ -242,6 +251,7 @@ export interface RejectionSampleStage {
   min_reward: number;
   max_per_prompt: number;
   max_response_tokens: number | null;
+  max_context_tokens: number | null;
   require_finish: boolean;
   dedupe: boolean;
   mix: string[];

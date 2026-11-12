@@ -1,7 +1,8 @@
 import { Card, Field, JsonEditor, NumberInput, Pill, Select, TextInput } from "../components/ui";
 import { REWARD_TYPES_FALLBACK } from "../defaults";
-import { ENV_TYPES, type EnvType, type JsonDict, type JsonValue, type RewardSpec } from "../types";
-import type { StepProps } from "./common";
+import { ENV_TYPES, PIPELINE_BACKENDS, type EnvType, type JsonDict, type RewardSpec } from "../types";
+import { HARNESS_EXAMPLE_COMMAND, type StepProps } from "./common";
+import { HarnessForm } from "./HarnessForm";
 import { SftNote } from "./TrainingStep";
 
 const REWARD_HINTS: Record<string, string> = {
@@ -25,22 +26,6 @@ const ENV_HINTS: Record<EnvType, string> = {
   hermes: "Hermes Agent tool-using loop driven by the policy; skills configured in params.",
 };
 
-/** `env.params` of the harness env edited as form fields; the rest (`env`, `workdir`) stays JSON. */
-const HARNESS_FORM_PARAMS = ["command", "timeout", "verifier", "verifier_timeout", "model"];
-/** The bundled example agent (src/monorl/gateway/agents/calc.py). */
-const HARNESS_EXAMPLE_COMMAND = ["{python}", "-m", "monorl.gateway.agents.calc"];
-const HARNESS_PLACEHOLDERS = ["{task_file}", "{workdir}", "{base_url}", "{api_key}", "{model}", "{python}", "{session}", "{reward_url}", "{sample_id}"];
-
-/**
- * A harness command as one editable line: the string as configured, or an argv list joined the way
- * a shell would read it back (the env splits strings like a shell and runs them without one).
- */
-function commandLine(command: JsonValue | undefined): string {
-  if (typeof command === "string") return command;
-  if (!Array.isArray(command)) return "";
-  return command.map((arg) => (typeof arg === "string" && /^[\w@%+=:,./{}-]+$/.test(arg) ? arg : `'${String(arg).replaceAll("'", `'\\''`)}'`)).join(" ");
-}
-
 export default function RewardsEnvStep({ config, set, system, envs }: StepProps) {
   const rewardTypes = system?.components?.reward?.length ? system.components.reward : REWARD_TYPES_FALLBACK;
   const envTypes = envs?.types?.length ? envs.types : system?.components?.env?.length ? system.components.env : ENV_TYPES;
@@ -49,8 +34,9 @@ export default function RewardsEnvStep({ config, set, system, envs }: StepProps)
   const params = env.params;
   const transport = typeof params.transport === "string" ? params.transport : "stdio";
   const harness = env.type === "harness";
-  /** Set one key of `env.params`; `null` removes it, so the env's default applies. */
-  const setParam = (key: string, value: JsonValue) => set("env.params", value === null ? Object.fromEntries(Object.entries(params).filter(([k]) => k !== key)) : { ...params, [key]: value });
+  // RunConfig._check: a pipeline backend cannot leave failed episodes out, and verl / NeMo-RL run their own rollouts.
+  const backend = config.trainer.backend;
+  const pipelineBackend = PIPELINE_BACKENDS[backend] === true;
 
   const updateReward = (i: number, r: Partial<RewardSpec>) =>
     set(
@@ -117,9 +103,19 @@ export default function RewardsEnvStep({ config, set, system, envs }: StepProps)
             options={[...new Set([...envTypes, env.type])].map((v) => ({ value: v }))}
           />
         </Field>
-        <div className="mt-3 grid grid-cols-2 gap-3">
+        <div className="mt-3 grid grid-cols-3 gap-3">
           <Field path="env.max_turns" label={harness ? "Max policy calls" : "Max turns"} description={harness ? "Caps the agent's calls to the policy per episode; further calls are refused with an OpenAI-style error." : undefined}>
             <NumberInput value={env.max_turns} onChange={(v) => set("env.max_turns", v ?? 1)} min={1} disabled={env.type === "single_turn"} />
+          </Field>
+          <Field path="env.retries" label="Retries" error={env.retries > 0 && pipelineBackend && backend !== "trl" ? `Not honoured by trainer.backend '${backend}', which runs its own rollouts.` : null}>
+            <NumberInput value={env.retries} onChange={(v) => set("env.retries", v ?? 0)} min={0} />
+          </Field>
+          <Field
+            path="env.max_failed_frac"
+            label="Max failed fraction"
+            error={env.max_failed_frac > 0 && pipelineBackend ? `Not supported by trainer.backend '${backend}': only the native loop (reference, unsloth) can leave failed episodes out of a batch.` : null}
+          >
+            <NumberInput value={env.max_failed_frac} onChange={(v) => set("env.max_failed_frac", v ?? 0)} min={0} max={1} step="any" />
           </Field>
         </div>
 
@@ -173,48 +169,7 @@ export default function RewardsEnvStep({ config, set, system, envs }: StepProps)
           </div>
         )}
 
-        {harness && (
-          <div className="mt-3 space-y-3 rounded-md border border-slate-800 p-3">
-            <Field
-              label="Command"
-              description="The agent, started once per episode: a command line (split like a shell would, run without one)."
-              error={commandLine(params.command).trim() ? null : "Required: the agent's command."}
-            >
-              <TextInput value={commandLine(params.command)} onChange={(v) => setParam("command", v ?? "")} className="font-mono" placeholder={HARNESS_EXAMPLE_COMMAND.join(" ")} />
-            </Field>
-            <div className="grid grid-cols-2 gap-3">
-              <Field label="Timeout (s)" description="Seconds the agent may run before its process group is killed.">
-                <NumberInput value={typeof params.timeout === "number" ? params.timeout : null} onChange={(v) => setParam("timeout", v)} nullable min={0} step="any" placeholder="600" />
-              </Field>
-              <Field label="Model name" description="The model name the agent is told.">
-                <TextInput value={typeof params.model === "string" ? params.model : null} onChange={(v) => setParam("model", v)} nullable className="font-mono" placeholder={config.model.name_or_path || "model.name_or_path"} />
-              </Field>
-            </div>
-            <div className="grid grid-cols-[2fr_1fr] gap-3">
-              <Field
-                label="Verifier"
-                description="Optional command run in the working directory after the agent ended. Its result is the episode's reward: the last line of its stdout when that is a number, else 1 for exit status 0 and 0 otherwise. It also gets {reference_file}, {stdout_file}, {stderr_file} and {exit_code}."
-              >
-                <TextInput value={params.verifier == null ? null : commandLine(params.verifier)} onChange={(v) => setParam("verifier", v)} nullable className="font-mono" placeholder="none" />
-              </Field>
-              <Field label="Verifier timeout (s)" description="A verifier that runs longer scores 0.">
-                <NumberInput value={typeof params.verifier_timeout === "number" ? params.verifier_timeout : null} onChange={(v) => setParam("verifier_timeout", v)} nullable min={0} step="any" placeholder="60" disabled={params.verifier == null} />
-              </Field>
-            </div>
-            <Field label="Other params (JSON)" description="env: extra environment variables for the agent and the verifier. workdir: {root, template} of the fresh per-episode working directory.">
-              <JsonEditor
-                value={Object.fromEntries(Object.entries(params).filter(([k]) => !HARNESS_FORM_PARAMS.includes(k)))}
-                onChange={(v) => set("env.params", { ...Object.fromEntries(Object.entries(params).filter(([k]) => HARNESS_FORM_PARAMS.includes(k))), ...v })}
-                rows={4}
-                placeholder={'{"env": {"LOG_LEVEL": "info"}, "workdir": {"root": "/tmp/monorl-episodes", "template": "./task_template"}}'}
-              />
-            </Field>
-            <div className="text-xs text-slate-500">
-              Placeholders in the command, the verifier and <span className="font-mono">env</span> values: <span className="font-mono text-slate-400">{HARNESS_PLACEHOLDERS.join(" ")}</span>. The agent's process gets <span className="font-mono text-slate-400">OPENAI_BASE_URL</span> /{" "}
-              <span className="font-mono text-slate-400">OPENAI_API_KEY</span>, so an unmodified OpenAI SDK client reaches the policy, and <span className="font-mono text-slate-400">MONORL_TASK_FILE</span>: the sample's id, messages and metadata, never the reference.
-            </div>
-          </div>
-        )}
+        {harness && <HarnessForm params={params} set={set} modelName={config.model.name_or_path} />}
 
         {env.type !== "remote" && env.type !== "harness" && env.type !== "single_turn" && (
           <Field label="Params (JSON)" path="env.params" className="mt-3">

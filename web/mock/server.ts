@@ -118,6 +118,7 @@ const SCHEMA = {
         answer_field: { description: "Column holding the reference answer (optional)." },
         image_field: { description: "Column(s) holding images (HF Image feature, file path/URI, bytes or base64) attached to the prompt as image content parts. Use '<image>' in prompt_template to position them." },
         response_field: { description: "Column holding the target response for SFT (defaults to answer_field / the trailing assistant turn)." },
+        tools_field: { description: "Column holding the tool schemas (a list of OpenAI-style function schemas, or its JSON string) a chat row's prompts are rendered with. Default: a 'tools' column of a chat dataset when it holds one." },
         system_prompt: { description: "System prompt prepended to every sample." },
         prompt_template: { description: "Python format string applied to the prompt column, e.g. '{prompt}\\nThink step by step.'" },
         max_prompt_tokens: { type: "integer", default: 1024, minimum: 1, description: "Samples with longer prompts are dropped." },
@@ -145,6 +146,7 @@ const SCHEMA = {
         name: { enum: ["grpo", "dapo", "rloo", "reinforce", "ppo", "sft"], default: "grpo", description: "Policy-gradient objective, or 'sft' for supervised fine-tuning on the dataset responses (no rollouts)." },
         sft_label_smoothing: { type: "number", default: 0, minimum: 0, exclusiveMaximum: 1, description: "Label smoothing for sft." },
         sft_train_on_prompt: { type: "boolean", default: false, description: "sft: include prompt tokens in the loss (default: response only)." },
+        sft_turns: { enum: ["last", "all"], default: "last", description: "sft: assistant turns of a conversation that carry the loss. 'last': only the final one, earlier turns are context. 'all': every assistant turn (multi-turn and tool-using conversations), except those a row marks with 'weight': 0." },
         kl_coef: { type: "number", default: 0, minimum: 0, description: "Coefficient of the KL penalty to the reference policy (0 disables)." },
         kl_estimator: { enum: ["k1", "k2", "k3"], default: "k3", description: "KL estimator (Schulman's k1/k2/k3)." },
         clip_eps: { type: "number", default: 0.2, exclusiveMinimum: 0, description: "PPO clipping epsilon (lower bound)." },
@@ -156,9 +158,11 @@ const SCHEMA = {
         num_epochs: { type: "integer", default: 1, minimum: 1, description: "Optimizer passes over each rollout batch." },
         dynamic_sampling: { type: "boolean", default: false, description: "Drop groups whose rewards are all identical (DAPO)." },
         overlong_penalty: { type: "number", default: 0, minimum: 0, description: "Reward penalty for truncated (length) completions." },
-        gamma: { type: "number", default: 1, description: "Discount for multi-turn per-turn rewards." },
-        lam: { type: "number", default: 1, description: "GAE lambda (ppo only)." },
+        credit_assignment: { enum: ["episode", "turn"], default: "episode", description: "Which rewards a response token is credited with. 'episode': the reward of its whole episode, the same advantage for every token. 'turn': the return from its own turn on (later per-turn rewards discounted by gamma; the reward-function score arrives at the final turn), compared with the same turn of the other episodes of its prompt group. See docs/CREDIT_ASSIGNMENT.md." },
+        gamma: { type: "number", default: 1, minimum: 0, maximum: 1, description: "Discount for multi-turn per-turn rewards." },
+        lam: { type: "number", default: 1, minimum: 0, maximum: 1, description: "GAE lambda (ppo only): 1 = returns minus the value baseline, 0 = one-step TD error." },
         value_coef: { type: "number", default: 0.5, description: "Value loss weight (ppo only)." },
+        value_clip: { anyOf: [{ type: "number", exclusiveMinimum: 0 }, { type: "null" }], default: 0.5, description: "ppo only: the value loss also penalises a value estimate clipped to this distance from the estimate the advantages were computed with (null = plain squared error)." },
         off_policy: { $ref: "#/$defs/OffPolicyConfig", description: "Off-policy corrections (off by default)." },
       },
     },
@@ -174,6 +178,7 @@ const SCHEMA = {
         data_parallel_size: { type: "integer", default: 1, minimum: 1, description: "Number of independent engine replicas." },
         gpu_memory_utilization: { type: "number", default: 0.6 },
         max_model_len: {},
+        max_context_tokens: { anyOf: [{ type: "integer", minimum: 2 }, { type: "null" }], default: null, description: "Context budget of an episode in tokens: no prompt plus completion of a turn may exceed it. A turn's generation is capped to the room that is left, an episode without room for another turn ends, and an agent behind the gateway gets a context_length_exceeded error. Default: trainer.max_seq_len (and rollout.max_model_len when set), so that nothing an episode samples is cut off in training." },
         enable_sleep_mode: { type: "boolean", default: true, description: "Offload engine memory while training (colocated)." },
         async_steps_ahead: { type: "integer", default: 0, minimum: 0, description: "Generate up to N batches ahead of training (off-policy staleness bound). 0 = synchronous." },
         turn_rendering: { enum: ["tokens", "template"], default: "tokens", description: "How a multi-turn prompt is built. 'tokens': the sampled tokens of earlier turns stay in the context and only new messages are rendered. 'template': the chat template re-renders the whole conversation every turn." },
@@ -211,6 +216,8 @@ const SCHEMA = {
       properties: {
         type: { type: "string", default: "single_turn", description: "Environment: 'single_turn', 'tool_calling', 'remote', 'harness', 'openenv', 'hermes', ..." },
         max_turns: { type: "integer", default: 1, minimum: 1 },
+        retries: { type: "integer", default: 0, minimum: 0, description: "Times an episode whose environment failed (a crashed agent, a failing step) is started again." },
+        max_failed_frac: { type: "number", default: 0, minimum: 0, maximum: 1, description: "Share of a rollout batch's episodes that may fail for good; they are left out of the batch. Above it the run fails. 0 (default): any failed episode fails the run." },
         params: { type: "object", description: "Environment-specific parameters." },
       },
     },
@@ -260,7 +267,7 @@ const PIPELINE_SCHEMA = {
         name: { type: "string", description: "Stage name (used for the stage directory)." },
         overrides: { type: "object", description: "RunConfig fields merged over the pipeline base (e.g. {algorithm: {name: sft}, trainer: {max_steps: 50}})." },
         init_from: { type: "string", default: "previous", description: "Policy initialisation: 'previous' (last train stage's final export), 'base' (base model), or a path." },
-        data_from: { enum: ["previous", "config"], default: "config", description: "'previous' uses the dataset written by the preceding rejection_sample stage as data.uri." },
+        data_from: { enum: ["previous", "config"], default: "config", description: "'previous' uses the dataset written by the preceding rejection_sample stage as data.uri; an SFT stage then trains every policy turn of its conversations (algorithm.sft_turns: all)." },
       },
       required: ["name"],
     },
@@ -269,12 +276,13 @@ const PIPELINE_SCHEMA = {
         type: { const: "rejection_sample", default: "rejection_sample" },
         name: { type: "string" },
         data: { anyOf: [{ $ref: "#/$defs/DataConfig" }, { type: "null" }], default: null, description: "Prompts to sample from (defaults to the base data config)." },
-        num_samples: { type: "integer", default: 4, minimum: 1, description: "Completions sampled per prompt." },
-        min_reward: { type: "number", default: 1, description: "Keep completions whose total reward is >= this value." },
-        max_per_prompt: { type: "integer", default: 1, minimum: 1, description: "Keep at most this many accepted completions per prompt." },
-        max_response_tokens: { anyOf: [{ type: "integer", minimum: 1 }, { type: "null" }], default: null, description: "Drop accepted completions longer than this." },
-        require_finish: { type: "boolean", default: true, description: "Drop completions truncated by max_new_tokens." },
-        dedupe: { type: "boolean", default: true, description: "Drop duplicate responses for the same prompt." },
+        num_samples: { type: "integer", default: 4, minimum: 1, description: "Episodes sampled per prompt." },
+        min_reward: { type: "number", default: 1, description: "Keep episodes whose total reward is >= this value." },
+        max_per_prompt: { type: "integer", default: 1, minimum: 1, description: "Keep at most this many accepted episodes per prompt." },
+        max_response_tokens: { anyOf: [{ type: "integer", minimum: 1 }, { type: "null" }], default: null, description: "Drop episodes in which a policy turn is longer than this many tokens." },
+        max_context_tokens: { anyOf: [{ type: "integer", minimum: 1 }, { type: "null" }], default: null, description: "Drop episodes whose context (prompt plus completion of their longest turn) exceeds this many tokens, e.g. the trainer.max_seq_len of the SFT stage that follows." },
+        require_finish: { type: "boolean", default: true, description: "Drop episodes in which a policy turn was cut off by the token limit or failed." },
+        dedupe: { type: "boolean", default: true, description: "Drop episodes whose conversation repeats one already kept for the same prompt." },
         mix: { type: "array", items: { type: "string" }, description: "Extra chat/prompt_answer dataset URIs appended to the output." },
         rollout_overrides: { type: "object", description: "RolloutConfig overrides for sampling." },
         reward_overrides: { anyOf: [{ type: "array", items: { type: "object" } }, { type: "null" }], default: null, description: "Replace the base rewards for scoring." },
@@ -412,10 +420,10 @@ const RECIPES: { name: string; description: string; kind: "run" | "pipeline"; co
       model: { name_or_path: "Qwen/Qwen2.5-1.5B-Instruct" },
       data: { uri: "hf://openai/gsm8k", hf_config_name: "main", prompt_field: "question", answer_field: "answer", format: "prompt_answer" },
       algorithm: { name: "grpo", loss_agg: "rollout" },
-      rollout: { backend: "sglang", group_size: 4, max_new_tokens: 512, stop: ["</tool_call>"] },
+      rollout: { backend: "sglang", group_size: 4, max_new_tokens: 512, max_context_tokens: 1536, stop: ["</tool_call>"] },
       trainer: { backend: "reference", max_steps: 40, prompts_per_step: 8, eval_every: 10 },
       rewards: [{ type: "exact_match", weight: 1.0, params: { extract: "last_number", scope: "last" } }, { type: "format", weight: 0.2, params: { patterns: ["<tool_call>.*</tool_call>"], require_all: false } }],
-      env: { type: "tool_calling", max_turns: 6, params: { tools: ["calculator", "python_exec"], invalid_call_penalty: 0.1 } },
+      env: { type: "tool_calling", max_turns: 6, retries: 1, max_failed_frac: 0.1, params: { tools: ["calculator", "python_exec"], invalid_call_penalty: 0.1 } },
     },
   },
   {
@@ -634,6 +642,11 @@ function validate(config: unknown): { ok: boolean; errors: { loc: (string | numb
     errors.push({ loc: ["algorithm", "off_policy"], msg: "Value error, off_policy.importance_weights / off_policy.ratio_mask compare the proximal with the behaviour policy, which are the same policy under off_policy.anchor='behavior'; use anchor 'trainer'", type: "value_error" });
   else if (off.score_centering === true && (anchor === "trainer" || (anchor === "auto" && corrects)))
     errors.push({ loc: ["algorithm", "off_policy"], msg: "Value error, off_policy.score_centering weighs scores by the ratio of the current to the behaviour policy and needs off_policy.anchor='behavior' (or 'auto' without importance_weights / ratio_mask)", type: "value_error" });
+  if (typeof env.retries === "number" && env.retries < 0) errors.push({ loc: ["env", "retries"], msg: "Input should be greater than or equal to 0", type: "greater_than_equal" });
+  const maxFailed = Number(env.max_failed_frac ?? 0);
+  if (!(maxFailed >= 0 && maxFailed <= 1)) errors.push({ loc: ["env", "max_failed_frac"], msg: "Input should be greater than or equal to 0 and less than or equal to 1", type: "value_error" });
+  const budget = (rollout.max_context_tokens as number | null | undefined) ?? null;
+  if (budget !== null && budget < 2) errors.push({ loc: ["rollout", "max_context_tokens"], msg: "Input should be greater than or equal to 2", type: "greater_than_equal" });
   if (errors.length === 0) {
     const sft = name === "sft";
     if (!sft && ["grpo", "dapo", "rloo"].includes(name) && gs < 2) errors.push({ loc: [], msg: `Value error, ${name} needs rollout.group_size >= 2`, type: "value_error" });
@@ -646,8 +659,18 @@ function validate(config: unknown): { ok: boolean; errors: { loc: (string | numb
     }
     if (!sft && rewards.length === 0 && ((env.type as string | undefined) ?? "single_turn") === "single_turn")
       errors.push({ loc: [], msg: "Value error, single_turn env needs at least one reward in `rewards`", type: "value_error" });
+    const maxSeqLen = Number(trainer.max_seq_len ?? 2048);
+    const backend = String(trainer.backend ?? "reference");
+    if (!sft && budget !== null && budget > maxSeqLen)
+      errors.push({ loc: [], msg: `Value error, rollout.max_context_tokens=${budget} exceeds trainer.max_seq_len=${maxSeqLen}: training would cut such episodes off; raise trainer.max_seq_len or lower the budget`, type: "value_error" });
+    if (!sft && SYSTEM.components.pipeline_backend.includes(backend)) {
+      if (maxFailed > 0)
+        errors.push({ loc: [], msg: `Value error, env.max_failed_frac is not supported by trainer.backend='${backend}': failed episodes can only be left out of a batch by the native loop ('reference', 'unsloth')`, type: "value_error" });
+      if (backend !== "trl" && (Number(env.retries ?? 0) > 0 || budget !== null))
+        errors.push({ loc: [], msg: `Value error, env.retries and rollout.max_context_tokens are not honoured by trainer.backend='${backend}', which runs its own rollouts; use its own length limits`, type: "value_error" });
+    }
     const extra = (rollout.extra as Dict | undefined) ?? {};
-    if (off.score_centering === true && (Number(rollout.temperature ?? 1) <= 0 || Number(rollout.top_k ?? -1) > 0 || Number(rollout.top_p ?? 1) < 1 || Number(extra.min_p ?? 0) > 0 || Number(extra.repetition_penalty ?? 1) !== 1))
+    if (!sft && off.score_centering === true && (Number(rollout.temperature ?? 1) <= 0 || Number(rollout.top_k ?? -1) > 0 || Number(rollout.top_p ?? 1) < 1 || Number(extra.min_p ?? 0) > 0 || Number(extra.repetition_penalty ?? 1) !== 1))
       errors.push({ loc: [], msg: "Value error, off_policy.score_centering needs the full sampling distribution: rollout.temperature > 0 and no top_k / top_p / min_p / repetition_penalty truncation", type: "value_error" });
   }
   return { ok: errors.length === 0, errors };
@@ -725,7 +748,7 @@ function episodeMetrics(prefix: "episode" | "eval", p: number, config: Dict): Di
     [`${prefix}/done_frac`]: tools ? 1 - truncated / 2 : 1,
     [`${prefix}/truncated_frac`]: truncated,
     [`${prefix}/context_tokens_mean`]: (tools ? 420 * turns : 150) + jitter(20),
-    ...(tools ? { [`${prefix}/tool_calls_mean`]: Math.max(0, turns - 1 + jitter(0.2)), [`${prefix}/invalid_calls_mean`]: Math.max(0, 0.6 * (1 - p) + jitter(0.1)) } : {}),
+    ...(tools ? { [`${prefix}/tool_calls_mean`]: Math.max(0, turns - 1 + jitter(0.2)), [`${prefix}/invalid_calls_mean`]: Math.max(0, 0.6 * (1 - p) + jitter(0.1)), [`${prefix}/context_exhausted_frac`]: Math.max(0, 0.2 * (1 - p) + jitter(0.04)) } : {}),
   };
 }
 
@@ -748,6 +771,7 @@ function trainRow(step: number, maxSteps: number, lr0: number, sft: boolean, con
   }
   const solved = Math.max(0, Math.min(1, 0.1 + 0.6 * p + (Math.random() - 0.5) * 0.1));
   const groupSize = Number((config.rollout as Dict | undefined)?.group_size ?? 4);
+  const maxFailedFrac = Number((config.env as Dict | undefined)?.max_failed_frac ?? 0);
   const episode = episodeMetrics("episode", p, config);
   return {
     step,
@@ -760,6 +784,8 @@ function trainRow(step: number, maxSteps: number, lr0: number, sft: boolean, con
     "reward/pass_at_k": 1 - (1 - solved) ** groupSize,
     ...episode,
     "episode/context_tokens_max": Math.round((episode["episode/context_tokens_mean"] as number) * 1.6),
+    // Reported only by runs that tolerate failed episodes (`env.max_failed_frac` > 0).
+    ...(maxFailedFrac > 0 ? { "rollout/failed_frac": Math.max(0, Math.min(maxFailedFrac, 0.04 + jitter(0.06))) } : {}),
     "loss/policy": (Math.random() - 0.5) * 0.02 - 0.01 * p,
     "loss/kl": 0.002 * step * (0.8 + Math.random() * 0.4),
     "loss/entropy": 1.2 - 0.6 * p + (Math.random() - 0.5) * 0.05,
@@ -843,7 +869,7 @@ function episodeRow(episode: Episode, at: { step: number; sample_id: string; gro
     num_turns: turns.length,
     num_response_tokens: turns.reduce((n, t) => n + t.response_tokens, 0),
     reference: episode.reference,
-    done: last.finish_reason !== "tool_call",
+    done: last.finish_reason !== "tool_call" && episode.info.context_exhausted !== true,
     finish_reason: last.finish_reason,
     num_context_tokens: last.prompt_tokens + last.response_tokens,
     success: reward >= Number(logging.success_threshold ?? 1),
@@ -988,6 +1014,14 @@ const TOOL_SCRIPTS: ((task: ToolTask) => Episode)[] = [
     act(ep, 0, finalAnswer(task, true));
     return ep;
   },
+  // Out of context: two long tool results fill the budget (rollout.max_context_tokens), the third turn is cut short and the episode ends unfinished.
+  (task) => {
+    const ep = toolEpisode(task, task.question, false, { context_exhausted: true });
+    act(ep, 0, "Let me tabulate the multiples first.", { calls: [tabulate(Number(task.calc[0][1]))] });
+    act(ep, 0, "And the multiples of the second quantity.", { calls: [tabulate(Number(task.calc[1][1]))] });
+    act(ep, 0, `From the two tables, ${task.calc[0][0]} is ${task.calc[0][1]}, and the total should then be`, { finish: "length" });
+    return ep;
+  },
   // Image parts in the user message (a URL, a file path, one the backend left out), two calls in one turn, and a wrong final answer.
   (task) => {
     const ep = toolEpisode(task, [{ type: "image", image: `http://127.0.0.1:${PORT}/api/mock/images/2.png` }, { type: "image", image: "/data/worksheets/scan_000123.jpg" }, { type: "image", image: null, note: "inline image omitted (2.4 MB)" }, { type: "text", text: `The scanned worksheet above states the problem:\n${task.question}` }], false);
@@ -1121,7 +1155,7 @@ function beginStage(job: MockJob, st: MockStage) {
     const init = st.config.init_from ?? "previous";
     log(`[running] ${(st.config.algorithm as Dict | undefined)?.name ?? "grpo"} run, ${st.length} steps; init_from=${init === "previous" && prevTrain ? `${prevTrain.run_dir}/final` : init === "previous" ? "base model" : init}`);
     if (st.index > 0 && job.stages[st.index - 1].type === "rejection_sample" && st.config.data_from === "previous") log(`data.uri = ${job.stages[st.index - 1].run_dir}/dataset.jsonl`);
-  } else if (st.type === "rejection_sample") log(`[running] sampling ${st.config.num_samples ?? 4} completions/prompt, keep reward >= ${st.config.min_reward ?? 1}`);
+  } else if (st.type === "rejection_sample") log(`[running] sampling ${st.config.num_samples ?? 4} episodes/prompt, keep reward >= ${st.config.min_reward ?? 1}`);
   else log(`[running] ${Number(st.config.num_samples ?? 1) > 1 ? `eval with ${st.config.num_samples} samples/prompt` : "greedy eval"}${st.config.max_prompts ? ` on ${st.config.max_prompts} prompts` : ""}`);
 }
 

@@ -41,8 +41,8 @@ loop)* toggle at the top — a `PipelineConfig` whose `base` is the same wizard 
    * **HF Hub** — dataset search (`/api/datasets/search`), config/subset and split.
    Then *Preview* (`POST /api/datasets/preview`): columns with dtypes, first rows, the inferred
    layout, and a column mapper writing `prompt_field` / `answer_field` / `messages_field` /
-   `image_field` (comma list for several columns; auto-filled from the sniffer's
-   `image_fields`) and, for SFT, `response_field`. Image cells render as a `[image W×H]` chip
+   `tools_field` (the column with a chat row's tool schemas) / `image_field` (comma list for
+   several columns; auto-filled from the sniffer's `image_fields`) and, for SFT, `response_field`. Image cells render as a `[image W×H]` chip
    (decoded images) or a thumbnail (`http(s)://…png|jpg|webp`, `data:image/…` URIs).
 4. *Rewards & environment* — add weighted reward functions (names and parameter hints come from
    `GET /api/system` components) and choose the env type; remote MEP/1 envs list the example
@@ -54,15 +54,29 @@ loop)* toggle at the top — a `PipelineConfig` whose `base` is the same wizard 
    command edited there is stored as one string, which the env splits like a shell would. The
    form lists the command placeholders (`{task_file}`, `{workdir}`, `{base_url}`, …) and the
    variables the agent gets (`OPENAI_BASE_URL`, `OPENAI_API_KEY`, `MONORL_TASK_FILE`); for this
-   type `env.max_turns` reads *Max policy calls*. Leaving the rewards empty is flagged unless the
+   type `env.max_turns` reads *Max policy calls*. Its *Sandbox* section picks where the agent and
+   the verifier run (`env.params.sandbox`): `local`, or `docker` with an *Image* or a *Build
+   context* / *Dockerfile* and the limits *Network*, *CPUs*, *Memory*, *User*. *Other params
+   (JSON)* shows every other key, the whole `sandbox` mapping included, so options without a
+   field (`mounts`, `gpus`, `gateway`, …) and keys the form does not know are kept as they are.
+   Options left behind under the `local` backend, an image together with a build and
+   `network: none` are flagged inline. Leaving the rewards empty is flagged unless the
    environment can score itself (remote / openenv / hermes, or a harness verifier or posted
-   reward).
+   reward). Every environment type has *Retries* (`env.retries`) and *Max failed fraction*
+   (`env.max_failed_frac`); the card flags `max_failed_frac > 0` with a pipeline backend
+   (trl / verl / nemo_rl) and `retries > 0` with verl / nemo_rl.
 5. *Training* — algorithm (grpo/dapo/rloo/reinforce/ppo/**sft**) and its knobs, rollout engine +
    sampling, trainer + optimizer, logging. Selecting `sft` hides the rollout / rewards / env
    sections (they are ignored by the SFT loop) and surfaces `sft_label_smoothing`,
-   `sft_train_on_prompt` and `trainer.eval_every`. For RL runs the *Algorithm* card also holds
-   `rollout.turn_rendering` (`tokens` / `template`: how multi-turn prompts are built) and
-   `algorithm.loss_agg`, whose `rollout` option weighs every episode equally. The *Logging* card
+   `sft_train_on_prompt`, `sft_turns` (*Turns trained*: the `last` assistant turn or `all`) and
+   `trainer.eval_every`. For RL runs the *Algorithm* card also holds
+   `rollout.turn_rendering` (`tokens` / `template`: how multi-turn prompts are built),
+   `algorithm.loss_agg`, whose `rollout` option weighs every episode equally, the *Context
+   budget* (`rollout.max_context_tokens`, next to *Max new tokens*; empty = `trainer.max_seq_len`;
+   flagged when it exceeds `trainer.max_seq_len` or the trainer is verl / nemo_rl) and *Credit
+   assignment* (`algorithm.credit_assignment`: `episode` / `turn`; `turn` is flagged with a
+   pipeline backend and shows the discount `gamma`). `ppo` runs on every trainer and shows
+   `lam`, `value_coef`, `value_clip` (empty = plain squared error) and `gamma`. The *Logging* card
    holds `logging.save_trajectories`, `trajectories_per_step`, `save_transcripts` (store the full
    conversation and per-turn details of each saved rollout; off leaves only prompt / response)
    and `success_threshold` (the total reward from which an episode counts as solved). The
@@ -78,7 +92,11 @@ loop)* toggle at the top — a `PipelineConfig` whose `base` is the same wizard 
    cold-start SFT → GRPO → rejection sampling → SFT → GRPO). Field help comes from
    `GET /api/config/pipeline_schema`. Train stages edit their `overrides` as YAML with
    `init_from` / `data_from` selectors; the `data_from: previous` and unique-name rules are
-   checked inline before the server sees the document. Eval stages have *Samples / prompt*
+   checked inline before the server sees the document; choosing `data_from: previous` notes
+   that an SFT stage then trains every policy turn of the sampled conversations
+   (`algorithm.sft_turns: all`). Rejection-sampling stages count episodes: *Episodes / prompt*
+   (`num_samples`), *Keep / prompt*, *Max turn tokens* (`max_response_tokens`) and *Max context
+   tokens* (`max_context_tokens`). Eval stages have *Samples / prompt*
    (`num_samples`, default 1 = greedy; more are sampled at the rollout temperature and add
    `eval/pass_at_k`).
 8. *Review* — the YAML (editable; a pasted `base:` + `stages:` document switches the pipeline
@@ -88,7 +106,9 @@ loop)* toggle at the top — a `PipelineConfig` whose `base` is the same wizard 
 
 **Run detail** (`/runs/:id`) — status, config, live metric charts (`reward/mean`,
 `reward/success_rate`, `episode/turns_mean`, `loss/policy`, `loss/kl`, token counts; every other
-numeric metric, e.g. `reward/pass_at_k`, `episode/tool_calls_mean`, `policy/clipfrac` and the
+numeric metric, e.g. `reward/pass_at_k`, `episode/tool_calls_mean`,
+`episode/context_exhausted_frac` (episodes that ran out of context), `rollout/failed_frac`
+(episodes left out as failed, with `env.max_failed_frac > 0`), `policy/clipfrac` and the
 timings, is behind *Show more metrics*), log tail, sampled trajectories, checkpoints list, and
 *Cancel* (`POST /api/jobs/{id}/cancel`, sends `SIGTERM`; the run ends as `cancelled`). Charts, log
 and trajectories arrive over one SSE connection, `/api/jobs/{id}/events` (events `metrics`, `log`,
@@ -102,7 +122,10 @@ The *step* filter narrows the list to one step; a *phase* filter and column (`tr
 episode (one row at a time; only that one is rendered):
 
 * a summary — phase, solved, done, the last finish reason, turns, response and context tokens,
-  the reward with its breakdown, the reference, group / sample ids and the episode `info`;
+  the reward with its breakdown, the reference, group / sample ids and the episode `info`. A
+  *context exhausted* badge marks an episode that ran out of its context budget
+  (`info.context_exhausted`), *N calls over the context budget* an agent whose policy calls were
+  refused for it (`info.context_exceeded_calls`);
 * the transcript, when the row has `threads`: each thread as a chat with messages styled by role.
   Several threads become tabs: *Final conversation* is thread 0, the one the episode ended in;
   *Thread N* are its other contexts (the conversation before a compaction, a sub-agent). Image

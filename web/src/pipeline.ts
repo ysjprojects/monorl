@@ -18,6 +18,7 @@ export function defaultRejectionStage(name = "rejection_sample"): RejectionSampl
     min_reward: 1.0,
     max_per_prompt: 1,
     max_response_tokens: null,
+    max_context_tokens: null,
     require_finish: true,
     dedupe: true,
     mix: [],

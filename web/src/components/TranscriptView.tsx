@@ -348,7 +348,7 @@ function Stat({ label, children }: { label: string; children: ReactNode }) {
   );
 }
 
-/** Outcome of the episode: phase, solved, how it ended, sizes, reward breakdown, reference, ids. */
+/** Outcome of the episode: phase, solved, how it ended (and whether the context budget ended it), sizes, reward breakdown, reference, ids. */
 function EpisodeSummary({ row: r }: { row: TrajectoryRow }) {
   const info: Record<string, unknown> = r.info && typeof r.info === "object" ? r.info : {};
   return (
@@ -357,6 +357,18 @@ function EpisodeSummary({ row: r }: { row: TrajectoryRow }) {
         {r.phase && <PhasePill phase={r.phase} />}
         {r.success !== undefined && <Pill tone={r.success ? "green" : "slate"}>{r.success ? "solved" : "not solved"}</Pill>}
         {r.done !== undefined && <Pill tone={r.done ? "slate" : "amber"}>{r.done ? "done" : "not finished"}</Pill>}
+        {info.context_exhausted === true && (
+          <span title="The episode ran out of its context budget (rollout.max_context_tokens) and ended with what it had.">
+            <Pill tone="amber">context exhausted</Pill>
+          </span>
+        )}
+        {typeof info.context_exceeded_calls === "number" && info.context_exceeded_calls > 0 && (
+          <span title="Policy calls of the agent that were refused with context_length_exceeded.">
+            <Pill tone="amber">
+              {info.context_exceeded_calls} call{info.context_exceeded_calls === 1 ? "" : "s"} over the context budget
+            </Pill>
+          </span>
+        )}
         {r.finish_reason != null && (
           <span>
             <span className="text-slate-500">ended with</span> <Pill tone={FINISH_TONE[r.finish_reason] ?? "slate"}>{r.finish_reason}</Pill>

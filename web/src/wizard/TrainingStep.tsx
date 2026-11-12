@@ -9,7 +9,7 @@ const ALGO_NOTES: Record<AlgorithmName, string> = {
   dapo: "GRPO + clip-higher, dynamic sampling and overlong penalty (ByteDance DAPO).",
   rloo: "Leave-one-out baseline per group; no std normalisation.",
   reinforce: "Raw rewards as advantages; simplest and highest variance.",
-  ppo: "Clipped surrogate with a value head (GAE). Set lam / value_coef.",
+  ppo: "Clipped surrogate with a learned value baseline (GAE). Set lam / value_coef / value_clip.",
   sft: "Supervised fine-tuning on the dataset responses: no rollouts, no rewards, no environment. Loss = token NLL of the response span.",
 };
 
@@ -37,6 +37,8 @@ export default function TrainingStep({ config, set, patch, system }: StepProps) 
   // The two rules of OffPolicyConfig._check (src/monorl/config/schema.py).
   const corrects = off.importance_weights !== "none" || off.ratio_mask !== "none";
   const decoupled = off.anchor === "trainer" || (off.anchor === "auto" && corrects);
+  /** verl and NeMo-RL run their own rollouts (RunConfig._check). */
+  const ownRollouts = pipeline && t.backend !== "trl";
   return (
     <div className="space-y-4">
       <Card title="Presets">
@@ -66,10 +68,13 @@ export default function TrainingStep({ config, set, patch, system }: StepProps) 
                 <Field path="algorithm.loss_agg" label="Loss aggregation">
                   <Select value={a.loss_agg} onChange={(v) => set("algorithm.loss_agg", v)} options={LOSS_AGGS.filter((v) => v !== "rollout" || a.loss_agg === v).map((v) => ({ value: v }))} />
                 </Field>
+                <Field path="algorithm.sft_turns" label="Turns trained" className="col-span-2">
+                  <Select value={a.sft_turns} onChange={(v) => set("algorithm.sft_turns", v)} options={["last", "all"].map((v) => ({ value: v as typeof a.sft_turns }))} />
+                </Field>
               </div>
               <Toggle path="algorithm.sft_train_on_prompt" checked={a.sft_train_on_prompt} onChange={(v) => set("algorithm.sft_train_on_prompt", v)} label="Train on prompt tokens" />
               <div className="text-xs text-slate-500">
-                The target response comes from <span className="font-mono">data.response_field</span> (Data step), else <span className="font-mono">answer_field</span>, else the trailing assistant turn of a chat sample.
+                The target response comes from <span className="font-mono">data.response_field</span> (Data step), else <span className="font-mono">answer_field</span>, else the trailing assistant turn of a chat sample; with <span className="font-mono">all</span> turns, every assistant turn of a chat sample is a target.
               </div>
             </div>
           ) : (
@@ -80,6 +85,22 @@ export default function TrainingStep({ config, set, patch, system }: StepProps) 
                 </Field>
                 <Field path="rollout.max_new_tokens" label="Max new tokens">
                   <NumberInput value={r.max_new_tokens} onChange={(v) => set("rollout.max_new_tokens", v ?? 256)} min={1} />
+                </Field>
+                <Field
+                  path="rollout.max_context_tokens"
+                  label="Context budget (tokens)"
+                  className="col-span-2"
+                  error={
+                    r.max_context_tokens == null
+                      ? null
+                      : r.max_context_tokens > t.max_seq_len
+                        ? `Exceeds trainer.max_seq_len (${t.max_seq_len}): training would cut such episodes off. Raise Max seq len or lower the budget.`
+                        : ownRollouts
+                          ? `Not honoured by trainer.backend '${t.backend}', which runs its own rollouts: use its own length limits.`
+                          : null
+                  }
+                >
+                  <NumberInput value={r.max_context_tokens} onChange={(v) => set("rollout.max_context_tokens", v)} nullable min={2} placeholder={`trainer.max_seq_len (${t.max_seq_len})`} />
                 </Field>
                 <Field path="algorithm.kl_coef" label="KL coef">
                   <NumberInput value={a.kl_coef} onChange={(v) => set("algorithm.kl_coef", v ?? 0)} min={0} step="any" />
@@ -105,7 +126,22 @@ export default function TrainingStep({ config, set, patch, system }: StepProps) 
                     <Field path="algorithm.value_coef" label="Value coef">
                       <NumberInput value={a.value_coef} onChange={(v) => set("algorithm.value_coef", v ?? 0.5)} min={0} step="any" />
                     </Field>
+                    <Field path="algorithm.value_clip" label="Value clip">
+                      <NumberInput value={a.value_clip} onChange={(v) => set("algorithm.value_clip", v)} nullable min={0} step="any" placeholder="plain squared error" />
+                    </Field>
                   </>
+                )}
+                <Field
+                  path="algorithm.credit_assignment"
+                  label="Credit assignment"
+                  error={a.credit_assignment === "turn" && pipeline ? `'turn' is not supported with trainer.backend '${t.backend}': use the reference or unsloth trainer.` : null}
+                >
+                  <Select value={a.credit_assignment} onChange={(v) => set("algorithm.credit_assignment", v)} options={["episode", "turn"].map((v) => ({ value: v as typeof a.credit_assignment }))} />
+                </Field>
+                {(a.credit_assignment === "turn" || a.name === "ppo") && (
+                  <Field path="algorithm.gamma" label="Discount γ">
+                    <NumberInput value={a.gamma} onChange={(v) => set("algorithm.gamma", v ?? 1)} min={0} max={1} step="any" />
+                  </Field>
                 )}
                 <Field path="rollout.temperature" label="Temperature">
                   <NumberInput value={r.temperature} onChange={(v) => set("rollout.temperature", v ?? 1)} min={0} step="any" />

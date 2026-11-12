@@ -10,6 +10,9 @@ export interface StepProps {
   envs: EnvsResponse | null;
 }
 
+/** `env.params.command` of the bundled example harness agent (src/monorl/gateway/agents/calc.py). */
+export const HARNESS_EXAMPLE_COMMAND = ["{python}", "-m", "monorl.gateway.agents.calc"];
+
 /** "run" = one RunConfig; "pipeline" = the same config as `base` plus an ordered list of stages. */
 export type WizardMode = "run" | "pipeline";
 

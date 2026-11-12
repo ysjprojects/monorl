@@ -14,7 +14,7 @@ const STAGE_DEFS: Record<StageType, string> = { train: "TrainStage", rejection_s
 const STAGE_TONE: Record<StageType, "sky" | "amber" | "green"> = { train: "sky", rejection_sample: "amber", eval: "green" };
 const STAGE_BLURB: Record<StageType, string> = {
   train: "A full run (RL or SFT): the base config merged with overrides. Starts from the previous train stage's final export unless init_from says otherwise.",
-  rejection_sample: "Samples N completions per prompt with the current policy, keeps those scoring ≥ min_reward and writes a chat jsonl for the next SFT stage.",
+  rejection_sample: "Samples N episodes per prompt with the current policy, keeps those scoring ≥ min_reward and writes their conversations (prompt, policy turns as sampled, tool results) as a chat jsonl for the next SFT stage.",
   eval: "Evaluation of the current policy on a dataset: greedy, or several samples per prompt for pass@k. Logs eval/reward_mean and eval/success_rate.",
 };
 
@@ -138,7 +138,7 @@ function stageSummary(p: PipelineConfig, s: Stage, i: number): string {
     const init = s.init_from === "previous" ? (i === 0 ? "base model" : "previous export") : s.init_from === "base" ? "base model" : s.init_from;
     return `${effectiveAlgorithm(p.base, s)} · init ${init}${s.data_from === "previous" ? " · data from previous stage" : ""} · ${describeOverrides(s.overrides, 3)}`;
   }
-  if (s.type === "rejection_sample") return `${s.num_samples} samples/prompt · keep reward ≥ ${s.min_reward} · ≤${s.max_per_prompt}/prompt${s.mix.length ? ` · +${s.mix.length} mixed` : ""}`;
+  if (s.type === "rejection_sample") return `${s.num_samples} episodes/prompt · keep reward ≥ ${s.min_reward} · ≤${s.max_per_prompt}/prompt${s.mix.length ? ` · +${s.mix.length} mixed` : ""}`;
   return `${s.data?.uri ? s.data.uri : "base eval data"}${s.max_prompts ? ` · ${s.max_prompts} prompts` : ""}${s.num_samples > 1 ? ` · ${s.num_samples} samples/prompt (pass@${s.num_samples})` : " · greedy"}`;
 }
 
@@ -185,7 +185,7 @@ function TrainEditor({ stage: s, index: i, pipeline, schema, errors, onChange }:
         </Field>
         <Field
           label="Dataset"
-          description={stageDesc(schema, "train", "data_from")}
+          description={stageDesc(schema, "train", "data_from") ?? "'previous' trains on the dataset written by the preceding rejection_sample stage; an SFT stage then trains every policy turn of its conversations (algorithm.sft_turns: all is set for it)."}
           error={firstMsg(errorsFor(errors, i, "data_from"))}
         >
           <Select<"config" | "previous">
@@ -219,22 +219,25 @@ function RejectionEditor({ stage: s, index: i, schema, errors, onChange }: { sta
   return (
     <div className="space-y-3">
       <div className="grid gap-3 md:grid-cols-4">
-        <Field label="Samples / prompt" description={d("num_samples")} error={firstMsg(errorsFor(errors, i, "num_samples"))}>
+        <Field label="Episodes / prompt" description={d("num_samples") ?? "Episodes sampled per prompt."} error={firstMsg(errorsFor(errors, i, "num_samples"))}>
           <NumberInput value={s.num_samples} onChange={(v) => onChange({ ...s, num_samples: v ?? 4 })} min={1} />
         </Field>
-        <Field label="Min reward" description={d("min_reward")}>
+        <Field label="Min reward" description={d("min_reward") ?? "Keep episodes whose total reward is >= this value."}>
           <NumberInput value={s.min_reward} onChange={(v) => onChange({ ...s, min_reward: v ?? 1 })} step="any" />
         </Field>
-        <Field label="Keep / prompt" description={d("max_per_prompt")} error={firstMsg(errorsFor(errors, i, "max_per_prompt"))}>
+        <Field label="Keep / prompt" description={d("max_per_prompt") ?? "Keep at most this many accepted episodes per prompt."} error={firstMsg(errorsFor(errors, i, "max_per_prompt"))}>
           <NumberInput value={s.max_per_prompt} onChange={(v) => onChange({ ...s, max_per_prompt: v ?? 1 })} min={1} />
         </Field>
         <Field label="Max prompts" description={d("max_prompts")}>
           <NumberInput value={s.max_prompts} onChange={(v) => onChange({ ...s, max_prompts: v })} nullable min={1} placeholder="all" />
         </Field>
-        <Field label="Max response tokens" description={d("max_response_tokens")}>
+        <Field label="Max turn tokens" description={d("max_response_tokens") ?? "Drop episodes in which a policy turn is longer than this many tokens."}>
           <NumberInput value={s.max_response_tokens} onChange={(v) => onChange({ ...s, max_response_tokens: v })} nullable min={1} placeholder="no limit" />
         </Field>
-        <Field label="Output" description={d("output")} className="md:col-span-3">
+        <Field label="Max context tokens" description={d("max_context_tokens") ?? "Drop episodes whose context (prompt plus completion of their longest turn) exceeds this many tokens."}>
+          <NumberInput value={s.max_context_tokens} onChange={(v) => onChange({ ...s, max_context_tokens: v })} nullable min={1} placeholder="no limit" />
+        </Field>
+        <Field label="Output" description={d("output")} className="md:col-span-2">
           <TextInput value={s.output} onChange={(v) => onChange({ ...s, output: v })} nullable className="font-mono" placeholder="<stage dir>/dataset.jsonl" />
         </Field>
       </div>
