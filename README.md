@@ -25,6 +25,18 @@ adapters instead of forks**.
 - **Environments in any language.** The MEP/1 wire protocol (JSON over stdio or HTTP) lets
   Go, C++ or Python environments plug in; the orchestrator runs many episodes in parallel against
   them. SDKs and examples ship under [`envs/sdk`](envs/sdk).
+- **Train any agent.** With `env.type: harness` an external agent program — an OpenAI-SDK script,
+  an agent CLI — is the environment: monorl serves an OpenAI-compatible endpoint from the policy
+  being trained and records every call with its exact token ids and logprobs
+  ([`docs/GATEWAY.md`](docs/GATEWAY.md)).
+- **Built for multi-turn.** Prompts are continued token-in/token-out instead of re-rendering the
+  chat, an episode trains as one sequence per token-contiguous chain of turns (compaction,
+  sub-agents and re-rendered chats lose no tokens), `loss_agg: rollout` weighs every episode
+  equally, and stale async rollouts get off-policy corrections
+  ([`docs/OFF_POLICY.md`](docs/OFF_POLICY.md)).
+- **See what the agent did.** Every saved rollout carries its full transcript (conversations,
+  per-turn rewards, tool calls and results); runs report success rate, pass@k and turns per
+  episode; the web UI renders episodes turn by turn.
 - **Low-code web UI.** Pick any Hugging Face model, a dataset from your disk, S3 (credentials
   from the environment) or the Hub, preview and map columns, launch and watch runs.
 
@@ -132,6 +144,8 @@ is the same as `monorl bench`.
 | Images (VLM) | ✅ | ✅ | ✅ | text only | ✅ | ✅ | text only | text only | text only | ✅ image refs |
 | LoRA | ✅ | n/a | n/a | ✅ | ✅ | ✅ | ✅ | – | – | – |
 | Multi-turn / tools | ✅ | ✅ | ✅ (prefix cache) | ✅ | ✅ monorl episodes as `rollout_func` | `tool_calling` env only | ✅ env bridge (the env's reset prompt is not forwarded) | ✅ | ✅ | ✅ |
+| External agent as env (`harness` + capture gateway) | ✅ | ✅ | ✅ | ✅ | ✅ | – | – | – | – | – |
+| Off-policy corrections (`algorithm.off_policy`) | ✅ decoupled PPO, truncated IS weights, ratio mask, score centering | ✅ (top-k for score centering) | ✅ (top-k for score centering) | ✅ | mapped to TRL's vLLM IS correction | mapped to `rollout_correction` | mapped to `loss_fn` IS options | – | – | – |
 | Colocated (sleep) | n/a | ✅ | ✅ | – | vLLM colocate | ✅ | ✅ | – | – | – |
 | Disaggregated / Ray | ✅ | ✅ | ✅ | – | vLLM server | ✅ | ✅ | – | – | – |
 | Weight sync | inprocess | cuda_ipc, broadcast, checkpoint | cuda_ipc, broadcast, checkpoint | inprocess | TRL-native | verl-native | NeMo-native | – | – | – |
@@ -157,6 +171,8 @@ configs/recipes/   example RunConfigs                      third_party/ pins.tom
 - [Data: URIs, S3/MinIO/R2 env vars, formats, field mapping](docs/DATA.md)
 - [Distributed: placement, Ray, weight sync, async rollouts](docs/DISTRIBUTED.md)
 - [Pipelines: SFT → RL → rejection sampling loops, stage manifest, API](docs/PIPELINES.md)
+- [Capture gateway: training external agents (`env.type: harness`)](docs/GATEWAY.md)
+- [Off-policy corrections for async rollouts](docs/OFF_POLICY.md)
 - [Web UI](docs/WEB_UI.md)
 
 ## Containers & CI
@@ -182,9 +198,14 @@ wordle environment trains through `grpo_remote_env_go_wordle.yaml`, over stdio a
 against the four replicas of the compose stack; the web UI launches a pipeline on the real server
 and streams its stage table, charts, log and trajectories; `docker/Dockerfile.{cpu,envs}` build,
 `docker compose up` comes up healthy and the five example environments pass `monorl env check`
-from the container. GPU backends (vLLM, SGLang, Unsloth, verl, NeMo-RL) and their images are
-exercised against fakes only here; `pytest -m gpu` runs the real-framework tests on a CUDA
-machine.
+from the container. With SmolLM2-135M on the `hf` engine: `tool_calling` episodes with real tool
+calls train as one token-contiguous sequence each; an external tool-using agent trains through the
+capture gateway (`env.type: harness`) on the native loop and on the TRL backend, including an agent
+with a side conversation (two threads, two training sequences per episode); async rollouts
+(`rollout.async_steps_ahead: 2`) run with decoupled PPO + importance weights + ratio mask and with
+score centering; the transcript viewer and the wizard's new fields were exercised on the real
+server. GPU backends (vLLM, SGLang, Unsloth, verl, NeMo-RL) and their images are exercised against
+fakes only here; `pytest -m gpu` runs the real-framework tests on a CUDA machine.
 
 ## Development
 
