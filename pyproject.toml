@@ -46,6 +46,8 @@ dev = [
     "pytest-xdist>=3.6",
     "moto[s3,server]>=5",
     "ruff>=0.6",
+    "openai>=2.24",
+    "anthropic>=2.8",
 ]
 
 [project.scripts]

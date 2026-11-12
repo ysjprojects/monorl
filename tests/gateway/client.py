@@ -15,10 +15,17 @@ _OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 
 def request(
-    method: str, url: str, payload: Any = None, *, key: str | None = None, timeout: float = 60.0
+    method: str,
+    url: str,
+    payload: Any = None,
+    *,
+    key: str | None = None,
+    headers: dict[str, str] | None = None,
+    timeout: float = 60.0,
 ) -> tuple[int, str]:
-    """``(status, body text)`` of one request; error statuses are returned, not raised."""
-    headers = {"Content-Type": "application/json"}
+    """``(status, body text)`` of one request; error statuses are returned, not raised. ``key``
+    is sent as bearer token, ``headers`` on top."""
+    headers = {"Content-Type": "application/json", **(headers or {})}
     if key is not None:
         headers["Authorization"] = f"Bearer {key}"
     data = None if payload is None else json.dumps(payload).encode()
@@ -30,8 +37,10 @@ def request(
         return e.code, e.read().decode()
 
 
-def post(url: str, payload: Any, *, key: str | None = None) -> tuple[int, Any]:
-    status, text = request("POST", url, payload, key=key)
+def post(
+    url: str, payload: Any, *, key: str | None = None, headers: dict[str, str] | None = None
+) -> tuple[int, Any]:
+    status, text = request("POST", url, payload, key=key, headers=headers)
     return status, json.loads(text)
 
 
@@ -44,6 +53,17 @@ def sse_events(text: str) -> list[Any]:
     """The ``data:`` payloads of an SSE body, JSON-decoded except for the ``[DONE]`` marker."""
     payloads = [line[len("data: ") :] for line in text.splitlines() if line.startswith("data: ")]
     return [p if p == "[DONE]" else json.loads(p) for p in payloads]
+
+
+def sse_named(text: str) -> list[tuple[str | None, Any]]:
+    """``(event name, JSON data)`` of every event in an SSE body; comments and the ``[DONE]``
+    marker are skipped."""
+    events: list[tuple[str | None, Any]] = []
+    for block in text.split("\n\n"):
+        fields = dict(line.split(": ", 1) for line in block.splitlines() if not line.startswith(":"))
+        if fields.get("data", "[DONE]") != "[DONE]":
+            events.append((fields.get("event"), json.loads(fields["data"])))
+    return events
 
 
 AGENT_PRELUDE = '''

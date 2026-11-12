@@ -1,9 +1,11 @@
 """Gateway sessions and call records.
 
 A :class:`Session` is one episode's view of the policy: the rollout engine, tokenizer and
-sampling parameters of the run, plus every chat-completions call the episode's agent made. A
-call is answered by :meth:`Session.complete` and kept as a :class:`CallRecord` with the exact
-prompt ids and the engine's :class:`~monorl.core.types.Completion`, which is what
+sampling parameters of the run, plus every call the episode's agent made, over whichever API
+(:class:`~monorl.gateway.protocol.Wire`). A call is admitted and given its prompt by
+:meth:`Session.prepare`, answered by :meth:`Session.finish` (:meth:`Session.complete` does both)
+and kept as a :class:`CallRecord` with the exact prompt ids and the engine's
+:class:`~monorl.core.types.Completion`, which is what
 :func:`monorl.gateway.trajectory.build_trajectory` turns into a trainable trajectory.
 
 Prompts follow "token in, token out" (:mod:`monorl.rollout.render`): when a request repeats an
@@ -11,6 +13,14 @@ earlier call's messages and its answer and then adds messages, its prompt is tha
 ids, the sampled completion ids and only the new messages rendered — the agent's copy of the
 assistant message is never re-tokenised. A request whose history matches no earlier call starts a
 new context and is rendered in full.
+
+A chat with images cannot be sent as token ids (they carry no pixels): it reaches the engine as
+messages, the engine encodes it with the model's processor and reports the ids it conditioned on,
+as for stepped multimodal episodes. That path has no room for tool schemas, so images and tools
+exclude each other. The batch builder trains a multimodal trajectory as the conversation the
+episode ended in; once a session has made a call with images, calls without images are therefore
+refused — they would end the episode in a text-only conversation whose earlier image turns
+could not be trained on.
 
 Torch-free; sessions are thread-safe (an agent may call the policy concurrently).
 """
@@ -24,14 +34,14 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from monorl.core.errors import GenerationCancelled
-from monorl.core.types import Completion, Message, SamplingParams, ToolCall
+from monorl.core.types import Completion, Message, PromptInput, SamplingParams, ToolCall, messages_have_media
 from monorl.gateway.protocol import (
     ChatRequest,
+    ContextLengthExceeded,
     GatewayError,
-    assistant_message,
-    normalize_messages,
+    response_message,
+    split_stop,
     split_tool_calls,
-    strip_stop,
 )
 from monorl.rollout.render import chat_prompt_ids, continue_prompt_ids
 
@@ -40,11 +50,27 @@ if TYPE_CHECKING:
 
 
 @dataclass(slots=True)
+class PreparedCall:
+    """A call the session admitted, with the prompt it will be answered from."""
+
+    request: ChatRequest
+    parent: CallRecord | None
+    """The call whose conversation this one continues (``None``: a new context)."""
+    prompt_ids: list[int]
+    bridged: bool
+    room: int | None
+    """Tokens the context budget leaves for the completion (``None``: no budget)."""
+    media: bool
+    """The chat has images: the engine gets it as messages, not as ``prompt_ids``."""
+
+
+@dataclass(slots=True)
 class CallRecord:
-    """One answered chat-completions call, i.e. one policy turn."""
+    """One answered call, i.e. one policy turn."""
 
     index: int
     """Position among the session's calls, in the order they were answered."""
+    request: ChatRequest
     messages: list[Message]
     """The request's chat (normalised)."""
     tools: list[dict[str, Any]] | None
@@ -52,12 +78,14 @@ class CallRecord:
     """Token ids the policy conditioned on."""
     completion: Completion
     """The engine's completion, unchanged."""
-    answer: dict[str, Any]
-    """The OpenAI assistant message the call was answered with."""
     response: Message
-    """``answer`` normalised like request messages: what a continuing request repeats."""
+    """The answer as a normalised assistant message — the text around the parsed tool calls,
+    without a stop string the request added, and the calls: what each API's response is built
+    from and what a continuing request repeats."""
     finish_reason: str
     """OpenAI finish reason of the answer: ``stop`` | ``length`` | ``tool_calls``."""
+    stop_sequence: str | None
+    """The stop string of the request that ended the completion, if one did."""
     parent: int | None
     """The call whose conversation this one continues (``None``: a new context)."""
     bridged: bool
@@ -71,11 +99,14 @@ class CallRecord:
 class Session:
     """See module docstring. ``max_calls`` caps the answered calls; ``model`` is the name the
     session reports. ``max_context_tokens`` is the episode's context budget: a call whose prompt
-    leaves no room for a completion is refused the way OpenAI refuses it
-    (``context_length_exceeded``), so an agent that compacts its history can react, and every
-    completion is capped to the room that is left. ``cancelled`` is set when a generation was
-    cancelled (the episode is being aborted), ``failure`` holds the first engine error; the
-    episode's owner watches both."""
+    leaves no room for a completion is refused (:class:`ContextLengthExceeded`, worded by each
+    API the way its vendor words it), so an agent that compacts its history can react, and every
+    completion is capped to the room that is left. ``processor`` is the policy's HF
+    ``AutoProcessor`` when it is a vision-language model; without one the engine's is used
+    (``engine.processor``, looked up through engine wrappers), and a policy that has none cannot
+    take images. ``fetch_images=False`` refuses images sent as ``http(s)`` URLs instead of
+    downloading them. ``cancelled`` is set when a generation was cancelled (the episode is being
+    aborted), ``failure`` holds the first engine error; the episode's owner watches both."""
 
     def __init__(
         self,
@@ -88,6 +119,8 @@ class Session:
         model: str = "monorl",
         max_calls: int | None = None,
         max_context_tokens: int | None = None,
+        processor: Any | None = None,
+        fetch_images: bool = True,
     ) -> None:
         if turn_rendering not in ("tokens", "template"):
             raise ValueError(
@@ -101,6 +134,8 @@ class Session:
         self.model = model
         self.max_calls = max_calls
         self.max_context_tokens = max_context_tokens
+        self.processor = processor if processor is not None else _engine_processor(engine)
+        self.fetch_images = fetch_images
         self.calls: list[CallRecord] = []
         self.refused = 0
         """Calls turned away because ``max_calls`` was reached."""
@@ -112,6 +147,8 @@ class Session:
         self.failure: BaseException | None = None
         self._closed = False
         self._in_flight = 0
+        self._media = False
+        """A call with images was admitted (module docstring)."""
         self._lock = threading.Lock()
 
     @property
@@ -132,8 +169,14 @@ class Session:
             return self.reward
 
     def complete(self, request: ChatRequest) -> CallRecord:
-        """Answer one chat-completions request with the policy and record it. Blocks for the
-        generation; raises :class:`GatewayError` for what the HTTP layer reports to the agent."""
+        """Answer one request with the policy and record it. Blocks for the generation; raises
+        :class:`GatewayError` for what the HTTP layer reports to the agent."""
+        return self.finish(self.prepare(request))
+
+    def prepare(self, request: ChatRequest) -> PreparedCall:
+        """Admit ``request`` and build its prompt, without generating. Everything a request can
+        be refused for is raised here (:class:`GatewayError`), before a stream has to begin. The
+        call counts as in flight until :meth:`finish` has run, which must follow."""
         with self._lock:
             self._require_open()
             if self.max_calls is not None and len(self.calls) + self._in_flight >= self.max_calls:
@@ -146,30 +189,46 @@ class Session:
             self._in_flight += 1
             earlier = list(self.calls)
         try:
-            parent = _find_parent(earlier, request)
-            prompt_ids, bridged = self._prompt(parent, request)
+            parent, prompt_ids, bridged, media = self._render(earlier, request)
+            if self._media and not media:
+                raise _text_after_images()
             room = self._room(len(prompt_ids))
-            completion = self._generate(prompt_ids, request, room)
+            if media:
+                with self._lock:
+                    self._media = True
+        except BaseException:
+            with self._lock:
+                self._in_flight -= 1
+            raise
+        return PreparedCall(request, parent, prompt_ids, bridged, room, media)
+
+    def finish(self, call: PreparedCall) -> CallRecord:
+        """Generate the answer to a prepared call and record it. Blocks for the generation."""
+        request = call.request
+        try:
+            completion = self._generate(call)
             calls, invalid, text = (
                 split_tool_calls(completion.text) if request.parse_tool_calls else ([], 0, completion.text)
             )
+            stop = None
             if completion.finish_reason == "stop":
-                text = strip_stop(text, request.stop)
-            answer = assistant_message(text, calls)
+                text, stop = split_stop(text, request.stop)
             with self._lock:
                 self._require_open()
+                if self._media and not call.media:  # a call with images was admitted meanwhile
+                    raise _text_after_images()
                 record = CallRecord(
                     index=len(self.calls),
+                    request=request,
                     messages=request.messages,
                     tools=request.tools,
                     prompt_ids=(
-                        prompt_ids
+                        call.prompt_ids
                         if completion.prompt_token_ids is None
                         else [int(t) for t in completion.prompt_token_ids]
                     ),
                     completion=completion,
-                    answer=answer,
-                    response=normalize_messages([answer])[0],
+                    response=response_message(text, calls),
                     finish_reason=(
                         "tool_calls"
                         if calls
@@ -177,8 +236,9 @@ class Session:
                         if completion.finish_reason == "length"
                         else "stop"
                     ),
-                    parent=None if parent is None else parent.index,
-                    bridged=bridged,
+                    stop_sequence=stop,
+                    parent=None if call.parent is None else call.parent.index,
+                    bridged=call.bridged,
                     tool_calls=calls if request.parse_tool_calls else None,
                     invalid_calls=invalid,
                 )
@@ -187,6 +247,14 @@ class Session:
         finally:
             with self._lock:
                 self._in_flight -= 1
+
+    def count_tokens(self, request: ChatRequest) -> int:
+        """Prompt tokens ``request`` would be answered from, were it made now. Nothing is
+        recorded and the call does not count."""
+        with self._lock:
+            self._require_open()
+            earlier = list(self.calls)
+        return len(self._render(earlier, request)[1])
 
     def _require_open(self) -> None:
         """Caller holds the lock."""
@@ -197,8 +265,19 @@ class Session:
                 503, "the episode is being aborted", type="server_error", code="generation_cancelled"
             )
 
+    def _render(
+        self, earlier: Sequence[CallRecord], request: ChatRequest
+    ) -> tuple[CallRecord | None, list[int], bool, bool]:
+        """``(parent, prompt ids, bridged, media)`` for ``request`` after the calls ``earlier``."""
+        parent = _find_parent(earlier, request)
+        if messages_have_media(request.messages):
+            return parent, self._media_prompt(request), False, True
+        prompt_ids, bridged = self._prompt(parent, request)
+        return parent, prompt_ids, bridged, False
+
     def _prompt(self, parent: CallRecord | None, request: ChatRequest) -> tuple[list[int], bool]:
-        """``(prompt ids, bridged)`` for ``request``, continuing ``parent`` when there is one."""
+        """``(prompt ids, bridged)`` for a text-only ``request``, continuing ``parent`` when
+        there is one."""
         try:
             if parent is None:
                 return chat_prompt_ids(self.tokenizer, request.messages, request.tools), False
@@ -221,34 +300,60 @@ class Session:
                 code="template_error",
             ) from e
 
+    def _media_prompt(self, request: ChatRequest) -> list[int]:
+        """Prompt ids of a chat with images, as the engine's processor path will produce them:
+        the whole chat encoded by the model's processor, image placeholder tokens included."""
+        if self.processor is None:
+            raise GatewayError(
+                400,
+                "the policy being trained is a text-only model and cannot take image inputs",
+                param="messages",
+                code="unsupported_content",
+            )
+        if request.tools is not None:
+            raise GatewayError(
+                400,
+                "images cannot be combined with tools: a chat with images reaches the rollout engine as "
+                "messages, which cannot carry tool schemas. Send the request without tools",
+                param="tools",
+                code="unsupported_content",
+            )
+        from monorl.rollout.media import vlm_prompt_ids
+
+        try:
+            return vlm_prompt_ids(self.processor, request.messages)
+        except Exception as e:  # noqa: BLE001 - an unreadable image or a chat the processor rejects
+            raise GatewayError(
+                400,
+                f"the model's processor cannot encode these messages: {e}",
+                param="messages",
+                code="template_error",
+            ) from e
+
     def _room(self, prompt_tokens: int) -> int | None:
         """Tokens left for the completion under the context budget (``None``: no budget). Raises
-        OpenAI's ``context_length_exceeded`` when the prompt leaves none."""
+        :class:`ContextLengthExceeded` when the prompt leaves none."""
         if self.max_context_tokens is None:
             return None
         room = self.max_context_tokens - prompt_tokens
         if room < 1:
             with self._lock:
                 self.context_exceeded += 1
-            raise GatewayError(
-                400,
-                f"This model's maximum context length is {self.max_context_tokens} tokens. However, your "
-                f"messages resulted in {prompt_tokens} tokens. Please reduce the length of the messages.",
-                param="messages",
-                code="context_length_exceeded",
-            )
+            raise ContextLengthExceeded(prompt_tokens, self.max_context_tokens)
         return room
 
-    def _generate(self, prompt_ids: Sequence[int], request: ChatRequest, room: int | None) -> Completion:
+    def _generate(self, call: PreparedCall) -> Completion:
         """One sample under the run's sampling parameters; the request and the context budget
-        (``room``) may only shorten it."""
+        (``call.room``) may only shorten it."""
+        request = call.request
         params = self.params
-        limits = [params.max_new_tokens, request.max_tokens, room]
+        limits = [params.max_new_tokens, request.max_tokens, call.room]
         max_new_tokens = min(limit for limit in limits if limit is not None)
         stop = [*params.stop, *(s for s in request.stop if s not in params.stop)]
         params = dataclasses.replace(params, n=1, max_new_tokens=max_new_tokens, stop=stop)
+        prompt: PromptInput = list(request.messages) if call.media else list(call.prompt_ids)
         try:
-            return self.engine.generate([list(prompt_ids)], params)[0][0]
+            return self.engine.generate([prompt], params)[0][0]
         except GenerationCancelled as e:
             self.cancelled.set()
             raise GatewayError(
@@ -259,6 +364,29 @@ class Session:
                 if self.failure is None:
                     self.failure = e
             raise GatewayError(500, f"generation failed: {e}", type="server_error") from e
+
+
+def _engine_processor(engine: Any) -> Any | None:
+    """The ``AutoProcessor`` a vision-language engine exposes as ``processor``, looked up through
+    engine wrappers (``BatchingEngine.engine``); ``None`` for text-only engines."""
+    for _ in range(4):
+        if engine is None:
+            return None
+        processor = getattr(engine, "processor", None)
+        if processor is not None:
+            return processor
+        engine = getattr(engine, "engine", None)
+    return None
+
+
+def _text_after_images() -> GatewayError:
+    return GatewayError(
+        400,
+        "this episode has made calls with images; a call without images would end it in a "
+        "conversation that leaves those calls untrainable. Keep the images in the conversation",
+        param="messages",
+        code="unsupported_content",
+    )
 
 
 def _find_parent(calls: Sequence[CallRecord], request: ChatRequest) -> CallRecord | None:
@@ -277,4 +405,4 @@ def _find_parent(calls: Sequence[CallRecord], request: ChatRequest) -> CallRecor
     return None
 
 
-__all__ = ["CallRecord", "Session"]
+__all__ = ["CallRecord", "PreparedCall", "Session"]

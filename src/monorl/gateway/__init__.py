@@ -1,14 +1,17 @@
-"""Capture gateway: any agent program that speaks the OpenAI chat-completions API becomes an
-environment.
+"""Capture gateway: any agent program that speaks the OpenAI chat-completions, OpenAI Responses or
+Anthropic Messages API becomes an environment.
 
-The gateway serves an OpenAI-compatible endpoint from the policy being trained and records every
-call with its exact prompt token ids and the sampled completion (ids and logprobs), so an
-episode driven by an external agent — an OpenAI-SDK script, a coding-agent CLI — becomes a
-trainable :class:`~monorl.core.types.Trajectory`. ``env.type: harness``
-(:mod:`monorl.envs.harness`) runs one agent process per episode against it. See
-``docs/GATEWAY.md``.
+The gateway serves those APIs from the policy being trained and records every call with its
+exact prompt token ids and the sampled completion (ids and logprobs), so an episode driven by an
+external agent — an SDK script, an agent framework, a coding-agent CLI — becomes a trainable
+:class:`~monorl.core.types.Trajectory`. ``env.type: harness`` (:mod:`monorl.envs.harness`) runs
+one agent process per episode against it. See ``docs/GATEWAY.md``.
 
-* :mod:`monorl.gateway.protocol` — OpenAI wire format: validation, normalisation, bodies, errors
+* :mod:`monorl.gateway.protocol` — what the wire formats share (normalised chats, errors) and
+  OpenAI chat completions
+* :mod:`monorl.gateway.openai_responses`, :mod:`monorl.gateway.anthropic_messages` — the other
+  two wire formats
+* :mod:`monorl.gateway.images` — image inputs, kept as files in the media cache
 * :mod:`monorl.gateway.session` — :class:`Session` (one episode) and :class:`CallRecord`
 * :mod:`monorl.gateway.trajectory` — :func:`build_trajectory`: calls → turns and threads
 * :mod:`monorl.gateway.server` — :class:`Gateway` (HTTP server + session table), :func:`get_gateway`

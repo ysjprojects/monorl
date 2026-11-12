@@ -93,8 +93,10 @@ Read the file. Key points:
   `save_pretrained` (HF export).
 - `Environment.reset(sample) -> messages`, `step(Completion) -> StepResult`, `max_turns`; or an
   `EpisodeDriver` that runs the whole episode itself (`run_episode(sample, *, group_id, engine,
-  tokenizer, params, abort, turn_rendering) -> Trajectory`): an external agent behind the capture
-  gateway (`env.type: harness`, [`GATEWAY.md`](GATEWAY.md)). The env factory may return either.
+  tokenizer, params, abort, turn_rendering, max_context_tokens) -> Trajectory`): an external agent
+  behind the capture gateway (`env.type: harness`, [`GATEWAY.md`](GATEWAY.md)), which serves the
+  policy over OpenAI chat completions, OpenAI Responses and Anthropic Messages (streamed or not,
+  image inputs included) and records every call. The env factory may return either.
 - `RewardFunction(trajectories) -> list[RewardResult]` (batched).
 - `PipelineBackend.run(config, run_dir, reporter=...) -> RunResult` for trl/verl/nemo_rl.
 - `TrainBatch` (`core/batch.py`): right-padded `[B,T]`, `response_mask` marks loss positions,

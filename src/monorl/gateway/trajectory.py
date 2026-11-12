@@ -12,7 +12,10 @@ call's request messages plus its answer — is a thread:
   latest conversation that descends from it. ``Turn.message_index`` is the position of its answer
   there.
 
-Threads hold monorl chat messages: assistant ``tool_calls`` are ``{id, name, arguments}``.
+Threads hold monorl chat messages: assistant ``tool_calls`` are ``{id, name, arguments}``; a user
+message that carried images has monorl content parts. ``Trajectory.info["tools"]`` holds the tool
+schemas the prompts of thread 0 were rendered with (calls of one conversation share them), in the
+form chat templates take; it is absent when that conversation had none.
 """
 
 from __future__ import annotations
@@ -26,7 +29,7 @@ from monorl.gateway.session import CallRecord
 
 def build_trajectory(calls: Sequence[CallRecord], sample: Sample, group_id: str) -> Trajectory:
     """The episode recorded in ``calls`` (a session's calls, at least one) as an unscored
-    trajectory."""
+    trajectory (module docstring)."""
     if not calls:
         raise ValueError(f"episode {group_id} recorded no policy calls")
     continued = {call.parent for call in calls if call.parent is not None}
@@ -49,12 +52,15 @@ def build_trajectory(calls: Sequence[CallRecord], sample: Sample, group_id: str)
         )
         for call in calls
     ]
+    info: dict[str, Any] = {"finish_reason": calls[-1].completion.finish_reason, "num_turns": len(turns)}
+    if calls[-1].tools is not None:
+        info["tools"] = calls[-1].tools
     return Trajectory(
         sample=sample,
         group_id=group_id,
         messages=threads[0],
         turns=turns,
-        info={"finish_reason": calls[-1].completion.finish_reason, "num_turns": len(turns)},
+        info=info,
         extra_threads=threads[1:],
     )
 
