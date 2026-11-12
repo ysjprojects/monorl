@@ -68,7 +68,7 @@ def test_micro_batching_matches_single_pass_with_importance_corrections(
     )
     assert m2["loss/policy"] == pytest.approx(m6["loss/policy"], abs=1e-5)
     assert m2["grad_norm"] == pytest.approx(m6["grad_norm"], rel=1e-4)
-    torch.testing.assert_close(lp2, lp6, atol=1e-5, rtol=0)
+    torch.testing.assert_close(lp2, lp6, atol=1e-5, rtol=1e-5)  # float32: logprobs are of order 10
     # the corrections are live: the same batch without them takes a different step
     plain, _ = _step(tiny_model_dir, batch, 6, loss_agg=loss_agg)
     assert abs(plain["grad_norm"] - m6["grad_norm"]) > 1e-3 * plain["grad_norm"]
@@ -129,7 +129,7 @@ def test_micro_batching_matches_single_pass_with_score_centering(tiny_model_dir:
     assert m2["loss/policy"] == pytest.approx(m6["loss/policy"], abs=1e-5)
     assert m2["offpolicy/sc_coef_l1"] == pytest.approx(m6["offpolicy/sc_coef_l1"], rel=1e-4)
     assert m2["grad_norm"] == pytest.approx(m6["grad_norm"], rel=1e-4)
-    torch.testing.assert_close(lp2, lp6, atol=1e-5, rtol=0)
+    torch.testing.assert_close(lp2, lp6, atol=1e-5, rtol=1e-5)  # float32: logprobs are of order 10
     batch.behavior_top_ids = batch.behavior_top_logprobs = None
     plain, _ = _step(tiny_model_dir, batch, 6, temperature=PEAKED)
     assert abs(plain["grad_norm"] - m6["grad_norm"]) > 1e-3 * plain["grad_norm"]

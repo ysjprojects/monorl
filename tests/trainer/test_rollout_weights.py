@@ -33,7 +33,7 @@ def test_rollout_weighted_step_does_not_depend_on_micro_batching(tiny_model_dir:
     split, split_logprobs = _step(tiny_model_dir, batch, loss_agg="rollout", micro_batch_size=1)
     whole, whole_logprobs = _step(tiny_model_dir, batch, loss_agg="rollout", micro_batch_size=4)
     assert split["grad_norm"] == pytest.approx(whole["grad_norm"], rel=1e-4)
-    torch.testing.assert_close(split_logprobs, whole_logprobs, atol=1e-5, rtol=0)
+    torch.testing.assert_close(split_logprobs, whole_logprobs, atol=1e-5, rtol=1e-5)  # float32 sums
 
     batch.loss_weights = None
     per_sequence, _ = _step(tiny_model_dir, batch, loss_agg="sequence", micro_batch_size=4)
