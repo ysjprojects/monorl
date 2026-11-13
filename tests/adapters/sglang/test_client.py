@@ -34,6 +34,10 @@ class FakeServer:
     server_args: dict[str, Any] = field(default_factory=dict)  # launch arguments besides tp_size
     session: WeightUpdateSession = field(default_factory=WeightUpdateSession)
     update_fail_on: str | None = None  # a bucket carrying this tensor name fails to load
+    # Per accepted update request, per TP rank: the named tensors that rank's payload held. A rank
+    # deserialises its payload once, and so does this server: torch's default sharing strategy on
+    # Linux passes a storage's file descriptor, which can be received a single time.
+    received: list[list[list[tuple[str, torch.Tensor]]]] = field(default_factory=list)
     spec_verify_ct: int = 0
     spec_correct_drafts: int = 0
 
@@ -83,7 +87,14 @@ class FakeServer:
             refused = self.session.refuse_update()
             if refused is not None:
                 return self.session_response(refused)
-            names = [n for n, _ in pickle.loads(base64.b64decode(body["serialized_named_tensors"][0]))]
+            ranks = [
+                pickle.loads(
+                    base64.b64decode(payload, validate=True)
+                )  # MultiprocessingSerializer.deserialize
+                for payload in body["serialized_named_tensors"]
+            ]
+            self.received.append(ranks)
+            names = [n for n, _ in ranks[0]]
             if self.update_fail_on in names:
                 return self.session_response((False, f"failed to load {self.update_fail_on}"))
             ok = self.update_ok
@@ -236,10 +247,10 @@ def test_update_weights_posts_base64_payload_per_rank_then_flushes(client, serve
     _, _, body = server.requests[2]
     assert body["load_format"] is None and body["flush_cache"] is False
     payloads = body["serialized_named_tensors"]
-    assert len(payloads) == server.tp_size
-    for p in payloads:
-        raw = base64.b64decode(p, validate=True)
-        back = pickle.loads(raw)  # what MultiprocessingSerializer.deserialize does after base64
+    assert len(payloads) == server.tp_size and all(isinstance(p, str) for p in payloads)
+    (ranks,) = server.received  # one request so far, deserialised by the server once per rank
+    assert len(ranks) == server.tp_size
+    for back in ranks:
         assert back[0][0] == "layer.w" and torch.equal(back[0][1], w)
     # tp_size is cached: a second update does not re-query server info
     client.update_weights([("layer.b", torch.zeros(1))])
@@ -428,13 +439,8 @@ def pushed(server: FakeServer) -> dict[str, float]:
     assert paths.index("/begin_weight_update") < updates[0] and updates[-1] < paths.index(
         "/end_weight_update"
     )
-    return {
-        name: float(tensor[0])
-        for i in updates
-        for name, tensor in pickle.loads(
-            base64.b64decode(server.requests[i][2]["serialized_named_tensors"][0])
-        )
-    }
+    assert len(server.received) == len(updates)
+    return {name: float(tensor[0]) for ranks in server.received for name, tensor in ranks[0]}
 
 
 def test_mtp_weights_reach_a_drafting_server_under_their_checkpoint_keys(server, run_config_dict):
