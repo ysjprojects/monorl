@@ -14,7 +14,15 @@ export function normalizeMtp(mtp: unknown): MtpConfig | undefined {
   return (Object.keys(full) as (keyof MtpConfig)[]).every((k) => full[k] === defaults[k]) ? undefined : full;
 }
 
-/** Mirrors the pydantic defaults in src/monorl/config/schema.py. */
+/** `providers` as the config stores it: the module paths, trimmed and without empty entries, or
+ * `undefined` for an empty list (the schema default), which keeps the key out of the YAML. */
+export function normalizeProviders(providers: unknown): string[] | undefined {
+  if (!Array.isArray(providers)) return undefined;
+  const modules = providers.filter((p): p is string => typeof p === "string").map((p) => p.trim()).filter(Boolean);
+  return modules.length ? modules : undefined;
+}
+
+/** Mirrors the pydantic defaults in src/monorl/config/schema.py (`providers: []` is stored as absent). */
 export function defaultRunConfig(): RunConfig {
   return {
     run_name: null,
@@ -171,7 +179,9 @@ export function fromPartial(partial: unknown): RunConfig {
   const config = deepMerge(defaultRunConfig(), partial);
   const { mtp: _mtp, ...model } = config.model;
   const mtp = normalizeMtp(_mtp);
-  return { ...config, model: mtp ? { ...model, mtp } : model };
+  const { providers: _providers, ...rest } = config;
+  const providers = normalizeProviders(_providers);
+  return { ...rest, ...(providers ? { providers } : {}), model: mtp ? { ...model, mtp } : model };
 }
 
 export interface Preset {

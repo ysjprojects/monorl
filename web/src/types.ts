@@ -231,6 +231,8 @@ export interface LoggingConfig {
 export interface RunConfig {
   run_name: string | null;
   seed: number;
+  /** Absent when empty, like `model.mtp`: see `normalizeProviders` in defaults.ts. */
+  providers?: string[];
   model: ModelConfig;
   data: DataConfig;
   algorithm: AlgorithmConfig;

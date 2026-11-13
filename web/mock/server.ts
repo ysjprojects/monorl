@@ -75,6 +75,11 @@ const SCHEMA = {
   properties: {
     run_name: { anyOf: [{ type: "string" }, { type: "null" }], default: null, description: "Defaults to '<model>-<algorithm>-<timestamp>'." },
     seed: { type: "integer", default: 42 },
+    providers: {
+      type: "array",
+      items: { type: "string" },
+      description: "Modules imported before the run builds its components. Each exposes register(registry) and may add rewards, environments, engines, trainers or other components under names the config can then use. They are imported from the working directory or the Python path.",
+    },
     model: { $ref: "#/$defs/ModelConfig" },
     data: { $ref: "#/$defs/DataConfig" },
     algorithm: { $ref: "#/$defs/AlgorithmConfig" },

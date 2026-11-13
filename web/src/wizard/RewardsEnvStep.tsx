@@ -1,5 +1,6 @@
+import { useState } from "react";
 import { Card, Field, JsonEditor, NumberInput, Pill, Select, TextInput } from "../components/ui";
-import { REWARD_TYPES_FALLBACK } from "../defaults";
+import { normalizeProviders, REWARD_TYPES_FALLBACK } from "../defaults";
 import { ENV_TYPES, PIPELINE_BACKENDS, type EnvType, type JsonDict, type RewardSpec } from "../types";
 import { HARNESS_EXAMPLE_COMMAND, type StepProps } from "./common";
 import { HarnessForm } from "./HarnessForm";
@@ -26,6 +27,30 @@ const ENV_HINTS: Record<EnvType, string> = {
   hermes: "Hermes Agent tool-using loop driven by the policy; skills configured in params.",
 };
 
+/** `providers` as one comma-separated text input. */
+function ProvidersCard({ config, set }: Pick<StepProps, "config" | "set">) {
+  // Keep the raw text while typing, so a trailing ", " does not snap back.
+  const [text, setText] = useState<string | null>(null);
+  return (
+    <Card title="Providers" className="lg:col-span-2">
+      <Field path="providers" label="Provider modules">
+        <input
+          type="text"
+          className="input font-mono"
+          value={text ?? (config.providers ?? []).join(", ")}
+          placeholder="my_rewards, mypkg.envs"
+          onChange={(e) => {
+            setText(e.target.value);
+            set("providers", normalizeProviders(e.target.value.split(",")));
+          }}
+          onBlur={() => setText(null)}
+        />
+      </Field>
+      <div className="mt-2 text-xs text-slate-500">Comma separated. The lists above show the built-in types; a type one of these modules adds is entered in the YAML of the Review step.</div>
+    </Card>
+  );
+}
+
 export default function RewardsEnvStep({ config, set, system, envs }: StepProps) {
   const rewardTypes = system?.components?.reward?.length ? system.components.reward : REWARD_TYPES_FALLBACK;
   const envTypes = envs?.types?.length ? envs.types : system?.components?.env?.length ? system.components.env : ENV_TYPES;
@@ -46,12 +71,15 @@ export default function RewardsEnvStep({ config, set, system, envs }: StepProps)
 
   if (config.algorithm.name === "sft")
     return (
-      <Card title="Rewards & environment">
-        <SftNote>rewards and environment settings are not used; the existing values are kept in the config so you can switch back to an RL objective without re-entering them.</SftNote>
-        <div className="mt-3 text-xs text-slate-500">
-          Current: {rewards.length} reward(s) · env <span className="font-mono">{env.type}</span>. Change the objective in the Training step to edit them.
-        </div>
-      </Card>
+      <div className="grid gap-4">
+        <Card title="Rewards & environment">
+          <SftNote>rewards and environment settings are not used; the existing values are kept in the config so you can switch back to an RL objective without re-entering them.</SftNote>
+          <div className="mt-3 text-xs text-slate-500">
+            Current: {rewards.length} reward(s) · env <span className="font-mono">{env.type}</span>. Change the objective in the Training step to edit them.
+          </div>
+        </Card>
+        <ProvidersCard config={config} set={set} />
+      </div>
     );
 
   return (
@@ -177,6 +205,8 @@ export default function RewardsEnvStep({ config, set, system, envs }: StepProps)
           </Field>
         )}
       </Card>
+
+      <ProvidersCard config={config} set={set} />
     </div>
   );
 }
