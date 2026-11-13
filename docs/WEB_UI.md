@@ -2,9 +2,11 @@
 
 `monorl serve` starts a FastAPI server (`monorl.server.app:create_app`) on
 `http://127.0.0.1:8000`, serves the built React UI from `web/dist` at `/` and opens a browser
-tab (`--no-open` to skip). The UI is a low-code front end over `RunConfig`: it generates forms
-from `RunConfig.model_json_schema()`, so every field, description and default comes from
-`src/monorl/config/schema.py` — nothing is hard-coded twice.
+tab (`--no-open` to skip). The UI is a low-code front end over `RunConfig`: the wizard builds a
+config from forms written in `web/src/wizard/`, shows each field's description from
+`GET /api/config/schema` (`RunConfig.model_json_schema()`) and has the server validate the result.
+Types and defaults are restated in `web/src/types.ts` and `web/src/defaults.ts`;
+[`web/README.md`](../web/README.md) lists what a new config field needs there.
 
 ```
 monorl serve [--host 127.0.0.1] [--port 8000] [--no-open] [--reload]

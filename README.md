@@ -103,7 +103,7 @@ engine. The orchestrator runs this loop itself, or hands the same config to a pi
   ([docs](docs/DATA.md)).
 - **See what the agent did.** Every saved rollout carries its full transcript; runs report
   success rate, pass@k and turns per episode, to `metrics.jsonl` and optionally W&B and
-  TensorBoard.
+  TensorBoard ([docs](docs/RUNS.md)).
 - **Low-code web UI.** Pick a model and a dataset, preview and map columns, launch runs and
   pipelines, and read episodes turn by turn ([docs](docs/WEB_UI.md)).
 - **Size a run first.** `monorl bench` measures rollout tokens/s, environment episodes/s and
@@ -372,19 +372,22 @@ MTP models other than Mellum, and the value head on Unsloth and on several Ray t
 
 ## Docs
 
-- [Architecture and contracts](docs/ARCHITECTURE.md)
-- [Backends: support matrix, what is patched](docs/BACKENDS.md)
-- [Patching: declaring, gating, verifying](docs/PATCHING.md)
-- [Data: URIs, S3/MinIO/R2 env vars, formats, field mapping](docs/DATA.md)
-- [Environment SDKs (Go, C++) and the MEP/1 wire protocol](docs/ENV_SDK.md)
-- [Capture gateway: training external agents (`env.type: harness`)](docs/GATEWAY.md)
-- [Sandboxed episodes (Docker) and Harbor task directories](docs/SANDBOX.md)
-- [Credit assignment: per-turn returns, value baseline (`ppo`)](docs/CREDIT_ASSIGNMENT.md)
-- [Off-policy corrections for async rollouts](docs/OFF_POLICY.md)
-- [Multi-token prediction: drafting, training and exporting MTP layers](docs/MTP.md)
-- [Pipelines: SFT, RL and rejection sampling loops, stage manifest, API](docs/PIPELINES.md)
-- [Distributed: placement, Ray, weight sync, async rollouts](docs/DISTRIBUTED.md)
-- [Web UI](docs/WEB_UI.md)
+[`docs/README.md`](docs/README.md) is the index, by section of the config. By topic:
+
+- **The config**: [every field](docs/CONFIG.md) · [backends](docs/BACKENDS.md) ·
+  [data](docs/DATA.md) · [algorithms](docs/ALGORITHMS.md) · [rewards](docs/REWARDS.md) ·
+  [environments](docs/ENVIRONMENTS.md)
+- **Agents and environments**: [capture gateway, `env.type: harness`](docs/GATEWAY.md) ·
+  [Docker sandbox and task directories](docs/SANDBOX.md) ·
+  [Go and C++ SDKs, MEP/1](docs/ENV_SDK.md)
+- **Training**: [credit assignment](docs/CREDIT_ASSIGNMENT.md) ·
+  [off-policy corrections](docs/OFF_POLICY.md) · [multi-token prediction](docs/MTP.md) ·
+  [pipelines](docs/PIPELINES.md)
+- **Running**: [runs, metrics, checkpoints](docs/RUNS.md) ·
+  [distributed](docs/DISTRIBUTED.md) · [web UI](docs/WEB_UI.md)
+- **Internals**: [architecture and contracts](docs/ARCHITECTURE.md) ·
+  [patching](docs/PATCHING.md) · [code map](src/monorl/README.md) ·
+  [contributing](CONTRIBUTING.md)
 
 ## Layout
 
@@ -407,6 +410,9 @@ third_party/pins.toml        upstream pins; scripts/vendor.py clones the sources
 ```
 
 ## Development
+
+[`CONTRIBUTING.md`](CONTRIBUTING.md) has the setup, the checks, the testing rules and the
+conventions; [`src/monorl/README.md`](src/monorl/README.md) maps the code.
 
 ```bash
 make test-fast     # pytest -m 'not slow and not network'

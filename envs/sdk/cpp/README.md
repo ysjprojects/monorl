@@ -10,5 +10,5 @@ Header-only, C++17, no dependencies beyond POSIX sockets and the vendored JSON l
 
 Build: `make` here (or `make -C envs cpp` from the repo root) compiles every example with
 `clang++ -std=c++17 -O2 -pthread` into `envs/bin/cpp-<name>`. Override `CXX`/`CXXFLAGS`/`BIN`
-on the command line. See `docs/ENV_SDK.md` for the protocol, the API and how to use a server
-from a monorl run.
+on the command line. See [`docs/ENV_SDK.md`](../../../docs/ENV_SDK.md) for the protocol, the API and
+how to use a server from a monorl run.

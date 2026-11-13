@@ -31,7 +31,7 @@ replicas; the planner validates the sum against `num_nodes × gpus_per_node` (th
 rejects `rollout_gpus + trainer_gpus > total`). The resolved plan is written to
 `Runtime.placement` and shown in the run's `status.json` / UI job page.
 
-On this dev box (no CUDA) every placement degrades to CPU/MPS in-process: `mode: local`,
+Without CUDA every placement degrades to CPU/MPS in-process: `mode: local`,
 `hf` engine, `reference` trainer, `inprocess` sync — which is what the CPU recipes and tests use.
 
 ## Sizing a run
@@ -70,6 +70,17 @@ parallelism levels. All of them accept `--json PATH`.
 
 Everything the orchestrator calls is synchronous from its point of view; Ray futures are awaited
 inside the proxies.
+
+Keys of `cluster.extra` that the Ray runtime and the weight sync read:
+
+| Key | Default | Effect |
+|---|---|---|
+| `ray_init` | `{}` | Keyword arguments forwarded to `ray.init` |
+| `cpus_per_actor` | `1` | CPUs in each actor's bundle when the cluster has no GPUs |
+| `placement_group_timeout_s` | `300` | Seconds to wait for the placement group; after that the run fails with a `ConfigError` |
+| `providers` | `[]` | Provider modules imported inside the actors before the components are built |
+| `sync_chunk_bytes` | 64 MiB | Chunk size of the object-store weight sync (what `inprocess` becomes under Ray) |
+| `sync_dir` | a fresh temp dir | Directory of the `checkpoint` weight sync; it must be on a filesystem that every actor sees |
 
 ## Weight sync strategies
 

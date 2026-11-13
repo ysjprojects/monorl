@@ -12,7 +12,7 @@ Pins: [`third_party/pins.toml`](../third_party/pins.toml). Patch mechanics:
 
 ## Support matrix
 
-| Framework | Pin | Role | `RunConfig` selector | Runs on this dev box (CPU) | Modes | Patched |
+| Framework | Pin | Role | `RunConfig` selector | Runs here on CPU | Modes | Patched |
 |---|---|---|---|---|---|---|
 | transformers | 5.22 | rollout engine | `rollout.backend: hf` | yes | local, ray | – |
 | reference trainer (torch) | – | trainer (full / LoRA via peft) | `trainer.backend: reference` | yes | local, ray | – |
@@ -136,11 +136,14 @@ vLLM/SGLang adapters yet.
   venv therefore downgrades (or refuses) those packages. Run Unsloth in its own environment:
   `make install-unsloth` creates `.venv-unsloth` with `monorl[unsloth,dev]` and the unsloth version
   pinned in `third_party/pins.toml` (uv resolves that to trl 1.15.0 / transformers 5.17.0 for Linux
-  x86_64, Python 3.12; checked with `uv pip compile`, not installed on this CUDA-less dev box), then
+  x86_64, Python 3.12; checked with `uv pip compile`, not installed here for lack of CUDA), then
   `.venv-unsloth/bin/python -m monorl.adapters.unsloth.preload monorl.cli train --config …`. The
   adapter's version gates are written against 2026.10.11.
 
 ### Environments (`env.type`)
+
+[`ENVIRONMENTS.md`](ENVIRONMENTS.md) has the episode model, every parameter of the built-in
+environments and how to write one; this table is the summary.
 
 | type | what it does | key `env.params` |
 |---|---|---|

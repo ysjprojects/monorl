@@ -33,53 +33,15 @@ one repo (Python core, adapters, Go/C++ env SDKs, web UI, recipes).
 5. **Environments are language-agnostic.** The MEP/1 wire protocol
    (`src/monorl/envs/protocol.py`) lets Go/C++/any env servers plug in; the orchestrator runs
    many episodes in parallel against them.
-6. **Everything that can run on this dev box must be proven here** (CPU/MPS, Python 3.12).
-   GPU-only paths are written against pinned upstream APIs, version-gated, unit-tested with
+6. **Everything that can run without a GPU is proven on CPU** (Python 3.12), on a laptop and in
+   CI. GPU-only paths are written against pinned upstream APIs, version-gated, unit-tested with
    fakes, and skipped (not stubbed) when the framework is absent.
 
-## Dev environment facts
+## Layout
 
-- macOS arm64 (M1 Pro, 16 GB), **no CUDA**. MPS exists but tests use CPU for determinism.
-- `.venv` = Python 3.12 with: torch 2.15, **transformers 5.22** (v5 API!), trl 1.17.1,
-  peft 0.21, datasets 5.1, ray 2.59, fastapi, s3fs, moto, openenv-core 0.3.0, hermes-agent 0.19,
-  math-verify 0.9, pytest(+asyncio,timeout,xdist), ruff. Run things with `.venv/bin/python`.
-- Not installable here: vllm (0.33 pinned), sglang (0.5.23), verl (0.9.1), unsloth (2026.10),
-  nemo-rl (git, NVIDIA-NeMo/RL). Adapters for these must gate on import and version.
-- Go 1.27 (`/opt/homebrew/bin/go`), Apple clang++ 21, GNU make. No cmake.
-- HF cache already holds `HuggingFaceTB/SmolLM-135M-Instruct` (tokenizer used by the
-  `tiny_model_dir` fixture), `HuggingFaceTB/SmolLM2-135M-Instruct`, and
-  `hf-internal-testing/tiny-random-LlamaForCausalLM`.
-- transformers v5 gotchas: `tokenizer.apply_chat_template(..., return_tensors="pt")` returns a
-  `BatchEncoding` (use `return_dict=True` and `**enc`, or `tokenize=False` then call the
-  tokenizer). `torch_dtype=` is `dtype=`. Prefer `AutoModelForCausalLM.from_pretrained(path, dtype=...)`.
-
-## Layout & ownership
-
-```
-src/monorl/
-  core/            types, interfaces, registry, reporting, errors      (frozen contract)
-  config/          RunConfig schema + yaml loader                      (frozen contract)
-  patching/        patch engine: Patch/PatchSet, version gates, apply/revert/verify, import hook
-  data/            DataSource impls: local files, hf://, s3:// (fsspec), schema sniffing, prompt formatting
-  algorithms/      pure-torch losses + advantage estimators (grpo/dapo/rloo/reinforce/ppo), KL estimators
-  rewards/         reward functions: exact_match, format/regex, math_verify, code_exec, length, llm_judge, reward_model, composite
-  envs/            Environment impls: single_turn, tool_calling, remote (MEP/1 http+stdio), protocol
-  rollout/         RolloutEngine impls: hf (transformers) + dynamic batching proxy for parallel episodes
-  trainer/         Trainer impls: reference torch trainer (full / LoRA), checkpoints, logprob computation
-  orchestrator/    run(): episode runner (parallel envs), batch building, sync + async pipelined loops, resume
-  distributed/     runtime assembly (local/ray), placement planner, Ray worker groups, weight sync strategies
-  adapters/{vllm,sglang,trl,unsloth,verl,nemo_rl,openenv,hermes}/   engine|backend|env + patches.py
-  server/          FastAPI app + job manager (subprocess `python -m monorl.cli train`) + static web
-  cli/             typer app: serve, train, doctor, patches, data, env
-  doctor.py        system/framework/patch detection report
-envs/sdk/go/       Go SDK (MEP/1 http+stdio) + example envs           envs/sdk/cpp/  C++ SDK + examples
-web/               Vite + React + TS UI                                configs/recipes/  example RunConfigs
-third_party/       pins.toml (+ vendor script clones, gitignored)      tests/<area>/
-```
-
-Each workstream owns the directories named in its task and **only** those. Shared files
-(`core/`, `config/`, `tests/conftest.py`, `pyproject.toml`) are frozen; if you truly need a
-change there, make the smallest possible additive edit and say so in your final report.
+[`src/monorl/README.md`](../src/monorl/README.md) maps the packages, the rules that hold across
+them and the extension points. Setup, checks, testing rules and conventions are in
+[`CONTRIBUTING.md`](../CONTRIBUTING.md).
 
 ## Contracts
 
@@ -256,7 +218,7 @@ by training (`phase: train`), loop and pipeline evaluation (`eval`), rejection s
   else becomes `{"type": "image", "image": null, "note": "<what was omitted>"}`; values that are not
   JSON data (objects, bytes, non-finite floats) become short strings.
 
-### Internal helper contracts (consumed across workstreams)
+### Internal helper contracts
 ```python
 # monorl.data
 def open_source(data_config: DataConfig, *, split: str | None = None, tokenizer=None, seed: int = 0) -> DataSource
@@ -310,7 +272,9 @@ engine never imports adapters.
 (`{name: {installed, version, patches: [PatchStatus]}}` for vllm, sglang, verl, trl, nemo_rl,
 unsloth, openenv, hermes, ray), `components` (registry names per namespace).
 
-### Run directory — `monorl.core.reporting` (read the module docstring)
+### Run directory — `monorl.core.reporting`
+The files of a run directory, their row formats and the metrics glossary are in
+[`RUNS.md`](RUNS.md).
 
 ### Server API (FastAPI, `monorl.server.app:create_app`)
 ```
@@ -373,24 +337,7 @@ episode is pinned to one). Go SDK: `envs/sdk/go`
 | OpenEnv 0.3 | Gym-style `reset/step/state` HTTP envs in containers | `env: openenv`: MEP-compatible client over OpenEnv servers (typed action/observation mapping) |
 | Hermes Agent 0.19 | tool-using agent loop, skills | `env: hermes`: run a Hermes agent turn loop as a multi-turn env; policy tokens come from our engine |
 
-## Rules for every workstream
-
-- Tests go in `tests/<area>/`; per-area fixtures in `tests/<area>/conftest.py`. Use
-  `tiny_model_dir` for anything that loads a model; mark real-model tests `@pytest.mark.slow`;
-  skip (never fake) when an optional framework/toolchain is absent (`pytest.importorskip`,
-  `shutil.which`).
-- Run only your own tests while working: `.venv/bin/python -m pytest tests/<area> -q`. Do not run
-  the whole suite, formatters, or `uv sync`. Need a package? `uv pip install --python .venv/bin/python <pkg>`
-  and add it to the matching extra in `pyproject.toml` (additive edit).
-- No stubs, placeholders, `NotImplementedError` "for later", or fake fallbacks. If a path needs a
-  GPU/framework you don't have, implement it against the pinned upstream API (research with
-  web_search / the upstream repo) and cover it with a fake-based unit test plus an
-  import-guarded real test.
-- Keep modules torch-free where the contract says so (`core/types`, `config`, `envs/protocol`,
-  `server`, `cli`).
-- Final report: what exists, how it was verified (commands + observed output), known gaps.
-
-## Phase 2 contracts: multimodal data, SFT, multi-stage pipelines
+## Contracts: multimodal data, SFT, multi-stage pipelines
 
 ### Multimodal messages — `monorl.core.types`
 `Message.content` is `str | list[ContentPart]`; parts are `{"type":"text","text"}`,
