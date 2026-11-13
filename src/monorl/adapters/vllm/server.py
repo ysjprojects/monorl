@@ -13,9 +13,17 @@ What it adds on top of vLLM v0.33.0's launcher (``vllm/entrypoints/launchers/api
 * The ``vllm.server.monorl_routes`` patch, which mounts :func:`router` on the app:
 
   - ``POST /update_named_param?name=&dtype=&shape=`` with the raw tensor bytes as body
-    (:func:`monorl.adapters.vllm.common.tensor_to_bytes`) → ``collective_rpc("monorl_update_weights")``
+    (:func:`monorl.adapters.vllm.common.tensor_to_bytes`) → ``collective_rpc("monorl_update_weights")``;
+    ``&mtp=true`` marks a checkpoint key of an MTP layer, which goes to the drafter only
+  - ``POST /monorl/finish_weight_update`` after the last parameter of an update, when the server
+    drafts → ``collective_rpc("monorl_refresh_drafter")``
   - ``POST /load_weights_from_path`` ``{"path": ...}`` → ``collective_rpc("monorl_load_weights_from_path")``
-  - ``GET /monorl/info`` → per-worker device/dtype
+  - ``GET /monorl/info`` → per-worker device/dtype and the drafting the worker does
+
+For ``model.mtp.rollout`` start the server with the drafter, e.g.
+``--speculative-config '{"method": "mtp", "num_speculative_tokens": 1}'``; the client refuses a
+server that does not draft with the MTP layers and exact rejection sampling, and reads the
+acceptance counters from vLLM's own ``GET /metrics`` (so do not pass ``--disable-log-stats``).
 
 :func:`router` / :func:`attach_router` import neither vLLM nor torch-heavy modules beyond
 ``torch`` itself, so the routes are unit-testable with a fake ``app.state.engine_client``
@@ -59,14 +67,22 @@ async def update_named_param(
     name: str = Query(..., description="HF parameter name"),
     dtype: str = Query(..., description="torch dtype name, e.g. bfloat16"),
     shape: str = Query("", description="comma-separated dims; empty for a scalar"),
+    mtp: bool = Query(False, description="the name is a checkpoint key of an MTP layer"),
 ) -> JSONResponse:
     body = await request.body()
     try:
         tensor = tensor_from_bytes(body, dtype, _parse_shape(shape))
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
-    results = await _engine_client(request).collective_rpc("monorl_update_weights", args=([(name, tensor)],))
+    args = ([], [(name, tensor)]) if mtp else ([(name, tensor)],)
+    results = await _engine_client(request).collective_rpc("monorl_update_weights", args=args)
     return JSONResponse({"name": name, "loaded": [int(r) for r in results]})
+
+
+@router.post("/monorl/finish_weight_update")
+async def finish_weight_update(request: Request) -> JSONResponse:
+    await _engine_client(request).collective_rpc("monorl_refresh_drafter")
+    return JSONResponse({"status": "finished"})
 
 
 @router.post("/load_weights_from_path")

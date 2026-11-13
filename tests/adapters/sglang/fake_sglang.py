@@ -7,6 +7,7 @@ Mirrored upstream files (tag v0.5.23):
   ``async_generate(...)`` and the ``loop`` the synchronous methods run on,
   ``update_weights_from_tensor(named_tensors, load_format, flush_cache)`` (serialises once per TP
   rank with ``MultiprocessingSerializer`` — ``_serialize_tensors_per_rank``),
+  ``begin_weight_update(selector)`` / ``end_weight_update()``,
   ``update_weights_from_disk(model_path, load_format)``, ``release_memory_occupation(tags)``,
   ``resume_memory_occupation(tags)``, ``flush_cache()``, ``shutdown()``.
 * ``python/sglang/srt/utils/common.py`` (re-exported by ``sglang/srt/utils/__init__.py``) —
@@ -15,6 +16,11 @@ Mirrored upstream files (tag v0.5.23):
   ``abort_request(rid, abort_all)`` and the ``{"text", "output_ids", "meta_info"}`` output shape of
   ``_handle_batch_output``.
 * ``python/sglang/srt/sampling/sampling_params.py`` — ``SamplingParams`` keyword names.
+* ``python/sglang/srt/managers/scheduler_components/weight_updater.py`` — the weight-update
+  session (:class:`WeightUpdateSession`): tensor updates are refused outside one, a second
+  ``begin`` and an ``end`` without ``begin`` are refused, a failed update leaves it open.
+* ``python/sglang/srt/managers/tokenizer_manager.py`` ``_calculate_spec_decoding_metrics`` — the
+  ``spec_*`` entries of ``meta_info`` under speculative decoding (:func:`spec_meta`).
 """
 
 from __future__ import annotations
@@ -116,6 +122,63 @@ class TokenizerManager:
         ]
 
 
+# -- sglang.srt.managers.scheduler_components.weight_updater ----------------------------------------
+class WeightUpdateSession:
+    """``SchedulerWeightUpdaterManager``'s session rules, shared by the fake engine and the fake
+    HTTP server. Every method returns upstream's ``(success, message)``."""
+
+    def __init__(self) -> None:
+        self.selector: str | None = None  # None: no session is open
+        self.opened: list[str] = []  # selector of every session begun
+        self.closed = 0
+
+    def begin(self, selector: str = "all") -> tuple[bool, str]:
+        if self.selector is not None:
+            return False, "a weight-update session is already open; call end_weight_update() first"
+        if selector not in ("target", "draft", "all"):
+            raise ValueError(f"invalid selector {selector!r}; expected 'target', 'draft', or 'all'")
+        self.selector = selector
+        self.opened.append(selector)
+        return True, "Success"
+
+    def end(self) -> tuple[bool, str]:
+        if self.selector is None:
+            return False, "no weight-update session is open; call begin_weight_update() first"
+        self.selector = None
+        self.closed += 1
+        return True, "Success"
+
+    def refuse_update(self) -> tuple[bool, str] | None:
+        """The answer to ``update_weights_from_tensor`` outside a session; ``None`` inside one."""
+        if self.selector is None:
+            return (
+                False,
+                "update_weights_from_tensor must run between begin_weight_update() and end_weight_update()",
+            )
+        return None
+
+
+# -- sglang.srt.managers.tokenizer_manager._calculate_spec_decoding_metrics -------------------------
+AUTO_NUM_DRAFT_TOKENS = 4  # _auto_choose_speculative_params for the MTP architectures: (3, 1, 4)
+
+
+def spec_meta(
+    server_args: dict[str, Any], *, verify_ct: int, correct_drafts: int, completion_tokens: int
+) -> dict[str, Any]:
+    """``meta_info`` entries of a finished request that was verified ``verify_ct`` times."""
+    if not server_args.get("speculative_algorithm") or verify_ct <= 0:
+        return {}
+    num_draft_tokens = server_args.get("speculative_num_draft_tokens") or AUTO_NUM_DRAFT_TOKENS
+    proposed = verify_ct * (num_draft_tokens - 1)
+    return {
+        "spec_accept_rate": correct_drafts / proposed,
+        "spec_accept_length": completion_tokens / verify_ct,
+        "spec_num_correct_drafts": correct_drafts,
+        "spec_num_proposed_drafts": proposed,
+        "spec_verify_ct": verify_ct,
+    }
+
+
 # -- sglang.srt.entrypoints.engine ----------------------------------------------------------------
 @dataclass
 class FakeCall:
@@ -130,6 +193,9 @@ class EngineScript:
     finish: str | None = "stop"  # type field of meta_info.finish_reason; None → unfinished
     output_len: int = 3
     update_result: tuple[bool, str] = (True, "Success.")
+    update_fail_on: str | None = None  # a bucket carrying this tensor name fails to load
+    spec_verify_ct: int = 0  # verify passes per request (the engine must run a speculative algorithm)
+    spec_correct_drafts: int = 0  # drafts accepted per request
     disk_result: tuple[bool, str, int] = (True, "Succeeded to update model weights.", 0)
     flush_success: bool = True
     include_output_ids: bool = True
@@ -151,6 +217,7 @@ class Engine:
         self.script = EngineScript()
         self.shut_down = False
         self.tokenizer_manager = TokenizerManager()
+        self.session = WeightUpdateSession()
         self.generating = threading.Event()  # set once a held async_generate is waiting
         Engine.instances.append(self)
 
@@ -336,6 +403,12 @@ class Engine:
             "finish_reason": finish,
             "prompt_tokens": prompt_len,
             "completion_tokens": n_tokens,
+            **spec_meta(
+                self.kwargs,
+                verify_ct=s.spec_verify_ct,
+                correct_drafts=s.spec_correct_drafts,
+                completion_tokens=n_tokens,
+            ),
         }
         if return_logprob:
             meta["input_token_logprobs"] = [(None, 0, None)]
@@ -362,7 +435,20 @@ class Engine:
                 },
             )
         )
+        refused = self.session.refuse_update()
+        if refused is not None:
+            return refused
+        if any(name == self.script.update_fail_on for name, _ in named_tensors):
+            return False, f"failed to load {self.script.update_fail_on}"
         return self.script.update_result
+
+    def begin_weight_update(self, selector="all"):
+        self.calls.append(FakeCall("begin_weight_update", {"selector": selector}))
+        return self.session.begin(selector)
+
+    def end_weight_update(self):
+        self.calls.append(FakeCall("end_weight_update", {}))
+        return self.session.end()
 
     def update_weights_from_disk(self, model_path, load_format=None):
         self.calls.append(
@@ -486,10 +572,13 @@ def remove_fake_sglang() -> None:
             del sys.modules[name]
 
 
-def make_config(run_config_dict: dict[str, Any], **rollout: Any):
-    """``run_config_dict`` with ``rollout.backend='sglang'`` and overrides."""
+def make_config(run_config_dict: dict[str, Any], mtp: dict[str, Any] | None = None, **rollout: Any):
+    """``run_config_dict`` with ``rollout.backend='sglang'`` and overrides; ``mtp`` is
+    ``model.mtp``."""
     from monorl.config.schema import RunConfig
 
     payload = dict(run_config_dict)
+    if mtp is not None:
+        payload["model"] = {**run_config_dict["model"], "mtp": mtp}
     payload["rollout"] = {**run_config_dict["rollout"], "backend": "sglang", "device": None, **rollout}
     return RunConfig.model_validate(payload)

@@ -12,7 +12,7 @@ from fake_sglang import MultiprocessingSerializer, make_config
 from monorl.adapters.sglang.engine import SGLangEngine, import_sglang
 from monorl.core.errors import BackendUnavailable, GenerationCancelled, WeightSyncError
 from monorl.core.interfaces import RolloutEngine
-from monorl.core.types import SamplingParams
+from monorl.core.types import SamplingParams, SpeculationStats
 
 
 @pytest.fixture
@@ -193,8 +193,14 @@ def test_update_weights_serialises_named_tensors_per_rank_and_flushes(fake_sglan
     w2 = torch.ones(4, requires_grad=True)
     eng.update_weights([("model.a", w1), ("model.b", w2)])
     methods = fake.methods()
-    assert methods == ["update_weights_from_tensor", "flush_cache"]
-    call = fake.calls[0]
+    assert methods == [
+        "begin_weight_update",
+        "update_weights_from_tensor",
+        "end_weight_update",
+        "flush_cache",
+    ]
+    assert fake.calls[0].kwargs == {"selector": "all"}  # target and draft runner
+    call = fake.calls[1]
     assert call.kwargs["load_format"] is None and call.kwargs["flush_cache"] is False
     assert [n for n, _ in call.kwargs["named_tensors"]] == ["model.a", "model.b"]
     assert not call.kwargs["named_tensors"][1][1].requires_grad
@@ -213,9 +219,13 @@ def test_update_weights_buckets_and_flushes_once(fake_sglang, run_config_dict):
     fake = fake_of(eng)
     weights = [(f"w{i}", torch.zeros(4, dtype=torch.float32)) for i in range(5)]  # 16 bytes each
     eng.update_weights(iter(weights))
-    assert fake.methods() == ["update_weights_from_tensor"] * 5 + ["flush_cache"]
-    assert all(c.kwargs["flush_cache"] is False for c in fake.calls[:5])
-    assert [c.kwargs["named_tensors"][0][0] for c in fake.calls[:5]] == ["w0", "w1", "w2", "w3", "w4"]
+    assert fake.methods() == (
+        ["begin_weight_update"] + ["update_weights_from_tensor"] * 5 + ["end_weight_update", "flush_cache"]
+    )
+    updates = fake.calls[1:6]
+    assert all(c.kwargs["flush_cache"] is False for c in updates)
+    assert [c.kwargs["named_tensors"][0][0] for c in updates] == ["w0", "w1", "w2", "w3", "w4"]
+    assert fake.session.opened == ["all"] and fake.session.closed == 1
 
 
 def test_update_weights_empty_does_not_flush(engine):
@@ -227,6 +237,40 @@ def test_update_weights_failure_raises(engine):
     fake_of(engine).script.update_result = (False, "shape mismatch")
     with pytest.raises(WeightSyncError, match="shape mismatch"):
         engine.update_weights([("w", torch.zeros(1))])
+
+
+def test_failed_bucket_closes_the_session_so_the_next_push_works(fake_sglang, run_config_dict):
+    eng = SGLangEngine(make_config(run_config_dict, extra={"bucket_bytes": 16}))
+    fake = fake_of(eng)
+    weights = [(f"w{i}", torch.zeros(4, dtype=torch.float32)) for i in range(3)]
+    fake.script.update_fail_on = "w1"
+    with pytest.raises(WeightSyncError, match="failed to load w1"):
+        eng.update_weights(weights)
+    # w2 was not sent, the session was closed and the stale radix cache was left alone
+    assert fake.methods() == ["begin_weight_update"] + ["update_weights_from_tensor"] * 2 + [
+        "end_weight_update"
+    ]
+    assert fake.session.selector is None
+    fake.script.update_fail_on = None
+    eng.update_weights(weights)
+    assert fake.session.opened == ["all", "all"] and fake.session.closed == 2
+    assert fake.methods()[-2:] == ["end_weight_update", "flush_cache"]
+
+
+def test_weight_stream_that_raises_closes_the_session(fake_sglang, run_config_dict):
+    eng = SGLangEngine(make_config(run_config_dict, extra={"bucket_bytes": 16}))
+    fake = fake_of(eng)
+
+    def broken():
+        yield "w0", torch.zeros(4, dtype=torch.float32)
+        yield "w1", torch.zeros(4, dtype=torch.float32)
+        raise RuntimeError("trainer export failed")
+
+    with pytest.raises(RuntimeError, match="trainer export failed"):
+        eng.update_weights(broken())
+    assert fake.methods() == ["begin_weight_update", "update_weights_from_tensor", "end_weight_update"]
+    eng.update_weights([("w", torch.zeros(1))])
+    assert fake.session.closed == 2 and fake.session.selector is None
 
 
 def test_flush_cache_failure_only_warns(engine, caplog):
@@ -309,3 +353,77 @@ def test_shutdown_once(engine):
     engine.shutdown()
     assert fake_of(engine).methods() == ["shutdown"]
     assert fake_of(engine).shut_down
+
+
+# -- MTP drafting --------------------------------------------------------------------------------
+def test_mtp_rollout_starts_a_drafting_engine_and_reports_speculation(fake_sglang, run_config_dict):
+    cfg = make_config(run_config_dict, mtp={"enabled": True, "rollout": True, "num_speculative_tokens": 2})
+    eng = SGLangEngine(cfg)
+    fake = fake_of(eng)
+    assert fake.kwargs["speculative_algorithm"] == "EAGLE"
+    assert eng.speculation_stats() == SpeculationStats()  # nothing generated yet
+
+    fake.script.output_len, fake.script.spec_verify_ct, fake.script.spec_correct_drafts = 7, 3, 4
+    eng.generate([[1, 2], [3]], SamplingParams(n=2, max_new_tokens=7))
+    eng.generate([[4]], SamplingParams(n=1, max_new_tokens=5))
+    # 5 requests, 3 verify passes each proposing num_draft_tokens - 1 = 2 drafts
+    stats = eng.speculation_stats()
+    assert stats == SpeculationStats(steps=15, drafted=30, accepted=20, emitted=4 * 7 + 5)
+    assert stats.metrics()["mtp/accept_rate"] == pytest.approx(2 / 3)
+    assert eng.speculation_stats() == SpeculationStats()  # reading resets
+
+    fake.script.spec_verify_ct = 0  # aborted before the first decode step: no spec_* in meta_info
+    eng.generate([[4]], SamplingParams(n=1))
+    assert eng.speculation_stats() == SpeculationStats()
+
+
+def test_speculation_stats_is_none_without_mtp_rollout(fake_sglang, run_config_dict):
+    for mtp in (None, {"enabled": True}):
+        eng = SGLangEngine(make_config(run_config_dict, mtp=mtp))
+        assert "speculative_algorithm" not in fake_of(eng).kwargs
+        eng.generate([[1]], SamplingParams(n=1))
+        assert eng.speculation_stats() is None
+
+
+MTP_STREAM = [
+    ("model.layers.0.w", torch.ones(2)),
+    ("@mtp/mtp.fc.weight", torch.full((2,), 2.0)),
+    ("lm_head.weight", torch.full((2,), 3.0)),
+    ("@mtp/mtp.layers.0.mlp.experts.3.down_proj.weight", torch.full((2,), 4.0)),
+]
+
+
+def pushed(fake: FakeEngine) -> dict[str, float]:
+    """Name → value of every tensor the fake received, which must all lie inside one session."""
+    methods = fake.methods()
+    assert methods[0] == "begin_weight_update" and methods.count("begin_weight_update") == 1
+    assert methods.index("end_weight_update") > max(
+        i for i, m in enumerate(methods) if m == "update_weights_from_tensor"
+    )
+    return {
+        name: float(tensor[0])
+        for call in fake.calls
+        if call.method == "update_weights_from_tensor"
+        for name, tensor in call.kwargs["named_tensors"]
+    }
+
+
+def test_mtp_weights_reach_a_drafting_engine_under_their_checkpoint_keys(fake_sglang, run_config_dict):
+    cfg = make_config(run_config_dict, mtp={"enabled": True, "rollout": True}, extra={"bucket_bytes": 8})
+    eng = SGLangEngine(cfg)
+    eng.update_weights(iter(MTP_STREAM))
+    assert pushed(fake_of(eng)) == {
+        "model.layers.0.w": 1.0,
+        "mtp.fc.weight": 2.0,
+        "lm_head.weight": 3.0,
+        "mtp.layers.0.mlp.experts.3.down_proj.weight": 4.0,
+    }
+
+
+def test_mtp_weights_are_not_sent_to_an_engine_that_does_not_draft(fake_sglang, run_config_dict):
+    eng = SGLangEngine(make_config(run_config_dict, mtp={"enabled": True, "train": True}))
+    eng.update_weights(iter(MTP_STREAM))
+    assert pushed(fake_of(eng)) == {"model.layers.0.w": 1.0, "lm_head.weight": 3.0}
+    n = len(fake_of(eng).calls)
+    eng.update_weights([MTP_STREAM[1]])  # nothing for this engine: no session, no cache flush
+    assert len(fake_of(eng).calls) == n

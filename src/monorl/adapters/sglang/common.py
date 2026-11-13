@@ -22,6 +22,23 @@ Everything here is verified against SGLang v0.5.23:
   HTTP client can build ``/update_weights_from_tensor`` payloads without importing sglang.
 * ``python/sglang/srt/arg_groups/fields/*.py`` — the ``ServerArgs`` keyword names used in
   :func:`engine_kwargs` and :data:`SERVER_ARG_PASSTHROUGH`.
+* ``python/sglang/srt/arg_groups/fields/spec.py`` and ``arg_groups/speculative_hook.py`` — drafting
+  with a model's own MTP layers is ``speculative_algorithm="EAGLE"`` (``"NEXTN"`` is an alias,
+  upper-cased before it is resolved) with the MTP weights taken from the target checkpoint.
+  ``speculative_num_steps`` / ``speculative_eagle_topk`` / ``speculative_num_draft_tokens`` are set
+  all three or not at all (SGLang then chooses them per architecture); with ``topk == 1`` the
+  verify window is ``num_steps + 1``. ``speculative_accept_threshold_single`` / ``_acc`` (default
+  1.0) below 1.0 accept drafts more often than the target would sample them. Verification applies
+  temperature, ``top_k`` and ``top_p``; the logprobs returned are the target's
+  (``srt/layers/logprob_processor.py``).
+* ``python/sglang/srt/managers/tokenizer_manager.py`` ``_calculate_spec_decoding_metrics``: a
+  finished request that was verified at least once carries ``meta_info.spec_verify_ct`` (verify
+  passes), ``spec_num_proposed_drafts`` (``verify_ct * (num_draft_tokens - 1)``) and
+  ``spec_num_correct_drafts`` (accepted drafts) next to ``completion_tokens``.
+* ``python/sglang/srt/managers/scheduler_components/weight_updater.py``: tensor updates are only
+  accepted inside a session (``begin_weight_update(selector)`` … ``end_weight_update()``); with
+  selector ``"all"`` the same named tensors go to the target and the draft runner, whose
+  ``load_weights`` each pick their own checkpoint keys. A failed update leaves the session open.
 * ``python/sglang/srt/entrypoints/engine.py`` ``Engine.generate(input_ids=..., image_data=...)``
   and ``GenerateReqInput.image_data`` (``srt/managers/io_struct.py``): one entry per request, each
   a list of images (PIL instance, file path, URL or base64/data URL — ``srt/utils.py``
@@ -35,6 +52,7 @@ from __future__ import annotations
 import base64
 import io
 import math
+import threading
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from multiprocessing.reduction import ForkingPickler
 from typing import Any
@@ -49,9 +67,11 @@ from monorl.core.types import (
     FinishReason,
     PromptInput,
     SamplingParams,
+    SpeculationStats,
     TopLogprobs,
     messages_have_media,
 )
+from monorl.mtp import checkpoint_key, is_wire_name
 
 SGLANG_VERSIONS = ">=0.5.23,<0.6"
 FRAMEWORK = "sglang"
@@ -93,6 +113,17 @@ SERVER_ARG_PASSTHROUGH: frozenset[str] = frozenset(
         "port",
     }
 )
+
+MTP_ALGORITHMS: tuple[str, ...] = ("EAGLE", "NEXTN")
+"""``speculative_algorithm`` values that draft with the MTP layers of the target checkpoint."""
+
+ACCEPT_THRESHOLDS: tuple[str, ...] = (
+    "speculative_accept_threshold_single",
+    "speculative_accept_threshold_acc",
+)
+
+WEIGHT_UPDATE_SELECTOR = "all"
+"""Weight-update sessions cover the target and the draft runner (a no-op for an absent draft)."""
 
 _FINISH: dict[str | None, FinishReason] = {
     "stop": "stop",
@@ -336,7 +367,108 @@ def group_outputs(
     return grouped
 
 
+# -- speculative decoding ----------------------------------------------------------------------
+
+
+def drafts_with_mtp(config: RunConfig) -> bool:
+    """Whether rollouts draft with the model's MTP layers."""
+    return config.model.mtp.enabled and config.model.mtp.rollout
+
+
+def speculation_of(outputs: Iterable[Mapping[str, Any]]) -> SpeculationStats:
+    """What speculative decoding did for these finished requests, from their ``meta_info``.
+    Requests that were never verified (aborted before the first decode step, or served by an
+    engine that does not draft) carry no ``spec_*`` entries and count nothing."""
+    stats = SpeculationStats()
+    for output in outputs:
+        meta = output.get("meta_info") or {}
+        steps = meta.get("spec_verify_ct")
+        if not steps:
+            continue
+        stats.add(
+            SpeculationStats(
+                steps=int(steps),
+                drafted=int(meta["spec_num_proposed_drafts"]),
+                accepted=int(meta["spec_num_correct_drafts"]),
+                emitted=int(meta["completion_tokens"]),
+            )
+        )
+    return stats
+
+
+class SpeculationCounter:
+    """Thread-safe running total behind the engines' ``speculation_stats()``."""
+
+    def __init__(self) -> None:
+        self._total = SpeculationStats()
+        self._lock = threading.Lock()
+
+    def record(self, outputs: Iterable[Mapping[str, Any]]) -> None:
+        stats = speculation_of(outputs)
+        with self._lock:
+            self._total.add(stats)
+
+    def take(self) -> SpeculationStats:
+        """The counters since the previous call; reading resets them."""
+        with self._lock:
+            total, self._total = self._total, SpeculationStats()
+        return total
+
+
+def check_speculative_args(config: RunConfig, args: Mapping[str, Any], *, source: str) -> None:
+    """Reject speculative-decoding arguments (``Engine`` kwargs, or the resolved ``ServerArgs`` a
+    server reports) under which rollouts would not be what the config asks for. ``source`` names
+    where ``args`` come from, for the message."""
+    algorithm = args.get("speculative_algorithm")
+    if algorithm is not None:
+        for key in ACCEPT_THRESHOLDS:
+            value = args.get(key)
+            if value is not None and float(value) < 1.0:
+                raise ConfigError(
+                    f"{source}: {key}={value} accepts draft tokens more often than the policy samples them, "
+                    "so the recorded logprobs would no longer be those of the sampling distribution; "
+                    "leave it at 1.0"
+                )
+    if drafts_with_mtp(config) and str(algorithm).upper() not in MTP_ALGORITHMS:
+        raise ConfigError(
+            f"{source}: speculative_algorithm={algorithm!r}, but model.mtp.rollout drafts with the model's "
+            f"MTP layers, which is speculative_algorithm 'EAGLE' (alias 'NEXTN') in SGLang"
+        )
+
+
+def speculative_kwargs(config: RunConfig) -> dict[str, Any]:
+    """``ServerArgs`` that make SGLang draft with the checkpoint's MTP layers; empty unless
+    ``model.mtp.rollout`` is on."""
+    if not drafts_with_mtp(config):
+        return {}
+    kwargs: dict[str, Any] = {"speculative_algorithm": "EAGLE"}
+    steps = config.model.mtp.num_speculative_tokens
+    if steps is not None:
+        kwargs.update(
+            speculative_num_steps=steps, speculative_eagle_topk=1, speculative_num_draft_tokens=steps + 1
+        )
+    if config.rollout.enable_sleep_mode:
+        # On release the memory saver stashes the target's buffers only; the CPU backups keep the
+        # weights of target and draft across release/resume (verl sets both for MTP rollouts).
+        kwargs.update(enable_weights_cpu_backup=True, enable_draft_weights_cpu_backup=True)
+    return kwargs
+
+
 # -- weights -----------------------------------------------------------------------------------
+
+
+def route_weights(
+    weights: Iterable[tuple[str, torch.Tensor]], *, drafting: bool
+) -> Iterator[tuple[str, torch.Tensor]]:
+    """A trainer's weight stream as SGLang loads it. MTP weights (``monorl.mtp.WIRE_PREFIX``) go
+    out under their checkpoint keys, which the draft runner's ``load_weights`` picks up and the
+    target's skips; an engine that does not draft has no runner for them, so they are dropped.
+    The policy's weights pass through."""
+    for name, tensor in weights:
+        if not is_wire_name(name):
+            yield name, tensor
+        elif drafting:
+            yield checkpoint_key(name), tensor
 
 
 def bucket_weights(
@@ -402,7 +534,10 @@ def engine_kwargs(config: RunConfig) -> dict[str, Any]:
 
     ``rollout.extra`` keys in :data:`SERVER_ARG_PASSTHROUGH` are forwarded as-is;
     ``rollout.extra.engine_kwargs`` (a dict) is merged last and wins. Unknown keys are ignored
-    here so other components can keep their own options in ``rollout.extra``.
+    here so other components can keep their own options in ``rollout.extra``. With
+    ``model.mtp.rollout`` the engine drafts with the model's MTP layers
+    (:func:`speculative_kwargs`); overrides that would make speculative decoding lossy, or draft
+    with something else, raise :class:`ConfigError`.
     """
     rollout, model, extra = config.rollout, config.model, config.rollout.extra
     kwargs: dict[str, Any] = {
@@ -417,6 +552,7 @@ def engine_kwargs(config: RunConfig) -> dict[str, Any]:
         "context_length": rollout.max_model_len,
         "enable_memory_saver": rollout.enable_sleep_mode,
         "log_level": str(extra.get("log_level", "warning")),
+        **speculative_kwargs(config),
     }
     for key in SERVER_ARG_PASSTHROUGH:
         if key in extra:
@@ -425,6 +561,7 @@ def engine_kwargs(config: RunConfig) -> dict[str, Any]:
     if not isinstance(overrides, Mapping):
         raise ConfigError(f"rollout.extra.engine_kwargs must be a mapping, got {type(overrides).__name__}")
     kwargs.update(overrides)
+    check_speculative_args(config, kwargs, source="rollout.extra.engine_kwargs")
     return kwargs
 
 

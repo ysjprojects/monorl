@@ -28,16 +28,35 @@ Upstream references (vLLM v0.33.0):
   with ``image_url`` parts, ``logprobs``/``top_logprobs``, ``return_token_ids``,
   ``max_completion_tokens``) and ``ChatCompletionResponse`` (``choices[i].token_ids``,
   ``choices[i].logprobs.content[k].logprob``, response-level ``prompt_token_ids``).
+* ``vllm/config/speculative.py`` ``SpeculativeConfig`` (``speculative_config`` engine argument,
+  ``--speculative-config`` JSON on the server; unknown keys are rejected): ``method`` (``"mtp"``;
+  the per-family names such as ``deepseek_mtp`` are rewritten to it), ``num_speculative_tokens``,
+  ``rejection_sample_method`` (``"standard"`` is exact rejection sampling; ``"synthetic"`` and
+  ``"fly"`` accept tokens the target would not have sampled), ``draft_lm_head_quantization``.
+* Logprobs under speculative decoding are the target's for every emitted token, taken from the
+  logits the token was verified against: after logits processors, temperature and top-k/top-p
+  with ``logprobs_mode="processed_logprobs"``, raw otherwise
+  (``vllm/v1/sample/rejection_sampler.py`` ``RejectionSampler.forward``,
+  ``vllm/v1/worker/gpu/spec_decode/rejection_sampler.py`` ``_verify_in_chunks``), which is what
+  ``vllm/v1/sample/sampler.py`` ``Sampler.forward`` returns without a drafter. ``min_p`` and
+  ``logit_bias`` are rejected per request (``SamplingParams._validate_spec_decode``).
+* ``vllm/v1/spec_decode/metrics.py`` ``SpecDecodingProm``: Prometheus counters
+  ``vllm:spec_decode_num_drafts`` (verification passes), ``..._num_draft_tokens``,
+  ``..._num_accepted_tokens``, one sample per ``model_name``/``engine`` label set; a text
+  exposition (``GET /metrics``) names the samples ``<counter>_total``.
 """
 
 from __future__ import annotations
 
+import json
 import math
+import threading
 from collections.abc import Iterable, Iterator, Sequence
 from typing import Any
 
 import torch
 
+from monorl.config.schema import RunConfig
 from monorl.core.errors import ConfigError
 from monorl.core.types import (
     Completion,
@@ -45,6 +64,7 @@ from monorl.core.types import (
     Message,
     PromptInput,
     SamplingParams,
+    SpeculationStats,
     TopLogprobs,
     messages_have_media,
 )
@@ -423,6 +443,116 @@ def completions_from_choices(
             )
         grouped.append(group)
     return grouped
+
+
+# -- MTP drafting (speculative decoding) -------------------------------------------------------
+
+
+def speculative_config(config: RunConfig) -> dict[str, Any] | None:
+    """``speculative_config`` of an engine that drafts with the model's MTP layers; ``None``
+    when ``model.mtp.rollout`` is off. Keys of ``rollout.extra.engine_kwargs.speculative_config``
+    are laid over ``{"method": "mtp", "num_speculative_tokens": N or 1}``.
+
+    Raises :class:`ConfigError` for settings under which the rollout would not be what
+    ``model.mtp.rollout`` promises: a drafter that is not the MTP layers, a rejection sampler
+    that is not exact (the recorded logprobs would not be those of the distribution the tokens
+    were sampled from), and sleep level 2, which discards the drafter's weights.
+    """
+    mtp = config.model.mtp
+    if not (mtp.enabled and mtp.rollout):
+        return None
+    extra = config.rollout.extra
+    user = (extra.get("engine_kwargs") or {}).get("speculative_config") or {}
+    if not isinstance(user, dict):
+        raise ConfigError(f"rollout.extra.engine_kwargs.speculative_config must be a mapping, got {user!r}")
+    compiled: dict[str, Any] = {"method": "mtp", "num_speculative_tokens": mtp.num_speculative_tokens or 1}
+    # vLLM accepts dashed keys (EngineArgs.create_speculative_config); compare one spelling.
+    compiled.update({str(key).replace("-", "_"): value for key, value in user.items()})
+    method = compiled["method"]
+    if not (isinstance(method, str) and (method == "mtp" or method.endswith("_mtp"))):
+        raise ConfigError(
+            f"model.mtp.rollout drafts with the model's MTP layers, but "
+            f"rollout.extra.engine_kwargs.speculative_config.method is {method!r}; remove it or set "
+            "model.mtp.rollout: false"
+        )
+    rejection = compiled.get("rejection_sample_method", "standard")
+    if rejection != "standard":
+        raise ConfigError(
+            f"speculative_config.rejection_sample_method={rejection!r} is not supported with "
+            "model.mtp.rollout: only 'standard' samples every token from the policy's distribution, "
+            "which is what the recorded logprobs describe"
+        )
+    if config.rollout.enable_sleep_mode and int(extra.get("sleep_level", 1)) == 2:
+        raise ConfigError(
+            "model.mtp.rollout cannot be combined with rollout.extra.sleep_level=2: vLLM's level-2 sleep "
+            "discards the drafter's weights, after which no draft is accepted; use sleep_level=1"
+        )
+    return compiled
+
+
+#: ``SpecDecodingProm`` counters, in the order of :meth:`SpeculationCounters.delta`'s totals.
+SPEC_DECODE_COUNTERS = (
+    "vllm:spec_decode_num_drafts",
+    "vllm:spec_decode_num_draft_tokens",
+    "vllm:spec_decode_num_accepted_tokens",
+)
+
+
+def spec_decode_totals(samples: Iterable[tuple[str, float]]) -> tuple[int, int, int] | None:
+    """``(drafts, draft tokens, accepted tokens)`` summed over the label sets of
+    ``(counter name, value)`` samples; ``None`` when the counters are not among them (the engine
+    does not draft, or it keeps no statistics)."""
+    totals = dict.fromkeys(SPEC_DECODE_COUNTERS, 0)
+    seen = False
+    for name, value in samples:
+        if name in totals:
+            totals[name] += int(value)
+            seen = True
+    return (
+        (totals[SPEC_DECODE_COUNTERS[0]], totals[SPEC_DECODE_COUNTERS[1]], totals[SPEC_DECODE_COUNTERS[2]])
+        if seen
+        else None
+    )
+
+
+def prometheus_samples(text: str) -> Iterator[tuple[str, float]]:
+    """``(counter name, value)`` of the counter samples in a Prometheus text exposition
+    (``vllm:spec_decode_num_drafts_total{engine="0",model_name="m"} 12.0``)."""
+    for line in text.splitlines():
+        if not line or line.startswith("#"):
+            continue
+        sample, _, value = line.rpartition(" ")
+        name = sample.split("{", 1)[0].strip()
+        if not name.endswith("_total"):
+            continue
+        try:
+            yield name.removesuffix("_total"), float(value)
+        except ValueError:
+            continue
+
+
+class SpeculationCounters:
+    """Turns vLLM's ever-growing speculative-decoding counters into the deltas
+    ``speculation_stats()`` reports."""
+
+    def __init__(self, totals: tuple[int, int, int] = (0, 0, 0)) -> None:
+        self._seen = totals
+        self._lock = threading.Lock()
+
+    def delta(self, totals: tuple[int, int, int]) -> SpeculationStats:
+        """What happened between the previous call (or construction) and ``totals``."""
+        with self._lock:
+            previous, self._seen = self._seen, totals
+        if any(now < before for now, before in zip(totals, previous, strict=True)):
+            previous = (0, 0, 0)  # the counters started over (a new engine registered them, a restart)
+        steps, drafted, accepted = (now - before for now, before in zip(totals, previous, strict=True))
+        # Every verification pass emits its accepted drafts and one token of the policy's own.
+        return SpeculationStats(steps=steps, drafted=drafted, accepted=accepted, emitted=accepted + steps)
+
+
+def speculative_serve_flag(compiled: dict[str, Any]) -> str:
+    """The ``vllm serve`` / ``monorl.adapters.vllm.server`` argument for ``compiled``."""
+    return f"--speculative-config '{json.dumps(compiled)}'"
 
 
 # -- weight chunking / wire format -------------------------------------------------------------

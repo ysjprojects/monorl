@@ -71,6 +71,10 @@ DAPO_MAX_NUM_GEN_BATCHES = 10
 # monorl off_policy.ratio_mask -> algorithm.rollout_correction.rollout_rs
 # (verl/trainer/ppo/rollout_corr_helper.py compute_rollout_rejection_mask)
 ROLLOUT_RS = {"token": "token_k1", "sequence": "seq_sum_k1", "sequence_mean": "seq_mean_k1"}
+# SGLang drafts with MTP layers through its EAGLE path: a chain (topk 1) of N draft steps verifies
+# N + 1 tokens. verl/trainer/config/model/hf_model.yaml ``mtp``: 3 steps, 4 draft tokens.
+SGLANG_SPECULATIVE_ALGORITHM = "EAGLE"
+SGLANG_DEFAULT_SPECULATIVE_STEPS = 3
 # critic.cliprange_value of verl/trainer/config/critic/critic.yaml; verl's value loss always clips
 # (verl/trainer/ppo/core_algos.py compute_value_loss)
 VERL_CLIPRANGE_VALUE = 0.5
@@ -122,6 +126,36 @@ def rollout_correction(config: RunConfig) -> dict[str, Any] | None:
         correction["rollout_rs"] = ROLLOUT_RS[off.ratio_mask]
         correction["rollout_rs_threshold"] = f"{1.0 / off.ratio_mask_high!r}_{1.0 / off.ratio_mask_low!r}"
     return correction
+
+
+def mtp_model_config(config: RunConfig, rollout_name: str) -> dict[str, Any]:
+    """``actor_rollout_ref.model.mtp`` (``verl/workers/config/model.py`` ``MtpConfig``) for an
+    enabled ``model.mtp``.
+
+    ``enable`` keeps the MTP layer count in the model's HF config (``HFModelConfig.__post_init__``
+    zeroes it otherwise); whether the actor's model then holds the layers depends on its model
+    class (transformers' own classes keep MTP layers outside the model). ``enable_train`` is read by
+    verl's Megatron engine only; monorl compiles the FSDP actor, hence always false (the schema
+    rejects ``model.mtp.train``). ``enable_rollout`` makes the rollout servers draft:
+    ``vllm_async_server.py`` builds ``speculative_config`` from ``method`` / ``num_speculative_tokens``
+    (``rollout.engine_kwargs.vllm.speculative_config`` keys win), ``async_sglang_server.py`` passes
+    the four ``speculative_*`` values.
+    """
+    mtp = config.model.mtp
+    tree: dict[str, Any] = {"enable": True, "enable_rollout": mtp.rollout, "enable_train": False}
+    if not mtp.rollout:
+        return tree
+    if rollout_name == "sglang":
+        steps = mtp.num_speculative_tokens or SGLANG_DEFAULT_SPECULATIVE_STEPS
+        tree.update(
+            speculative_algorithm=SGLANG_SPECULATIVE_ALGORITHM,
+            speculative_num_steps=steps,
+            speculative_eagle_topk=1,
+            speculative_num_draft_tokens=steps + 1,
+        )
+    else:
+        tree.update(method="mtp", num_speculative_tokens=mtp.num_speculative_tokens or 1)
+    return tree
 
 
 def deep_merge(base: dict[str, Any], extra: dict[str, Any]) -> dict[str, Any]:
@@ -291,6 +325,9 @@ def compile_config(
     if model.dtype in ROLLOUT_DTYPE:
         tree["actor_rollout_ref"]["rollout"]["dtype"] = ROLLOUT_DTYPE[model.dtype]
 
+    if model.mtp.enabled:
+        tree["actor_rollout_ref"]["model"]["mtp"] = mtp_model_config(config, rollout_name)
+
     if multimodal:
         # verl/utils/dataset/rl_dataset.py reads images from data.image_key; VLM actors need the
         # unpadded (rmpad) path (examples/grpo_trainer/run_qwen2_5_vl_7b_fsdp.sh).
@@ -393,6 +430,10 @@ def compile_sft_config(
     assistant message of a row (``all``), which equals ``last`` for a single assistant turn; the
     data export (:func:`monorl.adapters.verl.data.sft_sample_to_row`) refuses ``last`` for other
     rows. ``data.tools_key`` names the column the export writes a row's tool schemas to.
+
+    ``model.mtp.enabled`` sets ``model.mtp.enable`` (the SFT tree's ``model`` is ``hf_model.yaml`` too),
+    which keeps the MTP layer count in the model's HF config instead of zeroing it. The layers are
+    not trained: verl's SFT honours ``mtp.enable_train`` with its Megatron engine only.
     """
     run_dir = Path(run_dir).expanduser().resolve()
     trainer, model, cluster, data, logging = (
@@ -464,6 +505,8 @@ def compile_sft_config(
         tree["engine"]["dtype"] = SFT_ENGINE_DTYPE[trainer.precision]
     if multimodal:
         tree["data"]["image_key"] = IMAGES_KEY
+    if model.mtp.enabled:
+        tree["model"]["mtp"] = {"enable": True}
     extra = {k: v for k, v in trainer.extra.items() if k not in RESERVED_EXTRA_KEYS}
     return deep_merge(tree, extra)
 

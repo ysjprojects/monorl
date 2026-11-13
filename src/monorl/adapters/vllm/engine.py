@@ -25,6 +25,15 @@ Built against vLLM v0.33.0:
 * ``vllm/v1/worker/gpu_worker.py`` ``wake_up(tags)``: tags are ``"weights"`` / ``"kv_cache"``;
   waking a tag that is already mapped is an error in the cumem allocator, so we track which
   tags are released.
+* ``LLM(..., speculative_config={"method": "mtp", "num_speculative_tokens": N})`` drafts with the
+  checkpoint's MTP layers (``vllm/config/speculative.py``); the worker extension keeps that
+  drafter in weight sync (:mod:`monorl.adapters.vllm.worker`). ``GPUWorker.sleep(level=2)`` saves
+  the drafter's buffers only, so its weights are gone after waking.
+* ``LLM.get_metrics()`` (``vllm/v1/metrics/reader.py`` ``get_metrics_snapshot``) lists the
+  process's Prometheus metrics as ``Counter(name, labels, value)`` and friends; it needs
+  ``disable_log_stats=False``, which ``LLM`` otherwise defaults to ``True``. A
+  ``PrometheusStatLogger`` unregisters the collectors of the engines created before it
+  (``vllm/v1/metrics/loggers.py``), so the snapshot covers the newest engine of the process.
 """
 
 from __future__ import annotations
@@ -43,17 +52,21 @@ from packaging.version import InvalidVersion, Version
 from monorl.adapters.vllm.common import (
     VLLM_VERSIONS,
     WORKER_EXTENSION_CLS,
+    SpeculationCounters,
     chunk_weights,
     completions_from_request_output,
     encode_prompt,
     is_media_prompt,
     limit_mm_per_prompt,
     sampling_kwargs,
+    spec_decode_totals,
+    speculative_config,
     tokens_prompt_kwargs,
 )
 from monorl.config.schema import RunConfig
 from monorl.core.errors import BackendUnavailable, ConfigError, GenerationCancelled
-from monorl.core.types import Completion, PromptInput, SamplingParams
+from monorl.core.types import Completion, PromptInput, SamplingParams, SpeculationStats
+from monorl.mtp import checkpoint_key, is_wire_name
 
 log = logging.getLogger(__name__)
 
@@ -95,6 +108,14 @@ class VllmEngine:
     plus an ``engine_kwargs`` dict passed verbatim to ``vllm.LLM``. ``limit_mm_per_prompt``
     (``{"image": N}`` or an int) bounds images per prompt for VLM runs.
 
+    With ``model.mtp.rollout`` the engine drafts with the model's MTP layers
+    (``speculative_config``, see :func:`monorl.adapters.vllm.common.speculative_config`; keys of
+    ``engine_kwargs.speculative_config`` such as ``draft_lm_head_quantization`` are laid over
+    it). Weight updates and checkpoint reloads then reach the drafter too: names tagged as MTP
+    weights (``monorl.mtp.WIRE_PREFIX``) go to it, as checkpoint keys, and never into the policy. Without
+    ``model.mtp.rollout`` such names are left out of an update. ``speculation_stats()`` reports
+    the drafting since its previous call.
+
     ``cancel()`` stops the running ``generate`` within one engine step (its requests are aborted
     in the engine) and fails the calls waiting for the lock; all of them raise
     :class:`GenerationCancelled`.
@@ -102,6 +123,8 @@ class VllmEngine:
 
     def __init__(self, config: RunConfig, *, replica: int = 0) -> None:
         extra = dict(config.rollout.extra)
+        speculative = speculative_config(config)
+        self._drafting = speculative is not None
         if extra.get("in_process", True):
             # Engine core in-process: collective_rpc args are not serialised (UniProcExecutor).
             os.environ.setdefault("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
@@ -161,9 +184,16 @@ class VllmEngine:
                 )
             # vLLM rejects SamplingParams.logprobs above ModelConfig.max_logprobs (default 20).
             engine_kwargs["max_logprobs"] = max(20, off_policy.score_centering_top_k)
+        if speculative is not None:
+            engine_kwargs["disable_log_stats"] = False  # the acceptance counters are engine statistics
         engine_kwargs.update(extra.get("engine_kwargs", {}))
+        if speculative is not None:
+            engine_kwargs["speculative_config"] = speculative
         self._vllm = vllm
         self._llm = vllm.LLM(config.model.name_or_path, **engine_kwargs)
+        self._speculation: SpeculationCounters | None = None
+        if speculative is not None and not engine_kwargs["disable_log_stats"]:
+            self._speculation = SpeculationCounters(self._spec_decode_totals())
 
     # -- RolloutEngine --------------------------------------------------------------------
     @property
@@ -217,11 +247,29 @@ class VllmEngine:
                 cancelled.set()
 
     def update_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> None:
+        if not self._drafting:
+            # This engine does not draft: the MTP layers the trainer holds are not its business.
+            weights = ((name, tensor) for name, tensor in weights if not is_wire_name(name))
         with self._lock:
             self._wake(("weights",))
             for chunk in chunk_weights(weights, max_bytes=self._chunk_bytes):
-                self._llm.collective_rpc("monorl_update_weights", args=(chunk,))
+                policy = [(name, tensor) for name, tensor in chunk if not is_wire_name(name)]
+                if len(policy) == len(chunk):
+                    self._llm.collective_rpc("monorl_update_weights", args=(chunk,))
+                else:  # tagged names: MTP weights, to the drafter under their checkpoint keys
+                    mtp = [(checkpoint_key(name), tensor) for name, tensor in chunk if is_wire_name(name)]
+                    self._llm.collective_rpc("monorl_update_weights", args=(policy, mtp))
+            if self._drafting:
+                self._llm.collective_rpc("monorl_refresh_drafter")
             self._llm.reset_prefix_cache()
+
+    def speculation_stats(self) -> SpeculationStats | None:
+        """Drafting since the previous call (reading resets it); ``None`` when the engine does
+        not draft. With several engines in one process vLLM keeps the counters of the newest one
+        only, so each engine reports that one's: the rates derived from the sum stay right."""
+        if self._speculation is None or self._llm is None:
+            return None
+        return self._speculation.delta(self._spec_decode_totals())
 
     def load_weights_from_path(self, path: str | os.PathLike[str]) -> None:
         with self._lock:
@@ -269,6 +317,10 @@ class VllmEngine:
         # Requests finish in any order; ids come from the LLM's request counter.
         outputs.sort(key=lambda out: int(out.request_id))
         return outputs
+
+    def _spec_decode_totals(self) -> tuple[int, int, int]:
+        samples = ((m.name, m.value) for m in self._llm.get_metrics() if hasattr(m, "value"))
+        return spec_decode_totals(samples) or (0, 0, 0)
 
     def _wake(self, tags: tuple[str, ...]) -> None:
         """Re-map only the memory tags that are currently released."""

@@ -13,11 +13,20 @@ importing sglang. Endpoints (SGLang v0.5.23, ``python/sglang/srt/entrypoints/htt
   ``serialized_named_tensors`` (one base64 ``MultiprocessingSerializer`` payload per TP rank),
   ``load_format``, ``flush_cache``; ``{"success", "message"}`` with 400 on failure. Tensors are
   shared through ``ForkingPickler`` (CUDA IPC / shm), so the server must run on the same host.
+  The scheduler only accepts it inside a session: ``POST /begin_weight_update``
+  ``{"selector": "all"}`` … ``POST /end_weight_update`` ``{}``, both ``{"success", "message"}``
+  with 400 on failure. With selector ``"all"`` the target and the draft runner load the same
+  tensors, each its own checkpoint keys, so MTP weights in the stream reach the drafter.
 * ``POST /update_weights_from_disk`` — ``{"model_path", "load_format"}`` →
   ``{"success", "message", "num_paused_requests"}``.
 * ``POST /release_memory_occupation`` / ``POST /resume_memory_occupation`` — ``{"tags"}``.
 * ``POST /flush_cache`` — text response, 200 when the radix cache was flushed.
-* ``GET /get_server_info`` — resolved ``ServerArgs`` (``tp_size`` is read from here).
+* ``GET /get_server_info`` — resolved ``ServerArgs`` (``tp_size`` and the ``speculative_*``
+  settings are read from here).
+
+The client does not start the server. With ``model.mtp.rollout`` it must have been launched with
+``--speculative-algorithm EAGLE`` (or ``NEXTN``) and accept thresholds of 1.0; the first
+``generate`` checks that against ``/get_server_info`` and raises ``ConfigError`` otherwise.
 
 ``cancel()`` relies on the server aborting a generation whose client went away: while a
 non-streaming ``/generate`` waits, ``TokenizerManager._stream_one_response``
@@ -33,6 +42,7 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import itertools
 import logging
 import os
 import threading
@@ -43,8 +53,12 @@ import httpx
 import torch
 
 from monorl.adapters.sglang.common import (
+    WEIGHT_UPDATE_SELECTOR,
+    SpeculationCounter,
     bucket_bytes,
     bucket_weights,
+    check_speculative_args,
+    drafts_with_mtp,
     encode_prompt,
     expand_image_data,
     expand_requests,
@@ -52,12 +66,13 @@ from monorl.adapters.sglang.common import (
     image_data_urls,
     is_media_prompt,
     logprob_kwargs,
+    route_weights,
     serialized_payloads,
     server_url,
 )
 from monorl.config.schema import RunConfig
 from monorl.core.errors import GenerationCancelled, WeightSyncError
-from monorl.core.types import Completion, PromptInput, SamplingParams
+from monorl.core.types import Completion, PromptInput, SamplingParams, SpeculationStats
 from monorl.rollout.hf_engine import load_tokenizer
 
 log = logging.getLogger(__name__)
@@ -113,6 +128,8 @@ class SGLangServerClient:
         self._calls: set[_GenerateCall] = set()
         self._calls_lock = threading.Lock()
         self._tp_size: int | None = None
+        self._speculation = SpeculationCounter() if drafts_with_mtp(config) else None
+        self._drafting_checked = False
         self._asleep = False
         self._closed = False
 
@@ -136,6 +153,7 @@ class SGLangServerClient:
             encoded = [encode_prompt(self._tokenizer, processor, p) for p in prompts]
             prompt_ids = [ids for ids, _ in encoded]
             input_ids, sampling = expand_requests(prompt_ids, params)
+            self._check_server_drafts()
             body: dict[str, Any] = {
                 "input_ids": input_ids,
                 "sampling_params": sampling,
@@ -153,7 +171,14 @@ class SGLangServerClient:
         outputs = response.json()
         if isinstance(outputs, dict):
             outputs = [outputs]
+        if self._speculation is not None:
+            self._speculation.record(outputs)
         return group_outputs(outputs, prompt_ids, params)
+
+    def speculation_stats(self) -> SpeculationStats | None:
+        """Speculative-decoding counters of the requests finished since the previous call;
+        ``None`` when rollouts do not draft."""
+        return None if self._speculation is None else self._speculation.take()
 
     def cancel(self) -> None:
         """Abort the ``generate`` calls in flight (they raise :class:`GenerationCancelled`); a
@@ -165,21 +190,39 @@ class SGLangServerClient:
                     call.request.cancel()
 
     def update_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> None:
+        """Push ``weights`` in one weight-update session covering the policy and the drafter, so
+        both change together. MTP weights of the stream reach the drafter under their checkpoint
+        keys; without drafting they are left out."""
         with self._lock:
-            tp_size = self._server_tp_size()
             updated = 0
-            for bucket in bucket_weights(weights, max_bytes=self._bucket_bytes):
-                body = {
-                    "serialized_named_tensors": serialized_payloads(bucket, tp_size=tp_size),
-                    "load_format": None,
-                    "flush_cache": False,
-                }
-                self._check(
-                    self._post("/update_weights_from_tensor", json=body), "update_weights_from_tensor"
-                )
-                updated += len(bucket)
-            if updated:
-                self._flush_cache()
+            routed = route_weights(weights, drafting=self._speculation is not None)
+            buckets = bucket_weights(routed, max_bytes=self._bucket_bytes)
+            first = next(buckets, None)
+            if first is None:
+                return
+            tp_size = self._server_tp_size()
+            begin = self._post("/begin_weight_update", json={"selector": WEIGHT_UPDATE_SELECTOR})
+            self._check(begin, "begin_weight_update")
+            try:
+                for bucket in itertools.chain([first], buckets):
+                    body = {
+                        "serialized_named_tensors": serialized_payloads(bucket, tp_size=tp_size),
+                        "load_format": None,
+                        "flush_cache": False,
+                    }
+                    self._check(
+                        self._post("/update_weights_from_tensor", json=body), "update_weights_from_tensor"
+                    )
+                    updated += len(bucket)
+            except BaseException:
+                # A failed update leaves the session open and the next push could not begin one.
+                try:
+                    self._check(self._post("/end_weight_update", json={}), "end_weight_update")
+                except Exception:
+                    log.exception("sglang server %s: could not close the weight-update session", self._url)
+                raise
+            self._check(self._post("/end_weight_update", json={}), "end_weight_update")
+            self._flush_cache()
         log.debug("sglang server %s: updated %d tensors", self._url, updated)
 
     def load_weights_from_path(self, path: str | os.PathLike[str]) -> None:
@@ -236,6 +279,14 @@ class SGLangServerClient:
             tp = info.get("tp_size")
             self._tp_size = int(tp) if tp is not None else int(self.config.rollout.tensor_parallel_size)
         return self._tp_size
+
+    def _check_server_drafts(self) -> None:
+        """With ``model.mtp.rollout``: the server must draft with the model's MTP layers, and
+        losslessly. Checked once, against the ``ServerArgs`` the server resolved."""
+        if self._speculation is None or self._drafting_checked:
+            return
+        check_speculative_args(self.config, self.server_info(), source=f"sglang server {self._url}")
+        self._drafting_checked = True
 
     def _tags_body(self) -> dict[str, Any]:
         return {"tags": self._sleep_tags} if self._sleep_tags is not None else {}

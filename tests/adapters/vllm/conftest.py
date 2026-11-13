@@ -1,10 +1,13 @@
 """Fixtures: install the fake vLLM tree (``vllm_fakes``) in ``sys.modules`` for one test and
-revert any monorl patches applied to it; ``no_vllm`` makes ``import vllm`` fail."""
+revert any monorl patches applied to it; ``no_vllm`` makes ``import vllm`` fail; ``mtp_config``
+builds run configs with ``model.mtp`` set."""
 
 from __future__ import annotations
 
 import sys
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -66,3 +69,30 @@ def vllm_config(tiny_model_dir: Path, tmp_path: Path) -> RunConfig:
             "logging": {"run_root": str(tmp_path / "runs")},
         }
     )
+
+
+@pytest.fixture
+def mtp_config(tiny_model_dir: Path, tmp_path: Path) -> Callable[..., RunConfig]:
+    """``mtp_config(mtp={...}, extra={...}, sleep=False)``: a vLLM run with ``model.mtp`` set."""
+    data_file = tmp_path / "data.jsonl"
+    data_file.write_text('{"prompt": "What is 2+2?", "answer": "4"}\n')
+
+    def build(
+        mtp: dict[str, Any] | None = None, extra: dict[str, Any] | None = None, *, sleep: bool = False
+    ) -> RunConfig:
+        return RunConfig.from_dict(
+            {
+                "model": {"name_or_path": str(tiny_model_dir), "mtp": mtp or {}},
+                "data": {"uri": str(data_file)},
+                "rollout": {
+                    "backend": "vllm",
+                    "group_size": 2,
+                    "enable_sleep_mode": sleep,
+                    "extra": extra or {},
+                },
+                "rewards": [{"type": "exact_match"}],
+                "logging": {"run_root": str(tmp_path / "runs")},
+            }
+        )
+
+    return build

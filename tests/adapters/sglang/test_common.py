@@ -248,6 +248,102 @@ def test_engine_kwargs_engine_kwargs_override(run_config_dict):
         engine_kwargs(make_config(run_config_dict, extra={"engine_kwargs": [1]}))
 
 
+SPECULATIVE_KEYS = (
+    "speculative_algorithm",
+    "speculative_num_steps",
+    "speculative_eagle_topk",
+    "speculative_num_draft_tokens",
+    "enable_weights_cpu_backup",
+    "enable_draft_weights_cpu_backup",
+)
+BACKUPS = {"enable_weights_cpu_backup": True, "enable_draft_weights_cpu_backup": True}
+MTP_ROLLOUT = {"enabled": True, "rollout": True}
+
+
+def speculative_args(run_config_dict, mtp, **rollout):
+    kw = engine_kwargs(make_config(run_config_dict, mtp=mtp, **rollout))
+    return {k: kw[k] for k in SPECULATIVE_KEYS if k in kw}
+
+
+@pytest.mark.parametrize("mtp", [None, {"enabled": True}, {"enabled": True, "train": True}])
+def test_engine_kwargs_without_mtp_rollout_has_no_speculative_decoding(run_config_dict, mtp):
+    assert speculative_args(run_config_dict, mtp) == {}
+
+
+def test_engine_kwargs_mtp_rollout(run_config_dict):
+    # no N: sglang chooses steps / topk / draft tokens itself (all three or none)
+    assert speculative_args(run_config_dict, MTP_ROLLOUT, enable_sleep_mode=False) == {
+        "speculative_algorithm": "EAGLE"
+    }
+    # N drafted tokens: a chain (topk 1) of N steps, verified in a window of N + 1
+    assert speculative_args(
+        run_config_dict, {**MTP_ROLLOUT, "num_speculative_tokens": 2}, enable_sleep_mode=False
+    ) == {
+        "speculative_algorithm": "EAGLE",
+        "speculative_num_steps": 2,
+        "speculative_eagle_topk": 1,
+        "speculative_num_draft_tokens": 3,
+    }
+    # memory saver: the weights of target and draft must survive release/resume
+    assert speculative_args(run_config_dict, MTP_ROLLOUT, enable_sleep_mode=True) == {
+        "speculative_algorithm": "EAGLE",
+        **BACKUPS,
+    }
+
+
+def test_engine_kwargs_mtp_rollout_user_overrides_win(run_config_dict):
+    overrides = {
+        "speculative_algorithm": "nextn",  # sglang's alias, upper-cased by sglang
+        "speculative_num_steps": 4,
+        "speculative_num_draft_tokens": 5,
+        "enable_draft_weights_cpu_backup": False,
+        "speculative_accept_threshold_single": 1.0,
+    }
+    kw = engine_kwargs(
+        make_config(
+            run_config_dict,
+            mtp={**MTP_ROLLOUT, "num_speculative_tokens": 1},
+            enable_sleep_mode=True,
+            extra={"engine_kwargs": overrides},
+        )
+    )
+    assert {k: kw[k] for k in SPECULATIVE_KEYS} == {
+        "speculative_algorithm": "nextn",
+        "speculative_num_steps": 4,
+        "speculative_eagle_topk": 1,
+        "speculative_num_draft_tokens": 5,
+        "enable_weights_cpu_backup": True,
+        "enable_draft_weights_cpu_backup": False,
+    }
+
+
+@pytest.mark.parametrize(
+    ("mtp", "overrides", "message"),
+    [
+        (MTP_ROLLOUT, {"speculative_accept_threshold_single": 0.5}, "speculative_accept_threshold_single"),
+        (MTP_ROLLOUT, {"speculative_accept_threshold_acc": 0.99}, "speculative_accept_threshold_acc"),
+        (MTP_ROLLOUT, {"speculative_algorithm": "NGRAM"}, "speculative_algorithm='NGRAM'"),
+        (MTP_ROLLOUT, {"speculative_algorithm": None}, "speculative_algorithm=None"),
+        # a draft model configured by hand is lossy with such a threshold too
+        (
+            None,
+            {"speculative_algorithm": "STANDALONE", "speculative_accept_threshold_acc": 0.8},
+            "speculative_accept_threshold_acc",
+        ),
+    ],
+)
+def test_engine_kwargs_rejects_overrides_that_break_mtp_rollouts(run_config_dict, mtp, overrides, message):
+    cfg = make_config(run_config_dict, mtp=mtp, extra={"engine_kwargs": overrides})
+    with pytest.raises(ConfigError, match=message):
+        engine_kwargs(cfg)
+
+
+def test_engine_kwargs_keeps_hand_configured_speculation_without_mtp(run_config_dict):
+    overrides = {"speculative_algorithm": "STANDALONE", "speculative_draft_model_path": "draft"}
+    kw = engine_kwargs(make_config(run_config_dict, extra={"engine_kwargs": overrides}))
+    assert kw["speculative_algorithm"] == "STANDALONE" and kw["speculative_draft_model_path"] == "draft"
+
+
 def test_bucket_bytes_and_server_url(run_config_dict):
     assert bucket_bytes(make_config(run_config_dict)) == DEFAULT_BUCKET_BYTES
     assert bucket_bytes(make_config(run_config_dict, extra={"bucket_bytes": 123})) == 123

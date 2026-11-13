@@ -20,6 +20,12 @@ Images: NeMo-RL v0.7.0 trains VLMs only through its own datasets/processors
 ``message_log`` entries (:mod:`monorl.adapters.nemo_rl.data`), so ``data.image_field`` is rejected
 with a :class:`~monorl.core.errors.ConfigError`.
 
+MTP (``model.mtp``): rollouts draft through vLLM's ``speculative_config`` (``method: mtp``) in
+``policy.generation.vllm_kwargs``; the MTP loss exists in the Megatron policy only
+(``megatron_cfg.mtp_*``, ``nemo_rl/models/megatron/setup.py`` ``_apply_mtp_config``), for GRPO and SFT
+alike (``megatron_policy_worker.py`` builds the MTP loss mask from ``token_mask * sample_mask`` of
+any training batch).
+
 ``compile_config`` is a pure function of the config and the run directory; ``trainer.extra["nemo_rl"]``
 is deep-merged last so any upstream knob can be overridden.
 """
@@ -90,6 +96,7 @@ def _check_supported(config: RunConfig) -> None:
             "run_vlm_sft.py, nemo_rl/data/processors.py vlm_hf_data_processor), which the monorl text "
             "message_log bridge does not produce; use trainer.backend='trl', 'verl' or 'reference'"
         )
+    _check_mtp(config)
     if algo.name == "sft":
         return
     if config.env.type == "harness":
@@ -116,6 +123,26 @@ def _check_supported(config: RunConfig) -> None:
         raise ConfigError(
             f"trainer.backend='nemo_rl' supports rollout.backend in {sorted(GENERATION_BACKENDS)}, "
             f"got {config.rollout.backend!r}"
+        )
+
+
+def _check_mtp(config: RunConfig) -> None:
+    """``model.mtp.train`` needs the Megatron policy and its MTP layer count."""
+    if not config.model.mtp.train:
+        return
+    megatron = config.trainer.extra.get("megatron") or {}
+    if not megatron.get("enabled"):
+        raise ConfigError(
+            "model.mtp.train is not supported with NeMo-RL's DTensor policy, which has no MTP loss: set "
+            "trainer.extra.megatron.enabled: true and trainer.extra.megatron.mtp_num_layers to train the MTP "
+            "layers with the Megatron policy, or use trainer.backend='reference'"
+        )
+    num_layers = megatron.get("mtp_num_layers")
+    if isinstance(num_layers, bool) or not isinstance(num_layers, int) or num_layers < 1:
+        raise ConfigError(
+            "model.mtp.train with trainer.extra.megatron.enabled needs trainer.extra.megatron.mtp_num_layers, "
+            f"the number of MTP layers of the model as a positive integer (got {num_layers!r}): Megatron "
+            "builds its MTP layers from this count and trains none when it is 0"
         )
 
 
@@ -209,12 +236,17 @@ def _dtensor_cfg(config: RunConfig) -> dict[str, Any]:
 
 def _megatron_cfg(config: RunConfig, precision: str) -> dict[str, Any]:
     """``policy.megatron_cfg``: disabled unless ``trainer.extra["megatron"]`` enables it; then the
-    v0.7.0 reference defaults filled from the trainer config and merged with the user's dict."""
+    v0.7.0 reference defaults filled from the trainer config and merged with the user's dict.
+
+    ``model.mtp.train``: ``mtp_loss_scaling_factor = loss_coef`` (mcore weighs each of the
+    ``mtp_num_layers`` depths by ``factor / mtp_num_layers``, i.e. ``factor`` times their mean) and
+    ``mtp_detach_heads = detach_trunk``; the layer count comes from the user's dict."""
     extra = dict(config.trainer.extra.get("megatron") or {})
     if not extra.get("enabled"):
         return {"enabled": False}
     tr = config.trainer
     lora = config.model.lora
+    mtp = config.model.mtp
     base = {
         "enabled": True,
         "force_reconvert_from_hf": False,
@@ -244,9 +276,9 @@ def _megatron_cfg(config: RunConfig, precision: str) -> dict[str, Any]:
         "moe_token_dispatcher_type": "alltoall",
         "moe_shared_expert_overlap": False,
         "mtp_num_layers": 0,
-        "mtp_loss_scaling_factor": 0.0,
+        "mtp_loss_scaling_factor": mtp.loss_coef if mtp.train else 0.0,
         "mtp_use_repeated_layer": False,
-        "mtp_detach_heads": False,
+        "mtp_detach_heads": mtp.detach_trunk if mtp.train else False,
         "gradient_accumulation_fusion": False,
         "use_fused_weighted_squared_relu": False,
         "peft": (
@@ -333,6 +365,28 @@ def colocation(config: RunConfig) -> dict[str, Any]:
     return {"enabled": False, "resources": resources}
 
 
+def _vllm_kwargs(config: RunConfig) -> dict[str, Any]:
+    """``policy.generation.vllm_kwargs``: ``rollout.extra["vllm_kwargs"]`` plus, for
+    ``model.mtp.rollout``, vLLM's ``speculative_config`` (the user's keys win). NeMo-RL loads the
+    drafter's weights from the checkpoint unless the Megatron policy trains the MTP layers, which
+    then reach it by refit (``nemo_rl/models/generation/__init__.py``)."""
+    kwargs = dict(config.rollout.extra.get("vllm_kwargs") or {})
+    mtp = config.model.mtp
+    if mtp.rollout:
+        given = kwargs.get("speculative_config") or {}
+        if not isinstance(given, dict):
+            raise ConfigError(
+                "rollout.extra.vllm_kwargs.speculative_config must be a mapping when model.mtp.rollout is "
+                f"set (its keys override the compiled MTP speculative config), got {given!r}"
+            )
+        kwargs["speculative_config"] = {
+            "method": "mtp",
+            "num_speculative_tokens": mtp.num_speculative_tokens or 1,
+            **given,
+        }
+    return kwargs
+
+
 def _generation(config: RunConfig, precision: str, async_rollouts: bool) -> dict[str, Any]:
     ro, tr = config.rollout, config.trainer
     max_model_len = ro.max_model_len or tr.max_seq_len
@@ -364,7 +418,7 @@ def _generation(config: RunConfig, precision: str, async_rollouts: bool) -> dict
             "enable_vllm_metrics_logger": True,
             "vllm_metrics_logger_interval": 0.5,
         },
-        "vllm_kwargs": dict(ro.extra.get("vllm_kwargs") or {}),
+        "vllm_kwargs": _vllm_kwargs(config),
     }
 
 

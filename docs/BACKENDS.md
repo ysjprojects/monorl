@@ -51,12 +51,23 @@ Pins: [`third_party/pins.toml`](../third_party/pins.toml). Patch mechanics:
   prefixes cached across multi-turn episodes, which is what makes tool-calling / agent rollouts
   cheap. Prompts are always sent as raw `input_ids` (chat prompts tokenised with the HF chat
   template) so continuations stay byte-exact for the prefix cache. Weight updates go through
-  `update_weights_from_tensor` in `rollout.extra.bucket_bytes`-sized buckets followed by one
-  `flush_cache()`; checkpoints through `update_weights_from_disk`; `release/resume_memory_occupation`
+  `update_weights_from_tensor` in `rollout.extra.bucket_bytes`-sized buckets inside one
+  weight-update session (`begin_weight_update(selector="all")` … `end_weight_update()`, which
+  SGLang 0.5.23 requires for tensor updates and which updates the policy and a draft runner
+  together), followed by one `flush_cache()`; checkpoints through `update_weights_from_disk`;
+  `release/resume_memory_occupation`
   around training steps when colocated (`rollout.enable_sleep_mode` → `enable_memory_saver`,
   `rollout.extra.sleep_tags` optional). `ServerArgs` knobs (`schedule_policy`, `enable_metrics`,
   `random_seed`, `attention_backend`, `disable_cuda_graph`, …) pass through `rollout.extra`;
   `rollout.extra.engine_kwargs` is forwarded verbatim.
+
+With `model.mtp.rollout` the engines draft with the model's MTP layers ([`MTP.md`](MTP.md)): `hf`
+through transformers' assisted decoding with layers it holds for its lifetime (one sequence at a
+time), `vllm` through `speculative_config {method: mtp}` with the worker extension updating the
+drafter next to the policy, `sglang` through `speculative_algorithm: EAGLE` with the draft runner
+updated in the same session. Options that would make the sampled distribution differ from the
+recorded logprobs (vLLM's lossy rejection samplers, SGLang accept thresholds below 1.0, `min_p`
+with drafting on either) are config errors.
 
 Every engine implements `generate(prompts, params) -> list[list[Completion]]` with exactly
 `params.n` completions per prompt and per-token logprobs; the orchestrator's `BatchingEngine`
@@ -94,7 +105,9 @@ vLLM/SGLang adapters yet.
 * `reference` — pure torch loop: policy loss from `monorl.algorithms` (grpo/dapo/rloo/
   reinforce, and `ppo` with a value head on the policy's hidden states and turn-level GAE,
   [`CREDIT_ASSIGNMENT.md`](CREDIT_ASSIGNMENT.md)), optional KL to a reference model, full
-  fine-tuning or LoRA (`model.lora`), resumable checkpoints, HF export.
+  fine-tuning or LoRA (`model.lora`), resumable checkpoints, HF export. With `model.mtp` it holds
+  the model's MTP layers, trains them with the MTP loss (`model.mtp.train`) and writes them into
+  weight sync, checkpoints and the export ([`MTP.md`](MTP.md)).
   **SFT** (`algorithm.name: sft`): `monorl.orchestrator.run` skips rollouts, rewards and
   environments and runs `monorl.orchestrator.sft.SFTLoop` — each sample is encoded as
   `messages + assistant response` (`data.response_field` → `answer_field` → trailing assistant

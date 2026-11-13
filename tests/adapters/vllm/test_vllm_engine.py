@@ -228,14 +228,19 @@ def test_chunk_weights_detaches_and_bounds_size() -> None:
 
 def test_worker_extension_has_no_name_clash_with_gpu_worker() -> None:
     public = {a for a in dir(MonorlWorkerExtension) if not a.startswith("__")}
-    assert public == {"monorl_update_weights", "monorl_load_weights_from_path", "monorl_device_info"}
+    assert public == {
+        "monorl_update_weights",
+        "monorl_refresh_drafter",
+        "monorl_load_weights_from_path",
+        "monorl_device_info",
+    }
     assert not public & GPU_WORKER_ATTRS  # WorkerWrapperBase.init_worker asserts this upstream
 
 
 def test_worker_extension_device_info(fake_vllm, vllm_config: RunConfig) -> None:
     eng = _engine(vllm_config)
     infos = eng.llm.collective_rpc("monorl_device_info")
-    assert infos == [{"device": "cpu", "dtype": "float32"}] * 2
+    assert infos == [{"device": "cpu", "dtype": "float32", "speculative": None}] * 2
 
 
 # -- sleep / wake ---------------------------------------------------------------------------------
