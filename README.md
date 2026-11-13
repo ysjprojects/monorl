@@ -117,7 +117,7 @@ UI, Go and clang++ for the example environments, Docker for sandboxed episodes.
 ```bash
 make install                # .venv + monorl[dev,trl,distributed,rewards,openenv,hermes]
 source .venv/bin/activate
-monorl doctor               # what is installed, which patches apply, registered components
+monorl doctor               # what is installed, which patches apply, what is registered
 
 # train: GRPO on GSM8K with SmolLM2-135M, CPU only, ~minutes
 monorl train --config configs/recipes/grpo_gsm8k_smollm_cpu.yaml --set trainer.max_steps=5
@@ -252,8 +252,8 @@ func main() { mep.Main(&env{answers: mep.NewEpisodeStore[string]()}) }
 Saved as `envs/sdk/go/examples/exact/main.go`, it builds with the bundled examples:
 
 ```bash
-make -C envs go                                           # builds envs/bin/go-exact
-monorl env check --command envs/bin/go-exact --turns 1    # spec, health, reset, step, close
+make -C envs go                                         # builds envs/bin/go-exact
+monorl env check --command envs/bin/go-exact --turns 1  # spec, health, reset, step, close
 ```
 
 then point a recipe at it:
@@ -403,7 +403,7 @@ web/                         Vite + React UI
 configs/recipes/             example run and pipeline configs
 examples/sandbox/            example task directories and a shell agent
 docker/ scripts/ tests/
-third_party/pins.toml        upstream pins; scripts/vendor.py clones the sources (git-ignored)
+third_party/pins.toml        upstream pins; scripts/vendor.py clones the sources here
 ```
 
 ## Development
