@@ -115,16 +115,16 @@ Needs Python 3.12 and [uv](https://docs.astral.sh/uv/). Optional: Node 24 and pn
 UI, Go and clang++ for the example environments, Docker for sandboxed episodes.
 
 ```bash
-make install                      # .venv + monorl[dev,trl,distributed,rewards,openenv,hermes]
+make install                # .venv + monorl[dev,trl,distributed,rewards,openenv,hermes]
 source .venv/bin/activate
-monorl doctor                     # what is installed, which patches apply, registered components
+monorl doctor               # what is installed, which patches apply, registered components
 
 # train: GRPO on GSM8K with SmolLM2-135M, CPU only, ~minutes
 monorl train --config configs/recipes/grpo_gsm8k_smollm_cpu.yaml --set trainer.max_steps=5
 
 # web UI
-make web                          # build web/dist once
-monorl serve                      # http://127.0.0.1:8000, opens a browser tab
+make web                    # build web/dist once
+monorl serve                # http://127.0.0.1:8000, opens a browser tab
 
 # look at data before training
 monorl data inspect hf://openai/gsm8k --config-name main --limit 3
@@ -188,7 +188,9 @@ import json, os
 from openai import OpenAI
 
 task = json.load(open(os.environ["MONORL_TASK_FILE"]))
-reply = OpenAI().chat.completions.create(model=os.environ["MONORL_MODEL"], messages=task["messages"])
+reply = OpenAI().chat.completions.create(
+    model=os.environ["MONORL_MODEL"], messages=task["messages"]
+)
 print(reply.choices[0].message.content)
 ```
 
@@ -224,7 +226,9 @@ func (e *env) Spec() mep.Spec {
     return mep.Spec{Name: "exact", Version: "1", MaxTurns: 1, ParallelEpisodes: 32}
 }
 
-func (e *env) Reset(_ context.Context, id string, s mep.Sample, _ *int64) (mep.ResetResult, error) {
+func (e *env) Reset(
+    _ context.Context, id string, s mep.Sample, _ *int64,
+) (mep.ResetResult, error) {
     answer, _ := s.Reference.(string)
     e.answers.Put(id, answer)
     return mep.ResetResult{Messages: s.Messages}, nil
@@ -248,8 +252,8 @@ func main() { mep.Main(&env{answers: mep.NewEpisodeStore[string]()}) }
 Saved as `envs/sdk/go/examples/exact/main.go`, it builds with the bundled examples:
 
 ```bash
-make -C envs go                                          # envs/bin/go-exact, next to the bundled examples
-monorl env check --command envs/bin/go-exact --turns 1   # spec, health, reset, step, close
+make -C envs go                                           # builds envs/bin/go-exact
+monorl env check --command envs/bin/go-exact --turns 1    # spec, health, reset, step, close
 ```
 
 then point a recipe at it:
@@ -386,20 +390,20 @@ MTP models other than Mellum, and the value head on Unsloth and on several Ray t
 
 ```
 src/monorl/
-  core/ config/              types, interfaces, registry, run directory · RunConfig, PipelineConfig
-  orchestrator/ pipeline/    training loop, episodes, SFT · multi-stage pipelines, rejection sampling
+  core/ config/              types, interfaces, registry · RunConfig, PipelineConfig
+  orchestrator/ pipeline/    training loop, episodes, SFT · multi-stage pipelines
   rollout/ trainer/ mtp.py   hf engine · reference trainer · MTP layers
   algorithms/ rewards/ data/
-  envs/ gateway/             built-in environments, MEP/1 protocol, Docker sandbox · capture gateway
+  envs/ gateway/             environments, MEP/1, Docker sandbox · capture gateway
   distributed/ bench/        placement, Ray, weight sync · throughput tooling
   adapters/                  vllm, sglang, trl, unsloth, verl, nemo_rl, openenv, hermes
   patching/ server/ cli/ doctor.py
 envs/sdk/{go,cpp}/           environment SDKs and examples
 web/                         Vite + React UI
 configs/recipes/             example run and pipeline configs
-examples/sandbox/            example task directories and a shell agent for sandboxed harness runs
+examples/sandbox/            example task directories and a shell agent
 docker/ scripts/ tests/
-third_party/pins.toml        upstream pins; scripts/vendor.py clones the sources next to it (git-ignored)
+third_party/pins.toml        upstream pins; scripts/vendor.py clones the sources (git-ignored)
 ```
 
 ## Development
@@ -410,16 +414,16 @@ make test          # everything (downloads tiny models, trains for a few steps o
 make lint          # ruff check + format check
 make envs          # Go and C++ example environments into envs/bin
 scripts/vendor.py --list           # the pins and what is cloned
-scripts/vendor.py --fetch vllm     # clone a pinned upstream source into third_party/ (or `all`)
+scripts/vendor.py --fetch vllm     # clone a pinned upstream source (or `all`)
 ```
 
 ## Containers and CI
 
 ```bash
-scripts/dev/bootstrap.sh                   # .venv (uv, Python 3.12), example envs in envs/bin, web/dist
-scripts/dev/smoke.sh                       # CPU end to end: 2-step GRPO run, then `monorl serve` probes
-docker compose up --build                  # UI on :8000 and four `env-wordle` MEP/1 replicas
-docker compose --profile gpu up ray-head   # Ray head on the vLLM image (NVIDIA runtime)
+scripts/dev/bootstrap.sh     # .venv (uv, Python 3.12), example envs in envs/bin, web/dist
+scripts/dev/smoke.sh         # CPU end to end: 2-step GRPO run, then `monorl serve` probes
+docker compose up --build    # UI on :8000 and four `env-wordle` MEP/1 replicas
+docker compose --profile gpu up ray-head    # Ray head on the vLLM image (NVIDIA runtime)
 ```
 
 Inside the compose stack a run addresses the four replicas one by one, with
