@@ -56,7 +56,8 @@ class MetricSinks:
                 pass
         if self._tb is not None:
             for k, v in numeric.items():
-                tag = k if phase == "train" else f"{phase}/{k}"
+                # evaluation metrics are named eval/... already
+                tag = k if phase == "train" or k.startswith(f"{phase}/") else f"{phase}/{k}"
                 self._tb.add_scalar(tag, v, int(step))
 
     def close(self) -> None:

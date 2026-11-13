@@ -53,6 +53,35 @@ def test_wandb_sink_logs_numeric_metrics(
     assert inits[-1] == {"finished": True}
 
 
+def test_tensorboard_tags_are_the_metric_names_in_every_phase(
+    make_config: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    scalars: list[tuple[str, float, int]] = []
+
+    class FakeWriter:
+        def __init__(self, log_dir: str) -> None:
+            self.log_dir = log_dir
+
+        def add_scalar(self, tag: str, value: float, step: int) -> None:
+            scalars.append((tag, value, step))
+
+        def close(self) -> None:
+            pass
+
+    fake_tensorboard = types.ModuleType("torch.utils.tensorboard")
+    fake_tensorboard.SummaryWriter = FakeWriter  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "torch.utils.tensorboard", fake_tensorboard)
+
+    reporter = RunReporter(tmp_path / "r", echo=False)
+    sinks = MetricSinks(make_config(logging={"tensorboard": True}), reporter.run_dir, reporter)
+    assert sinks.active
+    sinks.log(2, {"reward/mean": 0.5})
+    # evaluation rows carry their eval/ prefix already: the same chart name as in metrics.jsonl and W&B
+    sinks.log(2, {"eval/reward_mean": 0.25}, phase="eval")
+    sinks.close()
+    assert scalars == [("reward/mean", 0.5, 2), ("eval/reward_mean", 0.25, 2)]
+
+
 def test_missing_optional_packages_are_logged_and_skipped(
     make_config: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
