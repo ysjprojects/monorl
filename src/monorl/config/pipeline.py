@@ -40,7 +40,7 @@ class _Model(BaseModel):
 
 
 class TrainStage(_Model):
-    type: Literal["train"] = "train"
+    type: Literal["train"] = Field("train", description="Stage kind.")
     name: str = Field(..., description="Stage name (used for the stage directory).")
     overrides: dict[str, Any] = Field(
         default_factory=dict,
@@ -60,8 +60,8 @@ class TrainStage(_Model):
 
 
 class RejectionSampleStage(_Model):
-    type: Literal["rejection_sample"] = "rejection_sample"
-    name: str
+    type: Literal["rejection_sample"] = Field("rejection_sample", description="Stage kind.")
+    name: str = Field(..., description="Stage name (used for the stage directory).")
     data: DataConfig | None = Field(
         None, description="Prompts to sample from (defaults to the base data config)."
     )
@@ -99,13 +99,15 @@ class RejectionSampleStage(_Model):
 
 
 class EvalStage(_Model):
-    type: Literal["eval"] = "eval"
-    name: str
+    type: Literal["eval"] = Field("eval", description="Stage kind.")
+    name: str = Field(..., description="Stage name (used for the stage directory).")
     data: DataConfig | None = Field(
         None, description="Evaluation dataset (defaults to base data.eval_uri or data)."
     )
-    rollout_overrides: dict[str, Any] = Field(default_factory=dict)
-    max_prompts: int | None = Field(None, ge=1)
+    rollout_overrides: dict[str, Any] = Field(
+        default_factory=dict, description="RolloutConfig overrides for the evaluation rollouts."
+    )
+    max_prompts: int | None = Field(None, ge=1, description="Evaluate at most this many prompts.")
     num_samples: int = Field(
         1,
         ge=1,
@@ -124,7 +126,7 @@ class PipelineConfig(_Model):
         None, description="Pipeline run name (defaults to '<model>-pipeline-<timestamp>')."
     )
     base: RunConfig = Field(..., description="Base run configuration every stage starts from.")
-    stages: list[Stage] = Field(..., min_length=1)
+    stages: list[Stage] = Field(..., min_length=1, description="The stages, run in order.")
 
     @model_validator(mode="after")
     def _check(self) -> PipelineConfig:

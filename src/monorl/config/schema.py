@@ -25,7 +25,7 @@ class LoraConfig(_Model):
     enabled: bool = Field(False, description="Train LoRA adapters instead of full parameters.")
     r: int = Field(16, ge=1, description="LoRA rank.")
     alpha: int = Field(32, ge=1, description="LoRA alpha (scaling = alpha / r).")
-    dropout: float = Field(0.05, ge=0.0, le=1.0)
+    dropout: float = Field(0.05, ge=0.0, le=1.0, description="LoRA dropout.")
     target_modules: list[str] | Literal["all-linear"] = Field(
         "all-linear", description="Module names to adapt, or 'all-linear'."
     )
@@ -85,7 +85,9 @@ class ModelConfig(_Model):
     tokenizer_name_or_path: str | None = Field(
         None, description="Override tokenizer (defaults to the model)."
     )
-    trust_remote_code: bool = False
+    trust_remote_code: bool = Field(
+        False, description="Let the model repository's own code run when the model is loaded."
+    )
     dtype: Literal["auto", "float32", "bfloat16", "float16"] = Field(
         "auto", description="Parameter dtype; 'auto' picks bf16 on accelerators and fp32 on CPU."
     )
@@ -140,10 +142,13 @@ class DataConfig(_Model):
     )
     max_prompt_tokens: int = Field(1024, ge=1, description="Samples with longer prompts are dropped.")
     limit: int | None = Field(None, ge=1, description="Use only the first N samples (after shuffling).")
-    shuffle: bool = True
+    shuffle: bool = Field(
+        True,
+        description="Shuffle the rows with the run's seed (a streaming source shuffles within a buffer).",
+    )
     streaming: bool = Field(False, description="Stream from Hub/S3 instead of materialising locally.")
     eval_uri: str | None = Field(None, description="Optional evaluation dataset (same format).")
-    eval_split: str = "test"
+    eval_split: str = Field("test", description="Split of eval_uri that is evaluated.")
     extra: dict[str, Any] = Field(default_factory=dict, description="Loader-specific options.")
 
 
@@ -255,7 +260,11 @@ class AlgorithmConfig(_Model):
             "first ('rollout': every episode counts equally however many sequences its turns form)."
         ),
     )
-    entropy_coef: float = Field(0.0, ge=0.0)
+    entropy_coef: float = Field(
+        0.0,
+        ge=0.0,
+        description="Weight of the entropy bonus: entropy_coef * entropy is subtracted from the loss.",
+    )
     num_epochs: int = Field(1, ge=1, description="Optimizer passes over each rollout batch.")
     dynamic_sampling: bool = Field(False, description="Drop groups whose rewards are all identical (DAPO).")
     overlong_penalty: float = Field(
@@ -294,15 +303,25 @@ class AlgorithmConfig(_Model):
 class RolloutConfig(_Model):
     backend: str = Field("hf", description="Rollout engine: 'hf' (transformers), 'vllm', 'sglang'.")
     group_size: int = Field(4, ge=1, description="Completions sampled per prompt (G in GRPO).")
-    max_new_tokens: int = Field(256, ge=1)
-    temperature: float = Field(1.0, ge=0.0)
-    top_p: float = Field(1.0, gt=0.0, le=1.0)
+    max_new_tokens: int = Field(256, ge=1, description="Tokens a turn may generate at most.")
+    temperature: float = Field(1.0, ge=0.0, description="Sampling temperature; 0 decodes greedily.")
+    top_p: float = Field(1.0, gt=0.0, le=1.0, description="Nucleus sampling threshold; 1.0 turns it off.")
     top_k: int = Field(-1, description="-1 disables top-k.")
-    stop: list[str] = Field(default_factory=list)
-    tensor_parallel_size: int = Field(1, ge=1)
+    stop: list[str] = Field(default_factory=list, description="Strings at which a turn's generation stops.")
+    tensor_parallel_size: int = Field(
+        1, ge=1, description="GPUs one engine replica spans (tensor parallelism)."
+    )
     data_parallel_size: int = Field(1, ge=1, description="Number of independent engine replicas.")
-    gpu_memory_utilization: float = Field(0.6, gt=0.0, le=1.0)
-    max_model_len: int | None = None
+    gpu_memory_utilization: float = Field(
+        0.6,
+        gt=0.0,
+        le=1.0,
+        description="Share of a GPU's memory the engine may take (vLLM gpu_memory_utilization, SGLang mem_fraction_static).",
+    )
+    max_model_len: int | None = Field(
+        None,
+        description="Context length the engine is started with (vLLM max_model_len, SGLang context_length). Default: the model's own.",
+    )
     max_context_tokens: int | None = Field(
         None,
         ge=2,
@@ -337,23 +356,37 @@ class TrainerConfig(_Model):
         "reference",
         description="Trainer: 'reference' (torch), 'unsloth', or a pipeline backend: 'trl', 'verl', 'nemo_rl'.",
     )
-    learning_rate: float = Field(1e-6, gt=0.0)
+    learning_rate: float = Field(
+        1e-6, gt=0.0, description="Learning rate (its peak under warmup or a schedule)."
+    )
     prompts_per_step: int = Field(
         8, ge=1, description="Prompts per optimizer step (x group_size = sequences)."
     )
     micro_batch_size: int = Field(4, ge=1, description="Sequences per forward/backward pass.")
-    max_steps: int = Field(100, ge=1)
-    warmup_steps: int = Field(0, ge=0)
-    weight_decay: float = Field(0.0, ge=0.0)
-    max_grad_norm: float = Field(1.0, gt=0.0)
+    max_steps: int = Field(100, ge=1, description="Training steps of the run.")
+    warmup_steps: int = Field(
+        0, ge=0, description="Steps over which the learning rate rises linearly from 0."
+    )
+    weight_decay: float = Field(0.0, ge=0.0, description="Weight decay of the optimizer.")
+    max_grad_norm: float = Field(1.0, gt=0.0, description="Norm the gradient is clipped to at every step.")
     precision: Literal["fp32", "bf16", "fp16"] = Field(
         "bf16", description="Mixed-precision mode (fp32 forced on CPU)."
     )
-    gradient_checkpointing: bool = False
-    optimizer: Literal["adamw", "adam", "sgd"] = "adamw"
-    scheduler: Literal["constant", "linear", "cosine"] = "constant"
+    gradient_checkpointing: bool = Field(
+        False,
+        description="Recompute activations in the backward pass instead of storing them: less memory, more compute.",
+    )
+    optimizer: Literal["adamw", "adam", "sgd"] = Field("adamw", description="Optimizer.")
+    scheduler: Literal["constant", "linear", "cosine"] = Field(
+        "constant",
+        description="Learning rate after the warmup: constant, or a linear or cosine decay to 0 at the last step.",
+    )
     save_every: int = Field(50, ge=1, description="Checkpoint interval in steps.")
-    eval_every: int | None = Field(None, ge=1)
+    eval_every: int | None = Field(
+        None,
+        ge=1,
+        description="Evaluate on data.eval_uri every this many steps. Null, or no eval_uri: no evaluation during the run.",
+    )
     max_seq_len: int = Field(2048, ge=16, description="Prompt + response truncation for training.")
     device: str | None = Field(None, description="cpu/mps/cuda; auto if unset.")
     extra: dict[str, Any] = Field(
@@ -364,14 +397,14 @@ class TrainerConfig(_Model):
 class RewardSpec(_Model):
     type: str = Field(..., description="Reward function name (see /api/system for the list).")
     weight: float = Field(1.0, description="Multiplier when combining several rewards.")
-    params: dict[str, Any] = Field(default_factory=dict)
+    params: dict[str, Any] = Field(default_factory=dict, description="Parameters of the reward function.")
 
 
 class EnvConfig(_Model):
     type: str = Field(
         "single_turn", description="Environment: 'single_turn', 'tool_calling', 'openenv', 'hermes', ..."
     )
-    max_turns: int = Field(1, ge=1)
+    max_turns: int = Field(1, ge=1, description="Policy turns an episode may take at most.")
     retries: int = Field(
         0,
         ge=0,
@@ -392,8 +425,8 @@ class EnvConfig(_Model):
 class ClusterConfig(_Model):
     mode: Literal["local", "ray"] = Field("local", description="Run in-process or on a Ray cluster.")
     ray_address: str | None = Field(None, description="Ray address ('auto' to join an existing cluster).")
-    num_nodes: int = Field(1, ge=1)
-    gpus_per_node: int = Field(0, ge=0)
+    num_nodes: int = Field(1, ge=1, description="Nodes of the cluster.")
+    gpus_per_node: int = Field(0, ge=0, description="GPUs on each node; 0 runs on CPU.")
     placement: Literal["auto", "colocated", "disaggregated"] = Field(
         "auto",
         description="Share GPUs between rollout and training (colocated) or split them (disaggregated).",
@@ -404,14 +437,21 @@ class ClusterConfig(_Model):
         "auto",
         description="Weight sync strategy: 'auto', 'inprocess', 'checkpoint', 'broadcast', 'cuda_ipc'.",
     )
-    extra: dict[str, Any] = Field(default_factory=dict)
+    extra: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Options of the runtime and the weight sync (ray_init, sync_dir, ...).",
+    )
 
 
 class LoggingConfig(_Model):
     run_root: str = Field("~/.monorl/runs", description="Directory that holds run directories.")
-    log_every: int = Field(1, ge=1)
+    log_every: int = Field(
+        1, ge=1, description="Write metrics every this many steps (the last step is always written)."
+    )
     save_trajectories: bool = Field(True, description="Write sampled rollouts to trajectories.jsonl.")
-    trajectories_per_step: int = Field(8, ge=0)
+    trajectories_per_step: int = Field(
+        8, ge=0, description="Rollouts saved per logged step at most; 0 saves none."
+    )
     save_transcripts: bool = Field(
         True,
         description="Include the full conversation and per-turn details of every saved rollout.",
@@ -420,13 +460,23 @@ class LoggingConfig(_Model):
         1.0,
         description="Total reward at or above which an episode counts as solved (success-rate and pass@k metrics).",
     )
-    wandb_project: str | None = None
-    tensorboard: bool = False
+    wandb_project: str | None = Field(
+        None, description="Weights & Biases project the metrics are also logged to (needs the wandb package)."
+    )
+    tensorboard: bool = Field(
+        False, description="Also write the metrics as TensorBoard events under <run_dir>/tensorboard."
+    )
 
 
 class RunConfig(_Model):
     run_name: str | None = Field(None, description="Defaults to '<model>-<algorithm>-<timestamp>'.")
-    seed: int = 42
+    seed: int = Field(
+        42,
+        description=(
+            "Seed of the run: Python and torch are seeded with it at the start and with seed + step at every "
+            "step, and data sources and backends receive it."
+        ),
+    )
     model: ModelConfig
     data: DataConfig
     algorithm: AlgorithmConfig = Field(default_factory=AlgorithmConfig)
@@ -518,6 +568,32 @@ class RunConfig(_Model):
                 "speculative decoding and SGLang's verification does not apply it, so the sampled "
                 "distribution would differ from the recorded logprobs"
             )
+        return self
+
+    @model_validator(mode="after")
+    def _check_token_rewards(self) -> RunConfig:
+        """verl and NeMo-RL hand a reward function the decoded text of a response, without token ids."""
+        backend = self.trainer.backend
+        if backend not in {"verl", "nemo_rl"} or self.algorithm.name == "sft":
+            return self
+
+        def entries(rewards: list[Any]) -> Any:
+            for reward in rewards:
+                entry = reward.model_dump() if isinstance(reward, RewardSpec) else dict(reward)
+                yield entry
+                if entry.get("type") == "composite":
+                    yield from entries((entry.get("params") or {}).get("rewards") or [])
+
+        for entry in entries(self.rewards):
+            if (
+                entry.get("type") == "length"
+                and (entry.get("params") or {}).get("unit", "tokens") == "tokens"
+            ):
+                raise ValueError(
+                    f"rewards: `length` with unit 'tokens' (its default) cannot be computed with "
+                    f"trainer.backend={backend!r}: the backend scores the decoded text of a response and has no "
+                    "token ids, so every response would measure 0. Set params.unit to 'chars' or 'words'"
+                )
         return self
 
     @property

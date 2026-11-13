@@ -102,7 +102,7 @@ def test_generated_reward_module(make_config, tmp_path: Path):
     cfg = make_config(
         rewards=[
             {"type": "exact_match", "weight": 2.0},
-            {"type": "length", "weight": 0.0, "params": {"name": "len"}},
+            {"type": "length", "weight": 0.0, "params": {"name": "len", "unit": "words"}},
         ]
     )
     path = write_reward_module(cfg, tmp_path, config_path=None)
