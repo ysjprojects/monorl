@@ -105,6 +105,18 @@ const SCHEMA = {
         attn_implementation: { description: "e.g. 'flash_attention_2', 'sdpa', 'eager'." },
         chat_template: { description: "Jinja chat template override." },
         lora: { $ref: "#/$defs/LoraConfig" },
+        mtp: { $ref: "#/$defs/MtpConfig" },
+      },
+    },
+    MtpConfig: {
+      description: "Multi-token prediction layers of the model (``docs/MTP.md``).",
+      properties: {
+        enabled: { type: "boolean", default: false, description: "Load the checkpoint's MTP (multi-token prediction) layers next to the policy and keep them in weight sync, checkpoints and the final export. Needs a model that ships MTP layers." },
+        rollout: { type: "boolean", default: false, description: "Draft tokens with the MTP layers during rollouts (speculative decoding). The policy verifies every draft, so the sampled tokens and their logprobs are the policy's; only speed changes." },
+        num_speculative_tokens: { description: "Tokens drafted per decoding step. Default: one per MTP layer on the hf engine, 1 on vLLM, SGLang's own default." },
+        train: { type: "boolean", default: false, description: "Train the MTP layers with an auxiliary loss (predict the tokens after the next one) on the response tokens of every batch, in RL and SFT, so drafts keep matching a policy that changes." },
+        loss_coef: { type: "number", default: 0.1, description: "Weight of the MTP loss in the total loss." },
+        detach_trunk: { type: "boolean", default: true, description: "true: the MTP loss updates the MTP layers only. false: it also flows into the policy's own parameters, as in pretraining." },
       },
     },
     DataConfig: {
@@ -347,6 +359,19 @@ const SYSTEM = {
 };
 
 const RECIPES: { name: string; description: string; kind: "run" | "pipeline"; config: Dict }[] = [
+  {
+    kind: "run",
+    name: "gsm8k-grpo-mtp",
+    description: "GRPO on GSM8K with a model that ships MTP layers: they draft during rollouts and are trained along.",
+    config: {
+      model: { name_or_path: "deepseek-ai/DeepSeek-V3", mtp: { enabled: true, rollout: true, train: true } },
+      data: { uri: "hf://openai/gsm8k", hf_config_name: "main", prompt_field: "question", answer_field: "answer", format: "prompt_answer" },
+      algorithm: { name: "grpo" },
+      rollout: { backend: "vllm", group_size: 8, max_new_tokens: 256 },
+      trainer: { backend: "reference", max_steps: 30, prompts_per_step: 8 },
+      rewards: [{ type: "math_verify", weight: 1.0, params: {} }],
+    },
+  },
   {
     kind: "run",
     name: "gsm8k-grpo-smol",
@@ -645,6 +670,14 @@ function validate(config: unknown): { ok: boolean; errors: { loc: (string | numb
   if (typeof env.retries === "number" && env.retries < 0) errors.push({ loc: ["env", "retries"], msg: "Input should be greater than or equal to 0", type: "greater_than_equal" });
   const maxFailed = Number(env.max_failed_frac ?? 0);
   if (!(maxFailed >= 0 && maxFailed <= 1)) errors.push({ loc: ["env", "max_failed_frac"], msg: "Input should be greater than or equal to 0 and less than or equal to 1", type: "value_error" });
+  // MtpConfig: field bounds and its own rule.
+  const mtp = (model?.mtp as Dict | undefined) ?? {};
+  const mtpLoc = (field: string) => ["model", "mtp", field];
+  if (mtp.num_speculative_tokens != null && !(Number.isInteger(mtp.num_speculative_tokens) && Number(mtp.num_speculative_tokens) >= 1))
+    errors.push({ loc: mtpLoc("num_speculative_tokens"), msg: "Input should be greater than or equal to 1", type: "greater_than_equal" });
+  if (typeof mtp.loss_coef === "number" && mtp.loss_coef < 0) errors.push({ loc: mtpLoc("loss_coef"), msg: "Input should be greater than or equal to 0", type: "greater_than_equal" });
+  if (mtp.enabled !== true && (mtp.rollout === true || mtp.train === true))
+    errors.push({ loc: ["model", "mtp"], msg: "Value error, model.mtp.rollout and model.mtp.train need model.mtp.enabled: true", type: "value_error" });
   const budget = (rollout.max_context_tokens as number | null | undefined) ?? null;
   if (budget !== null && budget < 2) errors.push({ loc: ["rollout", "max_context_tokens"], msg: "Input should be greater than or equal to 2", type: "greater_than_equal" });
   if (errors.length === 0) {
@@ -672,6 +705,18 @@ function validate(config: unknown): { ok: boolean; errors: { loc: (string | numb
     const extra = (rollout.extra as Dict | undefined) ?? {};
     if (!sft && off.score_centering === true && (Number(rollout.temperature ?? 1) <= 0 || Number(rollout.top_k ?? -1) > 0 || Number(rollout.top_p ?? 1) < 1 || Number(extra.min_p ?? 0) > 0 || Number(extra.repetition_penalty ?? 1) !== 1))
       errors.push({ loc: [], msg: "Value error, off_policy.score_centering needs the full sampling distribution: rollout.temperature > 0 and no top_k / top_p / min_p / repetition_penalty truncation", type: "value_error" });
+    // RunConfig._check_mtp: the first rule that fails is the one reported.
+    const engine = String(rollout.backend ?? "hf");
+    if (mtp.enabled === true) {
+      if (backend === "unsloth")
+        errors.push({ loc: [], msg: "Value error, model.mtp is not supported with trainer.backend='unsloth': Unsloth loads the model itself and trains MTP heads with a trainer of its own; use trainer.backend='reference'", type: "value_error" });
+      else if (backend === "trl")
+        errors.push({ loc: [], msg: "Value error, model.mtp is not supported with trainer.backend='trl': TRL neither trains MTP layers nor drafts with them in its own generation; use trainer.backend='reference'", type: "value_error" });
+      else if (mtp.train === true && backend === "verl")
+        errors.push({ loc: [], msg: "Value error, model.mtp.train is not supported with trainer.backend='verl': verl trains MTP layers only with its Megatron engine, and monorl compiles the FSDP actor, which ignores the setting; model.mtp.rollout is compiled", type: "value_error" });
+      else if (mtp.rollout === true && (["vllm", "sglang"].includes(engine) || ["verl", "nemo_rl"].includes(backend)) && Number(extra.min_p ?? 0) > 0)
+        errors.push({ loc: [], msg: `Value error, model.mtp.rollout on ${["vllm", "sglang"].includes(engine) ? engine : backend} cannot be combined with min_p: vLLM rejects it under speculative decoding and SGLang's verification does not apply it, so the sampled distribution would differ from the recorded logprobs`, type: "value_error" });
+    }
   }
   return { ok: errors.length === 0, errors };
 }
@@ -752,6 +797,27 @@ function episodeMetrics(prefix: "episode" | "eval", p: number, config: Dict): Di
   };
 }
 
+/** MTP metrics of a train row: the auxiliary loss when `model.mtp.train`, speculation counters when
+ * `model.mtp.rollout` and the run rolls out. Drafts of untrained layers drift from the policy. */
+function mtpMetrics(p: number, sft: boolean, config: Dict): Dict {
+  const mtp = ((config.model as Dict | undefined)?.mtp as Dict | undefined) ?? {};
+  if (mtp.enabled !== true) return {};
+  const out: Dict = {};
+  const train = mtp.train === true;
+  if (train) {
+    out["loss/mtp"] = 1.9 * Math.exp(-2 * p) + 0.9 + jitter(0.05);
+    out["mtp/accuracy"] = Math.max(0, Math.min(1, 0.45 + 0.3 * (1 - Math.exp(-2.5 * p)) + jitter(0.02)));
+  }
+  if (mtp.rollout === true && !sft) {
+    const drafted = Math.max(1, Number(mtp.num_speculative_tokens ?? 1));
+    const rate = Math.max(0, Math.min(1, (train ? 0.6 + 0.15 * p : 0.6 - 0.25 * p) + jitter(0.03)));
+    out["mtp/accept_rate"] = rate;
+    // Draft i is emitted only when the i - 1 before it were accepted too.
+    out["mtp/accept_length"] = 1 + Array.from({ length: drafted }, (_, i) => rate ** (i + 1)).reduce((a, b) => a + b, 0);
+  }
+  return out;
+}
+
 /** One fake train-phase metrics row at `step` of `maxSteps` (RL or SFT keys depending on `sft`). */
 function trainRow(step: number, maxSteps: number, lr0: number, sft: boolean, config: Dict): Dict {
   const p = step / maxSteps;
@@ -764,6 +830,7 @@ function trainRow(step: number, maxSteps: number, lr0: number, sft: boolean, con
       "loss/sft": loss,
       "sft/ppl": Math.exp(loss),
       "sft/tokens": 1800 + Math.floor(Math.random() * 300),
+      ...mtpMetrics(p, sft, config),
       "time/train": 0.9 + Math.random() * 0.3,
       lr: lr0 * (1 - 0.5 * p),
       ...(step % 5 === 0 ? { "eval/loss": loss + 0.08 + Math.random() * 0.03 } : {}),
@@ -791,6 +858,7 @@ function trainRow(step: number, maxSteps: number, lr0: number, sft: boolean, con
     "loss/entropy": 1.2 - 0.6 * p + (Math.random() - 0.5) * 0.05,
     "policy/clipfrac": 0.05 + Math.random() * 0.05,
     "policy/approx_kl": 0.001 * step,
+    ...mtpMetrics(p, sft, config),
     "tokens/response_mean": 60 + 80 * p + (Math.random() - 0.5) * 10,
     "tokens/prompt_mean": 85 + (Math.random() - 0.5) * 4,
     "time/rollout": 2.5 + Math.random(),

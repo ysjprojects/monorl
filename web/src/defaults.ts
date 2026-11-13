@@ -1,4 +1,18 @@
-import type { RunConfig } from "./types";
+import type { MtpConfig, RunConfig } from "./types";
+
+/** Mirrors `MtpConfig` in src/monorl/config/schema.py. */
+export function defaultMtpConfig(): MtpConfig {
+  return { enabled: false, rollout: false, num_speculative_tokens: null, train: false, loss_coef: 0.1, detach_trunk: true };
+}
+
+/** `model.mtp` as the config stores it: the full section, or `undefined` when it holds the defaults
+ * (an absent section means the same to the server and keeps the YAML of other runs unchanged). */
+export function normalizeMtp(mtp: unknown): MtpConfig | undefined {
+  if (!isPlainObject(mtp)) return undefined;
+  const defaults = defaultMtpConfig();
+  const full = deepMerge(defaults, mtp);
+  return (Object.keys(full) as (keyof MtpConfig)[]).every((k) => full[k] === defaults[k]) ? undefined : full;
+}
 
 /** Mirrors the pydantic defaults in src/monorl/config/schema.py. */
 export function defaultRunConfig(): RunConfig {
@@ -154,7 +168,10 @@ export function deepMerge<T>(base: T, patch: unknown): T {
 
 /** Fill a partial config (e.g. a recipe) with schema defaults. */
 export function fromPartial(partial: unknown): RunConfig {
-  return deepMerge(defaultRunConfig(), partial);
+  const config = deepMerge(defaultRunConfig(), partial);
+  const { mtp: _mtp, ...model } = config.model;
+  const mtp = normalizeMtp(_mtp);
+  return { ...config, model: mtp ? { ...model, mtp } : model };
 }
 
 export interface Preset {

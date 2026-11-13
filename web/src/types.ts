@@ -48,6 +48,17 @@ export interface LoraConfig {
   target_modules: string[] | "all-linear";
 }
 
+/** `model.mtp`: the model's multi-token prediction layers (`MtpConfig` in schema.py). */
+export interface MtpConfig {
+  enabled: boolean;
+  rollout: boolean;
+  /** `null` = the engine's default. */
+  num_speculative_tokens: number | null;
+  train: boolean;
+  loss_coef: number;
+  detach_trunk: boolean;
+}
+
 export interface ModelConfig {
   name_or_path: string;
   revision: string | null;
@@ -57,6 +68,8 @@ export interface ModelConfig {
   attn_implementation: string | null;
   chat_template: string | null;
   lora: LoraConfig;
+  /** Absent = the defaults (everything off); the wizard leaves the section out of the YAML then. */
+  mtp?: MtpConfig;
 }
 
 export type DataFormat = "auto" | "chat" | "prompt_answer" | "text";

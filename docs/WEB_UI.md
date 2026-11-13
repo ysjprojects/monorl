@@ -33,6 +33,20 @@ loop)* toggle at the top — a `PipelineConfig` whose `base` is the same wizard 
 2. *Model* — search the Hugging Face Hub (`/api/models/search`, text-generation models), see
    architecture / parameter count / gated status (`/api/models/info`), or type a local path.
    LoRA, dtype, attention implementation, chat template override.
+   The card *Multi-token prediction (MTP)* edits `model.mtp` for models that ship MTP layers
+   (DeepSeek-V3, GLM, Step, Mellum, …). Its switch *Use the model's MTP layers* (`enabled`)
+   reveals: *Draft during rollouts* (`rollout`; speculative decoding — the policy checks every
+   draft, so sampled tokens and logprobs do not change, only speed), *Tokens drafted per step*
+   (`num_speculative_tokens`; empty = the engine's default), *Train the MTP layers* (`train`)
+   and, when training, *MTP loss weight* (`loss_coef`) and *Update the MTP layers only*
+   (`detach_trunk`). The card shows the server's rules inline: no MTP with the `unsloth` and
+   `trl` trainers, no MTP training with `verl`, no drafting with `rollout.extra.min_p` > 0 on
+   vLLM / SGLang or with the `verl` / `nemo_rl` trainers (which generate with those engines); and two hints the UI cannot check: on the hf engine the draft count has to be
+   empty or the model's number of MTP layers, and NeMo-RL trains MTP layers only with
+   `trainer.extra.megatron.enabled` and `mtp_num_layers`. With every field at its default the
+   section is left out of the YAML; switching MTP off removes the section.
+   Runs that train or draft with MTP chart `loss/mtp`, `mtp/accuracy`, `mtp/accept_rate` and
+   `mtp/accept_length` under the additional metrics of the run page.
 3. *Data* — pick a source:
    * **Local** — browse directories on the server's filesystem (`/api/datasets/browse?uri=`).
    * **S3** — browse `s3://bucket/prefix` with credentials from the server's `AWS_*` environment;
