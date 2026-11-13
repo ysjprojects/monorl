@@ -422,4 +422,4 @@ build, the web build and lint, the MEP/1 conformance tests, hadolint, and builds
 
 ## License
 
-Apache-2.0.
+[Apache-2.0](LICENSE).
