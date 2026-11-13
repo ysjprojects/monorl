@@ -15,7 +15,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from monorl.core.interfaces import Environment, EpisodeDriver
-from monorl.core.registry import registry
+from monorl.core.registry import ensure_providers, registry
 from monorl.envs.harness import HarnessEnv, make_harness_env, policy_processor
 from monorl.envs.protocol import EnvSpec
 from monorl.envs.remote import RemoteEnv, make_remote_env
@@ -69,6 +69,7 @@ def _make_harness(config: RunConfig, **kwargs: Any) -> HarnessEnv:
 
 
 def make_env(config: RunConfig, **kwargs: Any) -> Environment | EpisodeDriver:
+    ensure_providers(config)
     return registry.get("env", config.env.type)(config, **kwargs)
 
 

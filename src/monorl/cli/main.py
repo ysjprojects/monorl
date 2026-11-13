@@ -507,7 +507,7 @@ def env_serve(
     """Expose a Python environment as a MEP/1 server (stdio or http)."""
     if transport not in ("stdio", "http"):
         _fail("--transport must be stdio or http", code=2)
-    from monorl.core.registry import registry
+    from monorl.core.registry import ensure_providers, registry
     from monorl.envs.server import serve as serve_env
 
     try:
@@ -523,6 +523,7 @@ def env_serve(
         if param:
             data["env"] = apply_overrides(data["env"], [f"params.{p}" for p in param])
         cfg = RunConfig.from_dict(data)
+        ensure_providers(cfg)
         factory = registry.get("env", env_type)
     except MonorlError as e:
         _fail(str(e))

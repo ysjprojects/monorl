@@ -47,6 +47,7 @@ engine. The orchestrator runs this loop itself, or hands the same config to a pi
 - **Pluggable at the seams.** Rollout engines (`hf`, `vllm`, `sglang`), trainers (`reference`,
   `unsloth`), pipeline backends (`trl`, `verl`, `nemo_rl`), rewards, data sources and
   environments talk through `monorl.core.interfaces`; the orchestrator never imports a framework.
+  Your own rewards and environments plug in from a module named in the config's `providers`.
 - **Patches, not forks.** Each upstream modification is a `Patch` with a target, a version gate
   and a verification hook; pins live in [`third_party/pins.toml`](third_party/pins.toml)
   ([docs](docs/PATCHING.md)).

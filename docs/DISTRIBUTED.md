@@ -78,7 +78,7 @@ Keys of `cluster.extra` that the Ray runtime and the weight sync read:
 | `ray_init` | `{}` | Keyword arguments forwarded to `ray.init` |
 | `cpus_per_actor` | `1` | CPUs in each actor's bundle when the cluster has no GPUs |
 | `placement_group_timeout_s` | `300` | Seconds to wait for the placement group; after that the run fails with a `ConfigError` |
-| `providers` | `[]` | Provider modules imported inside the actors before the components are built |
+| `providers` | `[]` | Provider modules imported inside the actors only, after the config's own top-level `providers` (which every process loads) |
 | `sync_chunk_bytes` | 64 MiB | Chunk size of the object-store weight sync (what `inprocess` becomes under Ray) |
 | `sync_dir` | a fresh temp dir | Directory of the `checkpoint` weight sync; it must be on a filesystem that every actor sees |
 

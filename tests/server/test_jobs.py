@@ -157,6 +157,39 @@ def test_generated_run_name(
     assert terminal(job["id"])["state"] == "succeeded"
 
 
+def test_a_job_imports_modules_from_the_directory_the_server_was_started_in(
+    home: Path, config_dict: dict[str, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch, wait_for
+) -> None:
+    """A job runs in its run directory, but the provider modules its config names are where the
+    server was started."""
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "module_next_to_the_server.py").write_text("VALUE = 'imported'\n")
+    trainer = tmp_path / "importing_trainer.py"
+    trainer.write_text(
+        "import argparse, os\n"
+        "import module_next_to_the_server as found\n"
+        "from monorl.core.reporting import RunReporter\n"
+        "parser = argparse.ArgumentParser()\n"
+        "parser.add_argument('--config')\n"
+        "parser.add_argument('--run-dir')\n"
+        "args = parser.parse_args()\n"
+        "in_run_dir = os.path.samefile(os.getcwd(), args.run_dir)\n"
+        "RunReporter(args.run_dir, echo=False).set_status('succeeded', f'{found.VALUE} {in_run_dir}', step=0)\n"
+    )
+    monkeypatch.chdir(project)
+    monkeypatch.delenv("PYTHONPATH", raising=False)
+    manager = JobManager(home, train_cmd=[sys.executable, str(trainer)])
+    job_id = manager.create(config_dict)["id"]
+
+    def finished() -> dict[str, Any] | None:
+        job = manager.get(job_id)
+        return job if job["state"] in TERMINAL_STATES else None
+
+    job = wait_for(finished)
+    assert (job["state"], job["message"]) == ("succeeded", "imported True"), job
+
+
 def test_crash_without_terminal_status_is_failed(
     client: TestClient, config_dict: dict[str, Any], monkeypatch: pytest.MonkeyPatch, terminal
 ) -> None:

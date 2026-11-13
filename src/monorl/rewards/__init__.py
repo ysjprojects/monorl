@@ -11,7 +11,7 @@ from typing import Any
 
 from monorl.config.schema import RewardSpec, RunConfig
 from monorl.core.interfaces import RewardFunction
-from monorl.core.registry import Registry, registry
+from monorl.core.registry import Registry, ensure_providers, registry
 from monorl.rewards.code_exec import make_code_exec
 from monorl.rewards.composite import CompositeReward, member_keys
 from monorl.rewards.exact_match import make_exact_match
@@ -35,6 +35,7 @@ def build_reward(
     holds each member's raw score. Factories receive ``config=config`` when given."""
     specs = _coerce_specs(specs)
     kw: dict[str, Any] = {} if config is None else {"config": config}
+    ensure_providers(config)
     members = []
     for key, spec in zip(member_keys(specs), specs, strict=True):
         factory = registry.get("reward", spec.type)

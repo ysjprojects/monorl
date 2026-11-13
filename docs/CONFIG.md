@@ -19,6 +19,7 @@ See: [RUNS.md](RUNS.md)
 | --- | --- | --- |
 | `run_name` | string or null; default `null` | Defaults to '\<model>-\<algorithm>-\<timestamp>'. |
 | `seed` | integer; default `42` | Seed of the run: Python and torch are seeded with it at the start and with seed + step at every step, and data sources and backends receive it. |
+| `providers` | list of string; default `[]` | Modules imported before the run builds its components. Each exposes register(registry) and may add rewards, environments, engines, trainers or other components under names the config can then use. They are imported from the working directory or the Python path. |
 
 ## `model`
 

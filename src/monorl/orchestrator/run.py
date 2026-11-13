@@ -17,7 +17,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from monorl.config.schema import RunConfig
-from monorl.core.registry import registry
+from monorl.core.registry import ensure_providers, registry
 from monorl.core.reporting import CONFIG_FILE, RunReporter, list_checkpoints
 from monorl.core.types import RunResult
 from monorl.orchestrator.loop import ComponentLoop
@@ -49,6 +49,7 @@ def run(config: RunConfig, run_dir: Path | None = None, *, resume: bool = False)
     with _signal_guard(cancel, reporter):
         reporter.set_status("running", f"starting {kind} backend {backend!r} (resume={resume})", step=0)
         try:
+            ensure_providers(config)
             if config.is_pipeline_backend:
                 result = _run_pipeline(config, reporter)
             elif config.is_sft:

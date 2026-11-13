@@ -287,6 +287,10 @@ def make_guess_env(config, **kwargs) -> GuessEnv:
     return GuessEnv(max_turns=config.env.max_turns, **config.env.params)
 
 
+def register(registry) -> None:
+    registry.register("env", "guess", make_guess_env)
+
+
 if __name__ == "__main__":
     from monorl.envs.server import serve
 
@@ -296,32 +300,30 @@ if __name__ == "__main__":
 ### Registering it
 
 A factory takes the `RunConfig` (plus keyword arguments it may ignore) and returns a fresh
-environment. The registry has no plugin discovery and `monorl train` cannot import a module, so
-register in a launcher that keeps the whole command line (`$DEMO/train.py`):
+environment. A module a run can load exposes `register(registry)`, as `guess_env.py` does. Name
+the module in the config's `providers` (in a pipeline config: under `base`) and use the type like
+a built-in one:
 
-```python
-from guess_env import make_guess_env
-
-from monorl.cli.main import app
-from monorl.core.registry import registry
-
-registry.register("env", "guess", make_guess_env)
-app()
+```yaml
+providers: [guess_env]
+env: {type: guess, max_turns: 3, params: {high: 20}}
+rewards: []
 ```
 
-`python train.py train --config my.yaml` then behaves like `monorl train`; runs started from the
-web UI use the stock entry point and see the registered types only. Run here on
-`configs/recipes/grpo_gsm8k_smollm_cpu.yaml` with
-`--set 'env={type: guess, max_turns: 3, params: {high: 20}}'`, `--set 'rewards=[]'`,
-`--set algorithm.gamma=0.9`, `trainer.max_steps=1`, `rollout.max_new_tokens=24`,
-`rollout.stop=["."]` and a two-row JSONL (`{"question": "Start guessing.", "answer": "7"}`) as
-`data.uri`: the run succeeded. One recorded episode had turn rewards `[-0.1, 0.0, -0.1]` and
-reward `-0.1 + 0.9 * 0.0 + 0.81 * -0.1 = -0.181`; another ended after one turn
-(`finish_reason: length`).
+The modules in `providers` are imported before a run builds its components, in every process
+that builds them, from the working directory or the Python path: start the run where the module
+is. Jobs launched from the web UI also find modules in the directory `monorl serve` was started
+in. Run here
+from `$DEMO` with `monorl train` on `configs/recipes/grpo_gsm8k_smollm_cpu.yaml`, these three
+keys as `--set` overrides, `algorithm.gamma=0.9`, `trainer.max_steps=1`,
+`rollout.max_new_tokens=24`, `rollout.stop=["."]` and a two-row JSONL
+(`{"question": "Start guessing.", "answer": "7"}`) as `data.uri`: the run succeeded. One recorded
+episode had turn rewards `[-0.1, -0.1, -0.1]` and reward
+`-0.1 + 0.9 * -0.1 + 0.81 * -0.1 = -0.271`; another found the number on its third turn (`0.81`).
 
 ### Serving and checking it over MEP/1
 
-Served over MEP/1, the same class needs no launcher: a run reaches it with `env.type: remote`
+Served over MEP/1, the same class needs no registration: a run reaches it with `env.type: remote`
 and `env.params: {transport: stdio, command: [...]}` ([ENV_SDK.md](ENV_SDK.md); validated against
 the schema with this server's command, not trained here). `monorl.envs.server.serve(factory,
 transport=, host=, port=, name=, parallel_episodes=)` serves a zero-argument factory over `stdio`
@@ -344,9 +346,11 @@ MEP/1 conformance: OK
 The exit status is 1 on a protocol error; `--url http://host:port` checks an http server.
 `monorl env serve <type>` serves a registered type without a script, with `env.params` from
 `--config <run config>` or `--param key=value`, and `--transport stdio|http` (default `stdio`),
-`--host` (`127.0.0.1`), `--port` (`8080`), `--parallel` (`8` concurrent episodes). It cannot
-import your module. Checked here over http: `monorl env serve tool_calling --transport http
---port 18473 --param 'tools=[calculator]'`, then `monorl env check --url http://127.0.0.1:18473`.
+`--host` (`127.0.0.1`), `--port` (`8080`), `--parallel` (`8` concurrent episodes). The `providers`
+of the `--config` file are loaded, so it serves your types too. Checked here over http:
+`monorl env serve tool_calling --transport http --port 18473 --param 'tools=[calculator]'` and
+`monorl env serve guess --config serve.yaml --transport http --port 18474` (a config with the
+three keys above), each followed by `monorl env check --url http://127.0.0.1:<port>`.
 
 ### When to use another language
 

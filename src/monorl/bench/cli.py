@@ -19,7 +19,8 @@ from rich.console import Console
 from monorl.bench.report import render_env, render_plan, render_rollout, render_sync, write_json
 from monorl.config.loader import apply_overrides, load_yaml
 from monorl.config.schema import RunConfig
-from monorl.core.errors import ConfigError, MonorlError
+from monorl.core.errors import ConfigError, MonorlError, RegistryError
+from monorl.core.registry import ensure_providers
 
 app = typer.Typer(
     name="bench",
@@ -48,8 +49,10 @@ def _int_list(text: str, flag: str) -> list[int]:
 
 def _load_config(path: Path, overrides: list[str] | None) -> RunConfig:
     try:
-        return RunConfig.from_dict(apply_overrides(load_yaml(path), overrides))
-    except ConfigError as e:
+        config = RunConfig.from_dict(apply_overrides(load_yaml(path), overrides))
+        ensure_providers(config)
+        return config
+    except (ConfigError, RegistryError) as e:
         _fail(str(e))
         raise AssertionError("unreachable") from e
 

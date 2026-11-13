@@ -663,7 +663,8 @@ def build_ray_runtime(config: RunConfig) -> Runtime:
         raise ConfigError(f"Ray placement group {bundles} ({strategy}) not satisfiable: {e}") from e
 
     gpu_share = 0.5 if plan.placement == "colocated" else 1.0
-    providers = list(extra.get("providers", []))
+    # the run's own providers, then the ones named for the actors only
+    providers = list(dict.fromkeys([*config.providers, *extra.get("providers", [])]))
     sys_path = list(sys.path)
     config_dict = config.to_dict()
 

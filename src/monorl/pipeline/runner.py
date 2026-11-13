@@ -22,6 +22,7 @@ from typing import Any
 
 from monorl.config.pipeline import EvalStage, PipelineConfig, RejectionSampleStage, TrainStage
 from monorl.core.errors import ConfigError, MonorlError
+from monorl.core.registry import ensure_providers
 from monorl.core.reporting import RunReporter
 from monorl.core.types import RunState
 from monorl.pipeline.rejection import run_eval, run_rejection_sampling
@@ -74,6 +75,7 @@ def run_pipeline(
     stages_root = reporter.run_dir / STAGES_DIR
 
     try:
+        ensure_providers(config.base)
         manifest = _load_or_create_manifest(config, name, reporter.run_dir, resume=resume)
     except MonorlError as e:
         reporter.set_status("failed", str(e), step=0)

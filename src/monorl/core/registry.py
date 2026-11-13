@@ -6,7 +6,9 @@ Namespaces: ``rollout_engine``, ``trainer``, ``pipeline_backend``, ``reward``, `
 Providers register factories by exposing ``register(registry)``. Built-in providers (listed in
 ``BUILTIN_PROVIDERS``) are imported on the first lookup miss; adapter providers (see
 :mod:`monorl.adapters`) are imported only when a name they own is requested, so importing
-monorl never imports vllm/sglang/ray/etc.
+monorl never imports vllm/sglang/ray/etc. A run config names its own provider modules in
+``RunConfig.providers``; :func:`ensure_providers` loads them in every process that builds
+components from that config.
 
 Usage::
 
@@ -21,8 +23,10 @@ Usage::
 from __future__ import annotations
 
 import importlib
+import os
+import sys
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from typing import Any
 
 from monorl.core.errors import RegistryError
@@ -105,20 +109,45 @@ class Registry:
             return sorted(self._items[namespace])
 
     def load_provider(self, module_path: str) -> None:
-        """Import ``module_path`` and call its ``register(registry)`` once."""
+        """Import ``module_path`` and call its ``register(registry)`` once. A provider that fails is
+        not marked as loaded, so the next call tries it again."""
         with self._lock:
             if module_path in self._loaded_providers:
                 return
             self._loaded_providers.add(module_path)
             try:
-                mod = importlib.import_module(module_path)
-            except ImportError as e:
+                try:
+                    mod = importlib.import_module(module_path)
+                except ImportError as e:
+                    raise RegistryError(f"provider {module_path} failed to import: {e}") from e
+                reg = getattr(mod, "register", None)
+                if reg is None:
+                    raise RegistryError(f"provider {module_path} has no register(registry)")
+                reg(self)
+            except BaseException:
                 self._loaded_providers.discard(module_path)
-                raise RegistryError(f"provider {module_path} failed to import: {e}") from e
-            reg = getattr(mod, "register", None)
-            if reg is None:
-                raise RegistryError(f"provider {module_path} has no register(registry)")
-            reg(self)
+                raise
+
+    def load_providers(self, modules: Iterable[str]) -> None:
+        """Load the provider modules of a run config (``RunConfig.providers``), each once per process.
+
+        The working directory is put on ``sys.path`` first, as ``python -m`` does, so that a module
+        next to where the run was started is found. Whatever a module raises while it is imported or
+        registers comes back as a :class:`RegistryError` that names the module."""
+        with self._lock:
+            pending = [m for m in modules if m not in self._loaded_providers]
+            if not pending:
+                return
+            cwd = os.getcwd()
+            if cwd not in sys.path:
+                sys.path.insert(0, cwd)
+            for module_path in pending:
+                try:
+                    self.load_provider(module_path)
+                except RegistryError:
+                    raise
+                except Exception as e:
+                    raise RegistryError(f"provider {module_path} failed: {type(e).__name__}: {e}") from e
 
     # -- internals ----------------------------------------------------------------------
     def _check_ns(self, namespace: str) -> None:
@@ -144,3 +173,12 @@ class Registry:
 
 
 registry = Registry()
+
+
+def ensure_providers(config: Any) -> None:
+    """Load ``config.providers`` into this process's registry. Idempotent and cheap: called
+    wherever a process turns a run config into components (the run, the runtime, rewards,
+    environments), so the framework processes of pipeline backends are covered as well."""
+    modules = getattr(config, "providers", None)
+    if modules:
+        registry.load_providers(modules)

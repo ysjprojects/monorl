@@ -114,6 +114,9 @@ class JobManager:
         self._pipeline_cmd = pipeline_cmd
         env_grace = os.environ.get("MONORL_CANCEL_GRACE")
         self.grace_seconds = grace_seconds if grace_seconds is not None else float(env_grace or 5.0)
+        # Jobs run in their run directory. The directory the server was started in stays on their
+        # import path, so that the provider modules a config names are found there.
+        self._launch_dir = os.getcwd()
         self._lock = threading.RLock()
         self._procs: dict[str, subprocess.Popen[bytes]] = {}
         self._jobs: dict[str, dict[str, Any]] = {}
@@ -233,7 +236,13 @@ class JobManager:
                     start_new_session=True,
                     # The reporter writes run.log itself; its stderr echo would be captured
                     # into the same file and duplicate every line.
-                    env={**os.environ, "MONORL_REPORTER_ECHO": "0"},
+                    env={
+                        **os.environ,
+                        "MONORL_REPORTER_ECHO": "0",
+                        "PYTHONPATH": os.pathsep.join(
+                            p for p in (self._launch_dir, os.environ.get("PYTHONPATH")) if p
+                        ),
+                    },
                 )
             finally:
                 log.close()

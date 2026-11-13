@@ -2,19 +2,23 @@
 
 One :class:`RunConfig` describes a run end to end; adapters compile it into framework-native
 configs (verl Hydra tree, NeMo-RL yaml, TRL ``GRPOConfig``...). Field ``description`` strings are
-surfaced by the web UI (forms are generated from ``RunConfig.model_json_schema()``), so keep them
+shown by the web UI next to each field and rendered into ``docs/CONFIG.md``, so keep them
 user-facing. Backend-specific knobs go in the ``extra`` dicts, never as top-level fields.
 """
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any, Literal
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from monorl.core.errors import ConfigError
+
+#: A dotted module path, as an import statement takes it.
+_MODULE_PATH = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*")
 
 
 class _Model(BaseModel):
@@ -477,6 +481,14 @@ class RunConfig(_Model):
             "step, and data sources and backends receive it."
         ),
     )
+    providers: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Modules imported before the run builds its components. Each exposes register(registry) and may "
+            "add rewards, environments, engines, trainers or other components under names the config can "
+            "then use. They are imported from the working directory or the Python path."
+        ),
+    )
     model: ModelConfig
     data: DataConfig
     algorithm: AlgorithmConfig = Field(default_factory=AlgorithmConfig)
@@ -569,6 +581,17 @@ class RunConfig(_Model):
                 "distribution would differ from the recorded logprobs"
             )
         return self
+
+    @field_validator("providers")
+    @classmethod
+    def _check_providers(cls, modules: list[str]) -> list[str]:
+        for module in modules:
+            if not _MODULE_PATH.fullmatch(module):
+                raise ValueError(
+                    f"providers: {module!r} is not a module path; name the module as Python imports it "
+                    "(my_rewards or mypkg.rewards), not a file"
+                )
+        return list(dict.fromkeys(modules))
 
     @model_validator(mode="after")
     def _check_token_rewards(self) -> RunConfig:

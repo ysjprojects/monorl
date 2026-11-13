@@ -80,7 +80,11 @@ loop)* toggle at the top — a `PipelineConfig` whose `base` is the same wizard 
    environment can score itself (remote / openenv / hermes, or a harness verifier or posted
    reward). Every environment type has *Retries* (`env.retries`) and *Max failed fraction*
    (`env.max_failed_frac`); the card flags `max_failed_frac > 0` with a pipeline backend
-   (trl / verl / nemo_rl) and `retries > 0` with verl / nemo_rl.
+   (trl / verl / nemo_rl) and `retries > 0` with verl / nemo_rl. The *Providers* card takes the
+   config's `providers` as a comma-separated list of modules; the type selectors list the
+   built-in names, so a reward or environment type that a provider adds is entered in the YAML
+   of the review step. The server imports the modules in the run's process, from the directory
+   `monorl serve` was started in.
 5. *Training* — algorithm (grpo/dapo/rloo/reinforce/ppo/**sft**) and its knobs, rollout engine +
    sampling, trainer + optimizer, logging. Selecting `sft` hides the rollout / rewards / env
    sections (they are ignored by the SFT loop) and surfaces `sft_label_smoothing`,

@@ -273,43 +273,62 @@ default) is rejected at validation: use `chars` or `words`. See [BACKENDS.md](BA
 
 The interface is the `RewardFunction` protocol in `src/monorl/core/interfaces.py`: an object with
 a `name` attribute and `__call__(trajectories) -> list[RewardResult]`, one result per trajectory,
-in order. What gets registered (`src/monorl/core/registry.py`, `registry.register` or the
-decorator below) is a factory `factory(params: dict, **kw)`; `build_reward` passes it
-`config=<RunConfig>` as a keyword. Continuing the session above:
+in order. What gets registered (`src/monorl/core/registry.py`) is a factory
+`factory(params: dict, **kw)`; `build_reward` passes it `config=<RunConfig>` as a keyword. A
+module a run can load exposes `register(registry)`. `my_rewards.py`:
 
 ```python
+from monorl.core.types import RewardResult
+
+
 class KeywordReward:
     def __init__(self, params):
         self.name = str(params.get("name") or "keyword")
         self.keyword = str(params["keyword"]).lower()
+
     def __call__(self, trajs):
         scores = [float(self.keyword in t.last_response_text.lower()) for t in trajs]
         return [RewardResult(score=s, breakdown={self.name: s}) for s in scores]
 
-@registry.provides("reward", "keyword")
+
 def make_keyword(params, **_):
     return KeywordReward(params)
 
+
+def register(registry):
+    registry.register("reward", "keyword", make_keyword)
+```
+
+Name the module in the config's `providers` (in a pipeline config: under `base`) and use the
+reward like a built-in one:
+
+```yaml
+providers: [my_rewards]
+rewards:
+  - {type: keyword, params: {keyword: the}}
+```
+
+The modules in `providers` are imported before a run builds its components, in every process
+that builds them: the run itself, Ray actors and, from the code (not run here), the worker
+processes in which `verl` and `nemo_rl` score responses, where the module has to be on the
+Python path. Otherwise they are imported from the working directory or the Python path: start
+the run where the module is. Jobs launched from the web UI also find modules in the directory
+`monorl serve` was started in. Run here from the directory that holds `my_rewards.py`: one CPU
+step of `grpo_gsm8k_smollm_cpu.yaml` with `--set 'providers=[my_rewards]'` and
+`--set 'rewards=[{type: keyword, params: {keyword: the}}]'` reported `reward/keyword`, and
+`--set 'providers=[no_such_module]'` failed the run with
+`provider no_such_module failed to import: No module named 'no_such_module'`.
+
+Continuing the session above, with `my_rewards.py` in the working directory:
+
+```python
+import my_rewards
+
+my_rewards.register(registry)
 print(registry.get("reward", "keyword")({"keyword": "seven"})([traj("Seven.")])[0])
 # RewardResult(score=1.0, breakdown={'keyword': 1.0}, info={})
 ```
 
-The registry is a per-process global: nothing discovers reward modules outside monorl, and the
-`monorl` command has no option to import one. A run finds your reward when the module that
-registers it was imported in the process that starts the run. A launcher that keeps the whole
-command line, with the code above saved as `my_rewards.py`:
-
-```python
-import my_rewards  # noqa: F401  registers the "keyword" reward
-
-from monorl.cli.main import app
-
-app()
-```
-
-`python train.py train --config my.yaml` then behaves like `monorl train` (run here for one CPU
-step with `--set 'rewards=[{type: keyword, params: {keyword: the}}]'`; the step reported
-`reward/keyword`). Runs started from the web UI use the stock entry point and see the built-in
-names only. A reward that belongs in monorl itself is added to `REWARD_NAMES` in
+A reward that belongs in monorl itself is added to `REWARD_NAMES` in
 `src/monorl/rewards/__init__.py`; its tests go in `tests/rewards/`, whose `conftest.py` has a
 `traj` fixture that builds a trajectory from a response and a reference.

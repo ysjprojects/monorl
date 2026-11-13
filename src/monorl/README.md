@@ -53,7 +53,10 @@ built-in providers on a miss (`BUILTIN_PROVIDERS`: `monorl.data`, `monorl.reward
 `monorl.rollout`, `monorl.trainer`, `monorl.distributed`), then, if the name is still unknown, the
 adapter that owns the part of the name before `:` (`PROVIDERS` in `adapters/__init__.py`). That
 imports the adapter package, not its framework: `registry.get("rollout_engine", "vllm")` returns a
-factory from `monorl.adapters.vllm` and leaves `vllm` out of `sys.modules`.
+factory from `monorl.adapters.vllm` and leaves `vllm` out of `sys.modules`. A run config names
+provider modules of its own in `providers`; `ensure_providers(config)` loads them in every process
+that turns the config into components (the run, the runtime and its Ray actors, `build_reward`,
+`make_env`), from the working directory or the Python path.
 
 **The run directory is the interface between processes** (`core/reporting.py`). Every loop and
 pipeline backend writes `config.yaml`, `status.json`, `metrics.jsonl`, `trajectories.jsonl`,
@@ -77,6 +80,9 @@ are under `../../docs/`.
 | Weight sync strategy | `WeightSync` | `distributed/__init__.py` `register` | `tests/distributed/`, DISTRIBUTED |
 | Patch | `Patch` in a `PatchSet` | the adapter's `patches.py` | `tests/adapters/<name>/`, PATCHING |
 
+- Outside this repository: a module with `register(registry)`, named in the config's `providers`,
+  adds components without touching these files ([REWARDS](../../docs/REWARDS.md),
+  [ENVIRONMENTS](../../docs/ENVIRONMENTS.md)).
 - Data source: the loops call `monorl.data.open_source`, which picks the row source from the URI
   (`data/uri.py`, `open_rows` and the `RowSource` classes in `data/rows.py`). The `data_source`
   registry names `local`, `hf` and `s3` wrap that function, so a new source is a new `RowSource`.

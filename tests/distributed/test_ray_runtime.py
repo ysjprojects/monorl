@@ -97,6 +97,25 @@ def test_ray_runtime_object_store_sync(ray_session, make_config, tmp_path: Path)
             ray.get(actor.node_ip.remote(), timeout=30)
 
 
+def test_ray_actors_load_the_providers_of_the_run_config(ray_session, make_config):
+    """``providers`` at the top of the config reach the actors, where engine and trainer are built."""
+    cfg = make_config(
+        providers=["top_level_provider"],
+        rollout={"backend": "provided"},
+        trainer={"backend": "provided"},
+        cluster={"mode": "ray"},
+    )
+    rt = build_runtime(cfg)
+    try:
+        assert rt.placement["rollout_backend"] == "provided" and rt.placement["trainer_backend"] == "provided"
+        before = _tag(rt.engines[0])
+        rt.trainer.train_step(_batch())
+        rt.weight_sync.sync(rt.trainer, rt.engines)
+        assert _tag(rt.engines[0]) == _trainer_tag(rt.trainer) != before
+    finally:
+        rt.close()
+
+
 def test_ray_runtime_broadcast_sync_cpu(ray_session, make_config):
     cfg = make_config(
         cluster={

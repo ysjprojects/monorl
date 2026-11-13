@@ -14,7 +14,7 @@ from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
-from monorl.core.registry import registry
+from monorl.core.registry import ensure_providers, registry
 
 if TYPE_CHECKING:
     import torch
@@ -93,6 +93,7 @@ def build_local_runtime(config: RunConfig) -> Runtime:
 
 
 def build_runtime(config: RunConfig) -> Runtime:
+    ensure_providers(config)
     if config.cluster.mode == "local":
         return build_local_runtime(config)
     from monorl.distributed.ray_runtime import build_ray_runtime
