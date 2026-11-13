@@ -16,15 +16,26 @@ model and a multi-node run compiled to verl, NeMo-RL or TRL.
 
 ```mermaid
 flowchart LR
-    data(["Data"]) --> env["Environment<br/>single_turn · tool_calling<br/>harness · remote<br/>openenv · hermes"]
-    env -->|episodes| algo["Algorithm<br/>grpo · dapo · rloo<br/>reinforce · ppo · sft"]
-    algo --> trainer["Trainer<br/>reference · unsloth"]
-    trainer -->|weight sync| engine["Rollout engine<br/>hf · vllm · sglang"]
+    env["`**Environment**
+    single_turn
+    tool_calling
+    harness
+    remote
+    openenv
+    hermes`"] --> trainer["`**Trainer**
+    reference
+    unsloth`"]
+    trainer --> engine["`**Rollout engine**
+    hf
+    vllm
+    sglang`"]
     engine <-->|turns| env
 ```
 
-The orchestrator runs this loop itself, or hands the same config to a pipeline backend (`trl`,
-`verl`, `nemo_rl`) that runs its own.
+Environments produce episodes from the policy's turns, the trainer updates the policy (`grpo`,
+`dapo`, `rloo`, `reinforce`, `ppo` or `sft`), and its weights are synced back to the rollout
+engine. The orchestrator runs this loop itself, or hands the same config to a pipeline backend
+(`trl`, `verl`, `nemo_rl`) that runs its own.
 
 ## Highlights
 
