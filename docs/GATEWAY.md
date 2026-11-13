@@ -338,12 +338,12 @@ env:
     timeout: 600
     env: {MY_AGENT_API_BASE: "{base_url}"}
     verifier: ["{python}", "check.py", "{reference_file}", "{stdout_file}"]
-    workdir: {template: ./task_skeleton}
+    workdir: {template: ./task_skeleton}     # holds my_agent.py and check.py
 ```
 
 | Param | |
 |---|---|
-| `command` | Required. The agent: an argv list, or a string that is split like a shell would split it (no shell runs it). |
+| `command` | Required. The agent: an argv list, or a string that is split like a shell would split it (no shell runs it). It starts in the episode's fresh working directory, so name a script by absolute path or put it in `workdir.template`. |
 | `timeout` | Seconds the agent may run (default 600). |
 | `env` | Extra environment variables (values may use placeholders). |
 | `verifier` | Optional command run in the working directory after the agent ended. Reward = the last line of its stdout if that is a number, else `1.0` for exit status 0 and `0.0` otherwise. |
@@ -441,6 +441,7 @@ env:
   max_turns: 8
   params:
     command: ["{python}", "my_agent.py"]
+    workdir: {template: ./agent}     # the directory holding my_agent.py, copied into every working directory
 ```
 
 The same loop against the **Responses API** (same two variables; the SDK posts to
