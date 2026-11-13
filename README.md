@@ -43,6 +43,10 @@ adapters instead of forks**.
 - **Credit where it is due.** `credit_assignment: turn` credits each turn with the return from
   that turn on instead of the episode's total, and `algorithm.name: ppo` trains a value head next
   to the policy for turn-level GAE ([`docs/CREDIT_ASSIGNMENT.md`](docs/CREDIT_ASSIGNMENT.md)).
+- **Multi-token prediction.** For models that ship MTP layers (DeepSeek-V3, GLM, Step, Mellum, …)
+  `model.mtp` drafts with them during rollouts (speculative decoding that leaves sampled tokens
+  and logprobs the policy's), trains them next to the policy so drafts keep matching it, and
+  keeps them in weight sync, checkpoints and the exported model ([`docs/MTP.md`](docs/MTP.md)).
 - **Survives real agents.** An episode whose agent crashes or whose environment fails is retried
   or left out of the batch instead of failing the run (`env.retries`, `env.max_failed_frac`), and
   every episode stays inside a context budget: generation is capped to the room left and an agent
@@ -162,6 +166,7 @@ is the same as `monorl bench`.
 | SFT on every assistant turn (`sft_turns: all`) | ✅ | n/a | n/a | ✅ | ✅ `assistant_only_loss` | always | ✅ | – | – | – |
 | Images (VLM) | ✅ | ✅ | ✅ | text only | ✅ | ✅ | text only | text only | text only | ✅ image refs |
 | LoRA | ✅ | n/a | n/a | ✅ | ✅ | ✅ | ✅ | – | – | – |
+| MTP layers (`model.mtp`) | ✅ draft, train, export | draft, drafter weight sync | draft, draft weight sync | – | – | draft only | draft; train with Megatron | – | – | – |
 | Multi-turn / tools | ✅ | ✅ | ✅ (prefix cache) | ✅ | ✅ monorl episodes as `rollout_func` | `tool_calling` env only | ✅ env bridge (the env's reset prompt is not forwarded) | ✅ | ✅ | ✅ |
 | External agent as env (`harness` + capture gateway; Docker sandbox, task directories) | ✅ | ✅ | ✅ | ✅ | ✅ | – | – | – | – | – |
 | Off-policy corrections (`algorithm.off_policy`) | ✅ decoupled PPO, truncated IS weights, ratio mask, score centering | ✅ (top-k for score centering) | ✅ (top-k for score centering) | ✅ | mapped to TRL's vLLM IS correction | mapped to `rollout_correction` | mapped to `loss_fn` IS options | – | – | – |
@@ -195,6 +200,7 @@ examples/sandbox/  example task directories + a shell agent for sandboxed harnes
 - [Sandboxed episodes (Docker) and Harbor task directories](docs/SANDBOX.md)
 - [Credit assignment: per-turn returns, value baseline (`ppo`)](docs/CREDIT_ASSIGNMENT.md)
 - [Off-policy corrections for async rollouts](docs/OFF_POLICY.md)
+- [Multi-token prediction: drafting, training and exporting MTP layers](docs/MTP.md)
 - [Web UI](docs/WEB_UI.md)
 
 ## Containers & CI
@@ -234,9 +240,13 @@ real Docker containers (agent and verifier inside, reward from the verifier, con
 and `grpo_harness_tasks_docker_cpu.yaml` runs its Harbor-format example tasks; async rollouts
 (`rollout.async_steps_ahead: 2`) run with decoupled PPO + importance weights + ratio mask and with
 score centering; the transcript viewer and the wizard's fields for all of the above were
-exercised on the real server. GPU backends (vLLM, SGLang, Unsloth, verl, NeMo-RL) and their
-images are exercised against fakes only here, as are Docker Engine on Linux (only Docker Desktop
-was run) and the value head on Unsloth and on several Ray trainer ranks; `pytest -m gpu` runs the
+exercised on the real server. With a tiny random Mellum that carries an MTP layer
+(`grpo_mtp_tiny_cpu.yaml`): rollouts are drafted by the layer, the layer is trained and pushed
+back every step (`mtp/accept_rate` 0 → 0.17 on sampled rollouts, 0.41 in greedy evaluation, over
+16 steps) and the export loads with it in transformers. GPU backends (vLLM, SGLang, Unsloth,
+verl, NeMo-RL) and their images are exercised against fakes only here, as are Docker Engine on
+Linux (only Docker Desktop was run), MTP drafting on vLLM and SGLang, MTP models other than
+Mellum, and the value head on Unsloth and on several Ray trainer ranks; `pytest -m gpu` runs the
 real-framework tests on a CUDA machine.
 
 ## Development

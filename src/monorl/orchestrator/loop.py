@@ -24,7 +24,14 @@ import torch
 from monorl.core.errors import ConfigError, DataError, EnvironmentError_
 from monorl.core.registry import registry
 from monorl.core.reporting import list_checkpoints
-from monorl.core.types import RewardResult, RunResult, Sample, SamplingParams, Trajectory
+from monorl.core.types import (
+    RewardResult,
+    RunResult,
+    Sample,
+    SamplingParams,
+    SpeculationStats,
+    Trajectory,
+)
 from monorl.orchestrator.batching import build_train_batch, build_turn_batch
 from monorl.orchestrator.episodes import EpisodeAborted, EpisodeFailure, EpisodeSpec, run_episodes
 from monorl.orchestrator.metrics import eval_metrics, step_metrics
@@ -350,9 +357,22 @@ class ComponentLoop:
             metrics["rollout/groups_incomplete"] = float(tally["incomplete"])
         metrics["time/rollout"] = time_rollout
         metrics["time/reward"] = time_reward
+        metrics.update(self._speculation_metrics())
         return RolloutBatch(
             step=step, trajectories=trajectories, policy_version=self.policy_version, metrics=metrics
         )
+
+    def _speculation_metrics(self) -> dict[str, float]:
+        """``mtp/accept_rate`` and ``mtp/accept_length`` of what the engines generated since the
+        previous call; empty unless an engine drafts (``speculation_stats()``, an optional engine
+        capability). Read under the engine lock, so rollouts and evaluations do not mix."""
+        total = SpeculationStats()
+        for engine in self.raw_engines:
+            read = getattr(engine, "speculation_stats", None)
+            stats = read() if callable(read) else None
+            if stats is not None:
+                total.add(stats)
+        return total.metrics()
 
     def _episodes(
         self,
@@ -672,9 +692,11 @@ class ComponentLoop:
                 for i, s in enumerate(self._eval_samples)
             ]
             trajectories, failed = self._run_specs(specs, self.eval_sampling, what=f"eval step {step}")
+            speculation = self._speculation_metrics()
         self._score(trajectories)
         log_cfg = config.logging
         metrics = eval_metrics(trajectories, success_threshold=log_cfg.success_threshold)
+        metrics.update({f"eval/{key}": value for key, value in speculation.items()})
         if config.env.max_failed_frac > 0:
             metrics["eval/failed_frac"] = failed / len(specs)
         metrics["eval/time"] = time.perf_counter() - t0

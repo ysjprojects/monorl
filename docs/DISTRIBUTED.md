@@ -85,7 +85,10 @@ After every optimizer step the trainer's weights have to reach every engine repl
 | `auto` | `inprocess` for local; `cuda_ipc` for colocated Ray; `broadcast` for disaggregated | default |
 
 Every strategy reports `time/sync` and `weight_sync/bytes`; LoRA runs export **merged** weights
-so engines never need adapter support.
+so engines never need adapter support. With `model.mtp.enabled` the model's MTP layers travel in
+the same stream, named `@mtp/<checkpoint key>`: engines hand them to their drafter, or drop them
+when they do not draft ([`MTP.md`](MTP.md)); the `checkpoint` strategy carries them as an extra
+shard of the saved checkpoint.
 
 ## Async rollouts
 

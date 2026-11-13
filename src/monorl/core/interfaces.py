@@ -73,12 +73,19 @@ class RolloutEngine(Protocol):
     :class:`~monorl.core.errors.GenerationCancelled` instead of returning — without shutting the
     engine down. It is safe to call from any thread, a no-op when nothing is generating, and
     ``generate`` calls made afterwards run normally.
+
+    Optional capability (duck-typed): ``speculation_stats() -> SpeculationStats | None`` returns
+    what speculative decoding did since the previous call (reading restarts the counters), or
+    ``None`` when the engine does not draft (``model.mtp.rollout``, ``docs/MTP.md``).
     """
 
     def generate(self, prompts: Sequence[PromptInput], params: SamplingParams) -> list[list[Completion]]: ...
 
     def update_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> None:
-        """Hot-swap policy weights (HF parameter names, merged LoRA)."""
+        """Hot-swap policy weights (HF parameter names, merged LoRA). Names that start with
+        ``monorl.mtp.WIRE_PREFIX`` are weights of the model's MTP layers under their checkpoint
+        keys: they go to the engine's drafter, or nowhere when it does not draft, and never into
+        the policy."""
         ...
 
     def load_weights_from_path(self, path: str | os.PathLike[str]) -> None:
@@ -116,7 +123,8 @@ class Trainer(Protocol):
         ...
 
     def export_weights(self) -> Iterator[tuple[str, torch.Tensor]]:
-        """Merged, HF-named parameters for :meth:`RolloutEngine.update_weights`."""
+        """Merged, HF-named parameters for :meth:`RolloutEngine.update_weights`, followed by the
+        MTP layers' weights (``monorl.mtp.MtpLayers.wire_weights``) when the trainer holds any."""
         ...
 
     def save_checkpoint(self, path: Path) -> None:

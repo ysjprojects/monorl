@@ -1,0 +1,64 @@
+# Multi-token prediction (MTP) end to end on CPU with a random tiny model (docs/MTP.md). Build the
+# model first: `.venv/bin/python scripts/dev/tiny_mtp_model.py /tmp/monorl-tiny-mtp`.
+# Rollouts are drafted by the model's MTP layer (speculative decoding on the hf engine: the policy
+# checks every draft, so sampled tokens and logprobs are its own), the layer is trained on every
+# batch (`model.mtp.train`) and pushed back to the engine with the policy's weights, so
+# `mtp/accept_rate` and `mtp/accept_length` rise while `loss/mtp` falls, and `final/` holds the
+# trained layer next to the policy. The model knows nothing: the reward (shorter answers score
+# higher) only gives GRPO something to optimise.
+run_name: grpo-mtp-tiny-cpu
+seed: 42
+model:
+  name_or_path: /tmp/monorl-tiny-mtp
+  dtype: float32
+  mtp:
+    enabled: true
+    rollout: true        # draft during rollouts
+    train: true          # auxiliary MTP loss on the response tokens
+    loss_coef: 1.0
+    detach_trunk: true   # the MTP loss updates the MTP layer only
+data:
+  uri: hf://openai/gsm8k
+  hf_config_name: main
+  split: train
+  format: prompt_answer
+  prompt_field: question
+  answer_field: answer
+  max_prompt_tokens: 256
+  limit: 16
+  eval_uri: hf://openai/gsm8k
+  eval_split: test
+algorithm:
+  name: grpo
+  kl_coef: 0.0
+  advantage_norm: group
+rollout:
+  backend: hf
+  group_size: 4
+  max_new_tokens: 16
+  temperature: 1.0
+  device: cpu
+trainer:
+  backend: reference
+  learning_rate: 3.0e-3
+  prompts_per_step: 2
+  micro_batch_size: 8
+  max_steps: 16
+  precision: fp32
+  save_every: 16
+  eval_every: 8
+  max_seq_len: 512
+  device: cpu
+rewards:
+  - type: length
+    weight: 1.0
+    params:
+      unit: chars
+      max_tokens: 60
+      penalty_per_token: 0.005
+      scope: last
+cluster:
+  mode: local
+logging:
+  run_root: ~/.monorl/runs
+  trajectories_per_step: 2

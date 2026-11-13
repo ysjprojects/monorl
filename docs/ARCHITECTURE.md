@@ -88,8 +88,12 @@ Read the file. Key points:
 - `RolloutEngine.generate(prompts, params) -> list[list[Completion]]`: exactly `params.n`
   completions per prompt, order preserved; prompts are chats **or** raw token ids; when
   `params.logprobs` is true every completion carries per-token logprobs under the sampling policy.
+  Optional, duck-typed capabilities: `cancel()` (abort the calls in flight) and
+  `speculation_stats() -> SpeculationStats | None` (drafting counters since the previous call,
+  for engines that decode speculatively).
 - `Trainer.train_step(TrainBatch) -> metrics`, `compute_logprobs(batch, reference=False)`,
-  `export_weights()` (merged, HF-named), `save_checkpoint/load_checkpoint` (resumable),
+  `export_weights()` (merged, HF-named; followed by the model's MTP layers under their checkpoint
+  keys when `model.mtp.enabled`), `save_checkpoint/load_checkpoint` (resumable),
   `save_pretrained` (HF export).
 - `Environment.reset(sample) -> messages`, `step(Completion) -> StepResult`, `max_turns`; or an
   `EpisodeDriver` that runs the whole episode itself (`run_episode(sample, *, group_id, engine,
@@ -191,12 +195,25 @@ group baseline with a value head in the reference trainer and turn-level GAE (`g
 `value_coef`, `value_clip`; `TrainBatch.values` / `returns` / `value_mask`). Formulas, the
 treatment of groups with unequal turn counts and the costs: [`CREDIT_ASSIGNMENT.md`](CREDIT_ASSIGNMENT.md).
 
+#### Multi-token prediction
+`model.mtp` (`enabled`, `rollout`, `num_speculative_tokens`, `train`, `loss_coef`,
+`detach_trunk`) is for models that ship MTP layers. `monorl.mtp.MtpLayers` holds them next to a
+transformers policy for the lifetime of an engine or trainer: the `hf` engine drafts with them,
+the reference trainer trains them with the MTP loss on the response tokens, and their weights
+travel **under the checkpoint's own keys and layout** — the form transformers, vLLM and SGLang
+load them from — in `export_weights()`, each name tagged `@mtp/` (`monorl.mtp.WIRE_PREFIX`) so
+engines route them to their drafter and never into the policy without knowing the model;
+`save_pretrained` adds them, untagged, to the export as one more shard. Details,
+per-backend support and limits: [`MTP.md`](MTP.md).
+
 Metric names (used by the UI): `reward/mean`, `reward/std`, `reward/<name>` per reward,
 `loss/policy`, `loss/kl`, `loss/entropy`, `policy/clipfrac`, `policy/approx_kl`,
 `policy/staleness`, `tokens/response_mean`, `tokens/prompt_mean`, `tokens/sequences`,
 `tokens/prefix_mismatch`, `time/rollout`, `time/train`, `time/sync`, `lr`, `offpolicy/*` when
 `algorithm.off_policy` is active, `rollout/failed_*` when `env.max_failed_frac > 0`,
-`advantage/turn_*` with `credit_assignment: turn`, and `loss/value`, `value/*` for `ppo`.
+`advantage/turn_*` with `credit_assignment: turn`, `loss/value`, `value/*` for `ppo`, and with
+`model.mtp` `loss/mtp`, `mtp/accuracy` (training) and `mtp/accept_rate`, `mtp/accept_length`
+(drafting; `eval/mtp/*` for evaluations).
 
 Agent metrics (`monorl.orchestrator.metrics.episode_metrics(trajectories, *, success_threshold)`,
 reported per step as `reward/success_rate`, `reward/pass_at_k` and `episode/<key>`, and by every

@@ -8,7 +8,7 @@ from distributed_fakes import make_weights, weight_sum
 
 from monorl.core.batch import TrainBatch
 from monorl.core.interfaces import RolloutEngine, Trainer
-from monorl.core.types import SamplingParams
+from monorl.core.types import SamplingParams, SpeculationStats
 from monorl.distributed import build_runtime
 from monorl.distributed.ray_runtime import RayBroadcastWeightSync, RayObjectStoreWeightSync
 
@@ -65,6 +65,9 @@ def test_ray_runtime_object_store_sync(ray_session, make_config, tmp_path: Path)
         assert out[1][1].text == f"w={weight_sum(make_weights(0)):.6f} p=1 n=1"
         assert out[0][0].logprobs == [0.0, 0.0]
         assert engine.tokenizer == {"name": "fake-tokenizer"}
+        # the optional drafting counters cross the actor boundary and restart with every read
+        assert engine.speculation_stats() == SpeculationStats(steps=4, drafted=4, accepted=4, emitted=8)
+        assert engine.speculation_stats() == SpeculationStats()
 
         assert trainer.step == 0
         metrics = trainer.train_step(_batch())

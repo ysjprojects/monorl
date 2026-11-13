@@ -54,7 +54,7 @@ from monorl.config.schema import RunConfig
 from monorl.core.batch import TrainBatch
 from monorl.core.errors import ConfigError, WeightSyncError
 from monorl.core.registry import registry
-from monorl.core.types import Completion, PromptInput, SamplingParams
+from monorl.core.types import Completion, PromptInput, SamplingParams, SpeculationStats
 from monorl.distributed.cluster import detect_cluster
 from monorl.distributed.placement import PlacementPlan, plan_placement
 from monorl.distributed.runtime import Runtime
@@ -171,6 +171,10 @@ class RolloutEngineActor:
 
     def tokenizer(self) -> Any:
         return self._engine().tokenizer
+
+    def speculation_stats(self) -> SpeculationStats | None:
+        read = getattr(self._engine(), "speculation_stats", None)
+        return read() if callable(read) else None
 
     # weight sync entry points
     def pull_weights(self, refs: list[Any]) -> int:
@@ -377,6 +381,13 @@ class RayRolloutEngine:
         if self._tokenizer is None:
             self._tokenizer = ray.get(self.actors[0].tokenizer.remote())
         return self._tokenizer
+
+    def speculation_stats(self) -> SpeculationStats | None:
+        """Drafting counters of the replica since the previous call (its first actor serves the
+        completions); ``None`` when the engine does not draft."""
+        import ray
+
+        return ray.get(self.actors[0].speculation_stats.remote())
 
     # sync hooks (non-blocking; return handles)
     def pull_weights_async(self, refs: list[Any]) -> _RayHandle:

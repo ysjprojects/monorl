@@ -238,6 +238,42 @@ class StepResult:
     info: dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass(slots=True)
+class SpeculationStats:
+    """What speculative decoding did since the counters were last read (``docs/MTP.md``).
+
+    A *step* is one verification pass of the policy: it checks the tokens drafted for it and
+    emits the accepted ones plus one token of its own. Rollout engines that draft report it
+    through the optional ``speculation_stats()`` capability."""
+
+    steps: int = 0
+    """Verification passes of the policy."""
+    drafted: int = 0
+    """Tokens the drafter proposed."""
+    accepted: int = 0
+    """Proposed tokens the policy accepted."""
+    emitted: int = 0
+    """Tokens those passes delivered: accepted drafts plus the policy's own token of each pass,
+    less what was cut off when a sequence ended in the middle of a pass."""
+
+    def add(self, other: SpeculationStats) -> None:
+        self.steps += other.steps
+        self.drafted += other.drafted
+        self.accepted += other.accepted
+        self.emitted += other.emitted
+
+    def metrics(self) -> dict[str, float]:
+        """``mtp/accept_rate`` (accepted share of the drafted tokens) and ``mtp/accept_length``
+        (tokens emitted per pass of the policy: 1.0 without any accepted draft); empty when
+        nothing was generated."""
+        if self.steps <= 0:
+            return {}
+        metrics = {"mtp/accept_length": self.emitted / self.steps}
+        if self.drafted > 0:
+            metrics["mtp/accept_rate"] = self.accepted / self.drafted
+        return metrics
+
+
 RunState = Literal["pending", "running", "succeeded", "failed", "cancelled"]
 
 

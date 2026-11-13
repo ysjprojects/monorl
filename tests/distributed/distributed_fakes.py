@@ -14,7 +14,7 @@ from typing import Any
 import torch
 
 from monorl.core.batch import TrainBatch
-from monorl.core.types import Completion, PromptInput, SamplingParams
+from monorl.core.types import Completion, PromptInput, SamplingParams, SpeculationStats
 
 SHAPES = {"model.embed.weight": (8, 4), "model.layers.0.proj.weight": (4, 4)}
 
@@ -36,9 +36,16 @@ class FakeEngine:
         self.slept = False
         self.shut_down = False
         self.updates = 0
+        self.completions = 0
+
+    def speculation_stats(self) -> SpeculationStats:
+        """One pass and one accepted draft per completion since the previous call."""
+        done, self.completions = self.completions, 0
+        return SpeculationStats(steps=done, drafted=done, accepted=done, emitted=2 * done)
 
     def generate(self, prompts: Sequence[PromptInput], params: SamplingParams) -> list[list[Completion]]:
         tag = f"w={weight_sum(self.weights):.6f}"
+        self.completions += len(prompts) * params.n
         return [
             [
                 Completion(

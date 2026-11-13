@@ -31,6 +31,54 @@ class LoraConfig(_Model):
     )
 
 
+class MtpConfig(_Model):
+    """Multi-token prediction layers of the model (``docs/MTP.md``)."""
+
+    enabled: bool = Field(
+        False,
+        description=(
+            "Load the checkpoint's MTP (multi-token prediction) layers next to the policy and keep them in "
+            "weight sync, checkpoints and the final export. Needs a model that ships MTP layers."
+        ),
+    )
+    rollout: bool = Field(
+        False,
+        description=(
+            "Draft tokens with the MTP layers during rollouts (speculative decoding). The policy verifies "
+            "every draft, so the sampled tokens and their logprobs are the policy's; only speed changes."
+        ),
+    )
+    num_speculative_tokens: int | None = Field(
+        None,
+        ge=1,
+        description=(
+            "Tokens drafted per decoding step. Default: one per MTP layer on the hf engine, 1 on vLLM, "
+            "SGLang's own default."
+        ),
+    )
+    train: bool = Field(
+        False,
+        description=(
+            "Train the MTP layers with an auxiliary loss (predict the tokens after the next one) on the "
+            "response tokens of every batch, in RL and SFT, so drafts keep matching a policy that changes."
+        ),
+    )
+    loss_coef: float = Field(0.1, ge=0.0, description="Weight of the MTP loss in the total loss.")
+    detach_trunk: bool = Field(
+        True,
+        description=(
+            "true: the MTP loss updates the MTP layers only. false: it also flows into the policy's own "
+            "parameters, as in pretraining."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _check(self) -> MtpConfig:
+        if not self.enabled and (self.rollout or self.train):
+            raise ValueError("model.mtp.rollout and model.mtp.train need model.mtp.enabled: true")
+        return self
+
+
 class ModelConfig(_Model):
     name_or_path: str = Field(..., description="Hugging Face model id or local path.")
     revision: str | None = Field(None, description="Hub revision (branch, tag or commit).")
@@ -44,6 +92,7 @@ class ModelConfig(_Model):
     attn_implementation: str | None = Field(None, description="e.g. 'flash_attention_2', 'sdpa', 'eager'.")
     chat_template: str | None = Field(None, description="Jinja chat template override.")
     lora: LoraConfig = Field(default_factory=LoraConfig)
+    mtp: MtpConfig = Field(default_factory=MtpConfig)
 
 
 class DataConfig(_Model):
@@ -436,6 +485,38 @@ class RunConfig(_Model):
             raise ValueError(
                 "off_policy.score_centering needs the full sampling distribution: rollout.temperature > 0 and "
                 "no top_k / top_p / min_p / repetition_penalty truncation"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _check_mtp(self) -> RunConfig:
+        mtp, backend = self.model.mtp, self.trainer.backend
+        if not mtp.enabled:
+            return self
+        if backend == "unsloth":
+            raise ValueError(
+                "model.mtp is not supported with trainer.backend='unsloth': Unsloth loads the model itself and "
+                "trains MTP heads with a trainer of its own; use trainer.backend='reference'"
+            )
+        if backend == "trl":
+            raise ValueError(
+                "model.mtp is not supported with trainer.backend='trl': TRL neither trains MTP layers nor "
+                "drafts with them in its own generation; use trainer.backend='reference'"
+            )
+        if mtp.train and backend == "verl":
+            raise ValueError(
+                "model.mtp.train is not supported with trainer.backend='verl': verl trains MTP layers only "
+                "with its Megatron engine, and monorl compiles the FSDP actor, which ignores the setting; "
+                "model.mtp.rollout is compiled"
+            )
+        # verl and NeMo-RL run their own rollouts on vLLM / SGLang, whatever rollout.backend says
+        served = self.rollout.backend in {"vllm", "sglang"} or backend in {"verl", "nemo_rl"}
+        if mtp.rollout and served and float(self.rollout.extra.get("min_p") or 0.0) > 0.0:
+            engine = self.rollout.backend if self.rollout.backend in {"vllm", "sglang"} else backend
+            raise ValueError(
+                f"model.mtp.rollout on {engine} cannot be combined with min_p: vLLM rejects it under "
+                "speculative decoding and SGLang's verification does not apply it, so the sampled "
+                "distribution would differ from the recorded logprobs"
             )
         return self
 

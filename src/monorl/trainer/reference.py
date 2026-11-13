@@ -18,6 +18,22 @@ trainable parameters) at ``VALUE_LR_SCALE`` times the learning rate, is part of 
 all-reduce and of ``trainer_state.pt``, and is never exported: ``export_weights`` and
 ``save_pretrained`` are the policy alone.
 
+MTP layers
+----------
+``model.mtp.enabled`` holds the checkpoint's multi-token-prediction layers next to the policy
+(:class:`monorl.mtp.MtpLayers`; they share its embedding and output head). They follow the policy
+in ``export_weights`` (checkpoint keys behind ``monorl.mtp.WIRE_PREFIX``, so engines can draft with
+them) and in ``save_pretrained`` (the checkpoint's own keys: ``final/`` is a complete checkpoint
+again), and they are part of ``trainer_state.pt``.
+``model.mtp.train`` trains them: ``train_step`` adds ``loss_coef`` times :meth:`MtpLayers.loss` on
+the response tokens, computed from the hidden states of the policy's last decoder layer. They are
+full parameters (also next to LoRA adapters) in an optimizer group of their own at the policy's
+learning rate, schedule and weight decay. Their gradient is clipped to ``max_grad_norm`` on its
+own: with ``detach_trunk`` the policy's update is exactly what it is without MTP training, and
+``grad_norm`` stays the policy's. A micro-batch's MTP loss is its share of the batch's (the target
+counts are global across ranks), so the accumulated gradient is the full-batch gradient. Without
+``train`` the layers are frozen and no forward pass runs through them.
+
 Data parallelism
 ----------------
 With ``world_size > 1`` (``rank``/``world_size`` kwargs, else ``RANK``/``WORLD_SIZE`` env) every
@@ -57,7 +73,8 @@ from transformers import get_scheduler
 from monorl.config.schema import RunConfig
 from monorl.core.batch import TrainBatch
 from monorl.core.errors import ConfigError
-from monorl.rollout.hf_engine import iter_hf_weights, load_tokenizer, resolve_device
+from monorl.mtp import MtpLayers, resolve_checkpoint_dir, write_checkpoint_weights
+from monorl.rollout.hf_engine import hf_weight_names, iter_hf_weights, load_tokenizer, resolve_device
 from monorl.rollout.media import auto_model_class, collate_media
 
 log = logging.getLogger(__name__)
@@ -255,13 +272,25 @@ class ReferenceTrainer:
             )
             if self.lora_enabled:
                 self.model.enable_input_require_grads()
+        self.mtp: MtpLayers | None = None
+        self._mtp_params: list[nn.Parameter] = []
+        if config.model.mtp.enabled:
+            # After the LoRA wrapping: the layers share the output head the policy really uses.
+            self.mtp = self._load_mtp()
+            self.mtp.model.train(config.model.mtp.train)
+            for p in self.mtp.parameters():
+                p.requires_grad_(config.model.mtp.train)
+            if config.model.mtp.train:
+                self._mtp_params = self.mtp.parameters()
         self.model.train()
 
-        self.trainable_params = [p for p in self.model.parameters() if p.requires_grad]
+        self._policy_params = [p for p in self.model.parameters() if p.requires_grad]
         self.value_head: nn.Linear | None = None
+        self._value_params: list[nn.Parameter] = []
         if config.algorithm.name == "ppo":
             self.value_head = self._build_value_head()
-            self.trainable_params += list(self.value_head.parameters())
+            self._value_params = list(self.value_head.parameters())
+        self.trainable_params = self._policy_params + self._value_params + self._mtp_params
         if self._dist is not None:
             self._dist.broadcast_params(self.trainable_params)
         self.optimizer = self._build_optimizer()
@@ -274,16 +303,21 @@ class ReferenceTrainer:
             self._dist.close()
 
     # -- construction ---------------------------------------------------------------------
-    def _load_base(self) -> nn.Module:
+    def _load_base(self, checkpoint: Path | None = None) -> nn.Module:
+        """The configured model, or the model a trainer checkpoint holds (same loading options)."""
         model = auto_model_class(self.config).from_pretrained(
-            self.config.model.name_or_path,
+            checkpoint or self.config.model.name_or_path,
             dtype=self.param_dtype,
-            revision=self.config.model.revision,
+            revision=None if checkpoint else self.config.model.revision,
             trust_remote_code=self.config.model.trust_remote_code,
             attn_implementation=self.config.model.attn_implementation,
         )
         model.config.use_cache = False
         return model
+
+    def _load_mtp(self) -> MtpLayers:
+        model = self.config.model
+        return MtpLayers(self.hf_model, resolve_checkpoint_dir(model.name_or_path, model.revision))
 
     def _wrap_lora(self, model: nn.Module) -> nn.Module:
         from peft import LoraConfig, get_peft_model
@@ -317,13 +351,11 @@ class ReferenceTrainer:
 
     def _build_optimizer(self) -> torch.optim.Optimizer:
         tc = self.config.trainer
-        params: Any = self.trainable_params
-        if self.value_head is not None:
-            head = list(self.value_head.parameters())
-            params = [
-                {"params": self.trainable_params[: -len(head)]},
-                {"params": head, "lr": tc.learning_rate * VALUE_LR_SCALE},
-            ]
+        params: list[dict[str, Any]] = [{"params": self._policy_params}]
+        if self._value_params:
+            params.append({"params": self._value_params, "lr": tc.learning_rate * VALUE_LR_SCALE})
+        if self._mtp_params:
+            params.append({"params": self._mtp_params})
         if tc.optimizer == "adamw":
             return torch.optim.AdamW(params, lr=tc.learning_rate, weight_decay=tc.weight_decay)
         if tc.optimizer == "adam":
@@ -361,6 +393,10 @@ class ReferenceTrainer:
         # The value loss is a mean over the batch's value positions, whatever loss_agg says.
         critic = self.value_head is not None and batch.value_mask is not None and batch.returns is not None
         local_states = int(batch.value_mask.sum().item()) if critic else 0
+        # The MTP loss of every depth is a mean over the batch's targets of that depth.
+        mtp_cfg = self.config.model.mtp
+        mtp = self.mtp if mtp_cfg.train else None
+        mtp_totals = mtp.target_counts(batch.response_mask) if mtp is not None else []
         total_tokens, total_seqs, total_scored, total_mass, total_states = (
             local_tokens,
             local_seqs,
@@ -372,11 +408,12 @@ class ReferenceTrainer:
             self._dist is not None
         ):  # weights use global counts so the summed gradient is the full-batch gradient
             counts = self._dist.all_gather_object(
-                (local_tokens, local_seqs, local_scored, local_mass, local_states)
+                (local_tokens, local_seqs, local_scored, local_mass, local_states, mtp_totals)
             )
             total_tokens, total_seqs, total_scored, total_mass, total_states = (
                 sum(c[i] for c in counts) for i in range(5)
             )
+            mtp_totals = [sum(depth) for depth in zip(*(c[5] for c in counts), strict=True)]
         total_tokens = max(total_tokens, 1)
         total_scored = max(total_scored, 1)
         mbs = self.config.trainer.micro_batch_size
@@ -388,6 +425,13 @@ class ReferenceTrainer:
         weights_total = 0.0
         value_sums: dict[str, float] = {}
         value_weights_total = 0.0
+        mtp_sums = [0.0] * len(mtp_totals)
+        mtp_correct = 0
+        # What generation hands to the MTP layers: the output of the last decoder layer, before the final norm.
+        mtp_inputs: dict[str, Any] = {}
+        if mtp is not None:
+            num_layers = self.hf_model.config.get_text_config().num_hidden_layers
+            mtp_inputs["output_hidden_states"] = [num_layers - 1]
         for start in range(0, local_seqs, mbs):
             micro = batch.slice(start, start + mbs)
             micro_tokens = int(micro.response_mask.sum().item())
@@ -402,7 +446,10 @@ class ReferenceTrainer:
             with contextlib.ExitStack() as stack:
                 stack.enter_context(self._autocast())
                 hidden = stack.enter_context(self._final_hidden()) if micro_states else None
-                logits = self._forward(self.model, micro)
+                outputs = self._outputs(self.model, micro, **mtp_inputs)
+            logits = outputs.logits
+            last_layer = outputs.hidden_states[-1] if mtp is not None else None
+            del outputs
             logprobs, entropy, top_logprobs = sequence_logprobs_and_entropy(
                 logits, micro.input_ids, self.temperature, entropy=True, top_ids=micro.behavior_top_ids
             )
@@ -448,6 +495,20 @@ class ReferenceTrainer:
                     value_sums[k] = value_sums.get(k, 0.0) + float(v) * value_weight
                 value_weights_total += value_weight
             del hidden
+            if mtp is not None:
+                with self._autocast():
+                    mtp_out = mtp.loss(
+                        last_layer,
+                        micro.input_ids,
+                        micro.response_mask,
+                        detach_trunk=mtp_cfg.detach_trunk,
+                        totals=mtp_totals,
+                    )
+                # already this micro-batch's share of the batch's loss
+                scaled = scaled + mtp_cfg.loss_coef * mtp_out.loss
+                mtp_sums = [a + b for a, b in zip(mtp_sums, mtp_out.sums, strict=True)]
+                mtp_correct += mtp_out.correct
+            del last_layer
             if self.scaler is not None:
                 self.scaler.scale(scaled).backward()
             else:
@@ -463,18 +524,33 @@ class ReferenceTrainer:
 
         if self._dist is not None:
             self._dist.all_reduce_grads(self.trainable_params)
-            gathered = self._dist.all_gather_object((sums, weights_total, value_sums, value_weights_total))
+            gathered = self._dist.all_gather_object(
+                (sums, weights_total, value_sums, value_weights_total, mtp_sums, mtp_correct)
+            )
             sums, weights_total, value_sums, value_weights_total = {}, 0.0, {}, 0.0
-            for other_sums, other_total, other_value_sums, other_value_total in gathered:
+            mtp_sums, mtp_correct = [0.0] * len(mtp_totals), 0
+            for (
+                other_sums,
+                other_total,
+                other_value_sums,
+                other_value_total,
+                other_mtp,
+                other_correct,
+            ) in gathered:
                 for k, v in other_sums.items():
                     sums[k] = sums.get(k, 0.0) + v
                 weights_total += other_total
                 for k, v in other_value_sums.items():
                     value_sums[k] = value_sums.get(k, 0.0) + v
                 value_weights_total += other_value_total
+                mtp_sums = [a + b for a, b in zip(mtp_sums, other_mtp, strict=True)]
+                mtp_correct += other_correct
         if self.scaler is not None:
             self.scaler.unscale_(self.optimizer)
-        grad_norm = torch.nn.utils.clip_grad_norm_(self.trainable_params, self.config.trainer.max_grad_norm)
+        max_grad_norm = self.config.trainer.max_grad_norm
+        grad_norm = torch.nn.utils.clip_grad_norm_(self._policy_params + self._value_params, max_grad_norm)
+        if self._mtp_params:  # on their own: the policy's clip does not depend on the MTP gradient
+            torch.nn.utils.clip_grad_norm_(self._mtp_params, max_grad_norm)
         if self.scaler is not None:
             self.scaler.step(self.optimizer)
             self.scaler.update()
@@ -490,6 +566,17 @@ class ReferenceTrainer:
             result["loss/total"] = (
                 result.get("loss/total", 0.0) + self.config.algorithm.value_coef * result["loss/value"]
             )
+        depth_losses = {
+            depth: entropy / count
+            for depth, (entropy, count) in enumerate(zip(mtp_sums, mtp_totals, strict=True), start=1)
+            if count > 0
+        }
+        if depth_losses:
+            result["loss/mtp"] = sum(depth_losses.values()) / len(depth_losses)
+            result["mtp/accuracy"] = mtp_correct / sum(mtp_totals)
+            if len(mtp_totals) > 1:
+                result.update({f"loss/mtp_{depth}": loss for depth, loss in depth_losses.items()})
+            result["loss/total"] = result.get("loss/total", 0.0) + mtp_cfg.loss_coef * result["loss/mtp"]
         result["grad_norm"] = float(grad_norm.item())
         result["lr"] = float(self.scheduler.get_last_lr()[0])
         result["tokens/response_mean"] = float(total_tokens / total_seqs)
@@ -539,35 +626,54 @@ class ReferenceTrainer:
         return out.to(src_device)
 
     def export_weights(self) -> Iterator[tuple[str, torch.Tensor]]:
+        """The policy's weights (LoRA adapters merged) and then, with ``model.mtp.enabled``, the
+        MTP layers under their checkpoint keys, tagged with ``monorl.mtp.WIRE_PREFIX``."""
+        yield from self._policy_weights()
+        if self.mtp is not None:
+            yield from self.mtp.wire_weights()
+
+    def _policy_weights(self) -> Iterator[tuple[str, torch.Tensor]]:
         if not self.lora_enabled:
             for name, tensor in self.hf_model.state_dict().items():
                 yield name, tensor.detach()
             return
         from peft.tuners.lora import LoraLayer
 
-        lora_layers = {name: m for name, m in self.hf_model.named_modules() if isinstance(m, LoraLayer)}
+        # state_dict name of every adapted tensor -> the layer that adapts it. PEFT wraps a module once
+        # per adapted tensor: one wrapper around a linear layer, nested ones (`ParamWrapper`, which names
+        # its tensor) around a module whose packed expert weights are adapted one by one.
+        adapted: dict[str, Any] = {}
+        biases: dict[str, Any] = {}
+        for name, layer in self.hf_model.named_modules():
+            if not isinstance(layer, LoraLayer):
+                continue
+            base, module = name, layer
+            while isinstance(module, LoraLayer):
+                base, module = base + ".base_layer", module.base_layer
+            adapted[f"{base}.{getattr(layer, 'parameter_name', 'weight')}"] = layer
+            if not hasattr(layer, "parameter_name"):
+                biases[f"{base}.bias"] = layer
         with torch.no_grad():
             for name, tensor in self.hf_model.state_dict().items():
                 if ".lora_" in name:
                     continue
-                if name.endswith(".base_layer.weight"):
-                    prefix = name[: -len(".base_layer.weight")]
-                    layer = lora_layers[prefix]
+                exported = name.replace(".base_layer", "")
+                if name in adapted:
+                    layer = adapted[name]
                     merged = tensor.detach().clone()
                     for adapter in layer.active_adapters:
                         if adapter in layer.lora_A:
                             merged += layer.get_delta_weight(adapter).to(merged.dtype)
-                    yield prefix + ".weight", merged
-                elif name.endswith(".base_layer.bias"):
-                    prefix = name[: -len(".base_layer.bias")]
-                    layer = lora_layers[prefix]
+                    yield exported, merged
+                elif name in biases:
+                    layer = biases[name]
                     merged = tensor.detach().clone()
                     for adapter in layer.active_adapters:
                         if layer.lora_bias.get(adapter, False):
                             merged += layer.lora_B[adapter].bias * layer.scaling[adapter]
-                    yield prefix + ".bias", merged
+                    yield exported, merged
                 else:
-                    yield name.replace(".base_layer", ""), tensor.detach()
+                    yield exported, tensor.detach()
 
     def save_checkpoint(self, path: Path) -> None:
         """Rank 0 writes; every rank returns once the files are on disk."""
@@ -584,6 +690,7 @@ class ReferenceTrainer:
                 "scheduler": self.scheduler.state_dict(),
                 "scaler": self.scaler.state_dict() if self.scaler is not None else None,
                 "value_head": self.value_head.state_dict() if self.value_head is not None else None,
+                "mtp": self.mtp.state_dict() if self.mtp is not None else None,
                 "rng": {
                     "python": random.getstate(),
                     "numpy": np.random.get_state(),
@@ -606,9 +713,19 @@ class ReferenceTrainer:
                 raise RuntimeError(f"checkpoint adapter has unexpected keys: {sorted(unexpected)[:5]}")
         else:
             state = self.hf_model.state_dict()
+            stored = path / CHECKPOINT_MODEL
             with torch.no_grad():
-                for name, tensor in iter_hf_weights(path / CHECKPOINT_MODEL):
-                    state[name].copy_(tensor.to(device=state[name].device, dtype=state[name].dtype))
+                if all(name in state for name in hf_weight_names(stored)):
+                    for name, tensor in iter_hf_weights(stored):
+                        state[name].copy_(tensor.to(device=state[name].device, dtype=state[name].dtype))
+                else:
+                    # save_pretrained wrote the checkpoint's layout, which is not the state dict's for
+                    # models whose weights are converted on load (packed expert weights): those are
+                    # read by transformers' loader, at the price of a second copy for the moment.
+                    saved = self._load_base(stored)
+                    for name, tensor in saved.state_dict().items():
+                        state[name].copy_(tensor.to(device=state[name].device, dtype=state[name].dtype))
+                    del saved
         state = torch.load(path / CHECKPOINT_STATE, map_location="cpu", weights_only=False)
         if self.value_head is not None:
             if state.get("value_head") is None:
@@ -616,6 +733,12 @@ class ReferenceTrainer:
                     f"checkpoint {path} holds no value head: it was not written by an algorithm.name='ppo' run"
                 )
             self.value_head.load_state_dict(state["value_head"])
+        if self.mtp is not None:
+            if state.get("mtp") is None:
+                raise RuntimeError(
+                    f"checkpoint {path} holds no MTP layers: it was not written by a run with model.mtp.enabled"
+                )
+            self.mtp.load_state_dict(state["mtp"])
         self.optimizer.load_state_dict(state["optimizer"])
         self.scheduler.load_state_dict(state["scheduler"])
         if self.scaler is not None and state.get("scaler") is not None:
@@ -633,10 +756,13 @@ class ReferenceTrainer:
         if self._writer:
             path.mkdir(parents=True, exist_ok=True)
             if self.lora_enabled:
-                merged = {name: tensor.detach().to("cpu") for name, tensor in self.export_weights()}
-                self.hf_model.save_pretrained(str(path), state_dict=merged, safe_serialization=True)
+                policy = {name: tensor.detach().to("cpu") for name, tensor in self._policy_weights()}
+                self.hf_model.save_pretrained(str(path), state_dict=policy, safe_serialization=True)
             else:
+                policy = self.hf_model.state_dict()
                 self.hf_model.save_pretrained(str(path), safe_serialization=True)
+            if self.mtp is not None:  # save_pretrained leaves them out; with them it is a complete checkpoint
+                write_checkpoint_weights(path, self.mtp.checkpoint_weights(tied_from=policy))
             self.tokenizer.save_pretrained(str(path))
         self._sync_writers()
 
@@ -690,12 +816,16 @@ class ReferenceTrainer:
         return batch.to(self.device)
 
     def _forward(self, model: nn.Module, micro: TrainBatch) -> torch.Tensor:
-        """Logits for one micro-batch. ``extra`` tensors (``[B, T]``-aligned, e.g.
+        """Logits for one micro-batch."""
+        return self._outputs(model, micro).logits
+
+    def _outputs(self, model: nn.Module, micro: TrainBatch, **model_kwargs: Any) -> Any:
+        """The model's output for one micro-batch. ``extra`` tensors (``[B, T]``-aligned, e.g.
         ``mm_token_type_ids``) are passed as-is; ``extra["per_sequence"]`` media tensors are
         concatenated for the micro-batch (``pixel_values``, ``image_grid_thw``, ...). Multimodal
         batches let the model derive its own position ids (Qwen2-VL M-RoPE needs 3-D positions,
         which the 1-D ``position_ids`` of a text batch would silently override)."""
-        kwargs: dict[str, Any] = {}
+        kwargs: dict[str, Any] = dict(model_kwargs)
         position_ids = micro.position_ids
         for k, v in micro.extra.items():
             if k == "per_sequence":
@@ -708,7 +838,7 @@ class ReferenceTrainer:
             attention_mask=micro.attention_mask,
             position_ids=position_ids,
             **kwargs,
-        ).logits
+        )
 
     @contextlib.contextmanager
     def _final_hidden(self) -> Iterator[list[torch.Tensor]]:
