@@ -141,6 +141,8 @@ class Registry:
             cwd = os.getcwd()
             if cwd not in sys.path:
                 sys.path.insert(0, cwd)
+            # a module written after this process last looked at its directory is still found
+            importlib.invalidate_caches()
             for module_path in pending:
                 try:
                     self.load_provider(module_path)
