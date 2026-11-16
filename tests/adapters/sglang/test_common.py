@@ -195,6 +195,57 @@ def test_bucket_weights_bounds_bytes_and_makes_contiguous():
     assert DEFAULT_BUCKET_BYTES == 512 * 1024 * 1024
 
 
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16, torch.int64])
+@pytest.mark.parametrize("kind", ["prefix", "middle", "tail", "scalar", "empty"])
+def test_private_host_views_serialize_only_the_selected_storage(dtype, kind):
+    source = torch.arange(1024, dtype=dtype)
+    if dtype.is_floating_point:
+        source.requires_grad_(True)
+    view = {
+        "prefix": source[:8],
+        "middle": source[64:72],
+        "tail": source[-8:],
+        "scalar": source[65],
+        "empty": source[65:65],
+    }[kind]
+    logical_bytes = view.numel() * view.element_size()
+    bucket = next(bucket_weights([("mtp.fc.weight", view)], max_bytes=64))
+    prepared = bucket[0][1]
+    assert prepared.is_contiguous() and not prepared.requires_grad
+    assert prepared.untyped_storage().nbytes() == logical_bytes
+    name, received = pickle.loads(serialize_for_sglang(bucket))[0]
+    assert name == "mtp.fc.weight"
+    assert received.shape == view.shape and received.dtype == dtype
+    assert torch.equal(received, view)
+    assert received.untyped_storage().nbytes() == logical_bytes
+    assert not source.is_shared()  # serialization must not promote the large caller-owned buffer
+
+
+@pytest.mark.parametrize("kind", ["owned", "full_view", "shared_slice"])
+def test_compact_or_shared_host_weights_keep_zero_copy_staging(kind):
+    source = torch.arange(1024, dtype=torch.float32)
+    if kind == "full_view":
+        source = source.reshape(32, 32)
+    elif kind == "shared_slice":
+        source = source.share_memory_()[64:72]
+    prepared = next(bucket_weights([("weight", source)]))[0][1]
+    assert prepared.data_ptr() == source.data_ptr()
+    assert prepared.untyped_storage().nbytes() == source.untyped_storage().nbytes()
+    assert torch.equal(prepared, source)
+
+
+@pytest.mark.gpu
+def test_accelerator_views_keep_zero_copy_ipc_staging():
+    if not torch.cuda.is_available():
+        pytest.skip("a CUDA or ROCm PyTorch device is required")
+    source = torch.arange(1024, device="cuda", dtype=torch.float32)
+    view = source[64:72]
+    prepared = next(bucket_weights([("weight", view)]))[0][1]
+    assert prepared.data_ptr() == view.data_ptr()
+    assert prepared.untyped_storage().nbytes() == source.untyped_storage().nbytes()
+    assert torch.equal(prepared, view)
+
+
 def test_serialize_for_sglang_roundtrips_like_multiprocessing_serializer():
     named = [("w", torch.arange(6, dtype=torch.float32).reshape(2, 3))]
     raw = serialize_for_sglang(named)

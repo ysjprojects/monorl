@@ -458,6 +458,33 @@ def test_mtp_weights_reach_a_drafting_server_under_their_checkpoint_keys(server,
     }
 
 
+def test_private_host_views_stay_compact_in_policy_and_drafter_updates(server, run_config_dict):
+    cfg = make_config(
+        run_config_dict, mtp=MTP_ROLLOUT, extra={"mode": "server", "url": "http://s", "bucket_bytes": 8}
+    )
+    source = torch.arange(4096, dtype=torch.float32)
+    expected = {"model.layers.0.w": source[64:66], "mtp.fc.weight": source[128:130]}
+    weights = [
+        ("model.layers.0.w", expected["model.layers.0.w"]),
+        ("@mtp/mtp.fc.weight", expected["mtp.fc.weight"]),
+    ]
+    client = SGLangServerClient(cfg, transport=httpx.MockTransport(server.handler))
+    try:
+        client.update_weights(iter(weights))
+    finally:
+        client.shutdown()
+    assert len(server.received) == 2
+    for ranks in server.received:
+        assert len(ranks) == server.tp_size
+        for rank in ranks:
+            assert len(rank) == 1
+            name, tensor = rank[0]
+            assert torch.equal(tensor, expected[name])
+            assert tensor.untyped_storage().nbytes() == 8
+    assert not source.is_shared()
+    assert server.session.opened == ["all"] and server.session.closed == 1
+
+
 def test_mtp_weights_are_not_sent_to_a_server_that_does_not_draft(server, run_config_dict):
     c = mtp_client(server, run_config_dict, {"enabled": True, "train": True})
     c.update_weights(iter(MTP_STREAM))

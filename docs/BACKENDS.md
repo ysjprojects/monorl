@@ -61,6 +61,17 @@ Pins: [`third_party/pins.toml`](../third_party/pins.toml). Patch mechanics:
   `random_seed`, `attention_backend`, `disable_cuda_graph`, …) pass through `rollout.extra`;
   `rollout.extra.engine_kwargs` is forwarded verbatim.
 
+SGLang's bucket size counts logical tensor bytes. Before serialization, a view into a larger
+private host allocation is copied into compact storage; otherwise PyTorch would promote the
+whole backing allocation into shared memory, even for a small contiguous slice. This avoids
+host-staging amplification during ROCm policy and MTP-drafter refreshes. Already-shared host
+buffers and contiguous accelerator views remain zero-copy; non-contiguous tensors retain the
+existing contiguous-copy behavior. A single tensor larger than the bucket limit still travels
+alone. The bucket limit describes logical payload bytes, not a total process/device memory ceiling.
+Compacting every slice of a fully exported flat host buffer can cost more than sharing that buffer
+once. Callers that intentionally want the whole allocation shared can use PyTorch's
+`share_memory_()` beforehand; already-shared buffers are not compacted again.
+
 With `model.mtp.rollout` the engines draft with the model's MTP layers ([`MTP.md`](MTP.md)): `hf`
 through transformers' assisted decoding with layers it holds for its lifetime (one sequence at a
 time), `vllm` through `speculative_config {method: mtp}` with the worker extension updating the

@@ -7,7 +7,7 @@ requires-python = ">=3.11,<3.13"
 license = { text = "Apache-2.0" }
 dependencies = [
     "torch>=2.4",
-    "transformers>=4.46",
+    "transformers>=4.46,<5.23",
     "datasets>=3.0",
     "huggingface_hub>=0.26",
     "peft>=0.13",

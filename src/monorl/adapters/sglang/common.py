@@ -474,17 +474,20 @@ def route_weights(
 def bucket_weights(
     weights: Iterable[tuple[str, torch.Tensor]], *, max_bytes: int = DEFAULT_BUCKET_BYTES
 ) -> Iterator[list[tuple[str, torch.Tensor]]]:
-    """Group a weight stream into lists bounded by ``max_bytes`` so one
-    ``update_weights_from_tensor`` call never pickles the whole model at once. Tensors are
-    detached and made contiguous: ``ForkingPickler`` shares the *whole* underlying storage of a
-    view, so a narrow slice of a fused parameter would otherwise ship the fused tensor."""
+    """Group a weight stream by logical tensor bytes for ``update_weights_from_tensor``.
+
+    Non-contiguous tensors are made contiguous. Private host views are also compacted before
+    ``ForkingPickler`` can move their entire backing allocation into shared memory. Already-shared
+    host buffers and contiguous accelerator views keep their zero-copy IPC path."""
     bucket: list[tuple[str, torch.Tensor]] = []
     size = 0
     for name, tensor in weights:
         t = tensor.detach()
+        nbytes = t.numel() * t.element_size()
         if not t.is_contiguous():
             t = t.contiguous()
-        nbytes = t.numel() * t.element_size()
+        elif t.device.type == "cpu" and t.untyped_storage().nbytes() > nbytes and not t.is_shared():
+            t = t.clone()
         if bucket and size + nbytes > max_bytes:
             yield bucket
             bucket, size = [], 0
