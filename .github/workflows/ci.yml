@@ -65,8 +65,10 @@ jobs:
         run: .venv/bin/python -m ruff format --check src tests scripts examples
 
       - name: pytest
+        # Four pytest-xdist workers, one per vCPU of the runner. `--dist loadgroup` comes from
+        # pyproject.toml; it keeps the tests of an `xdist_group` (one local Ray) on one worker.
         run: >
-          .venv/bin/python -m pytest tests -q -p no:cacheprovider --timeout 600
+          .venv/bin/python -m pytest tests -q -p no:cacheprovider --timeout 600 -n 4
           -m 'not slow and not network and not gpu'
 
   go:

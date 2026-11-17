@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import socket
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -81,22 +80,16 @@ def jsonl_dir(tmp_path: Path) -> Path:
     return d
 
 
-def free_port() -> int:
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
-
-
 @pytest.fixture(scope="module")
 def moto_s3(tmp_path_factory: pytest.TempPathFactory) -> Iterator[dict[str, Any]]:
-    """A ThreadedMotoServer on a free port with dummy env credentials + a seeded bucket."""
+    """A ThreadedMotoServer with dummy env credentials + a seeded bucket. The server binds port 0
+    itself and is asked which port it got: a port probed beforehand could be taken in between."""
     pytest.importorskip("moto")
     from moto.server import ThreadedMotoServer
 
-    port = free_port()
-    server = ThreadedMotoServer(ip_address="127.0.0.1", port=port, verbose=False)
+    server = ThreadedMotoServer(ip_address="127.0.0.1", port=0, verbose=False)
     server.start()
-    endpoint = f"http://127.0.0.1:{port}"
+    endpoint = f"http://127.0.0.1:{server.get_host_and_port()[1]}"
     mp = pytest.MonkeyPatch()
     mp.setenv("AWS_ACCESS_KEY_ID", "testing")
     mp.setenv("AWS_SECRET_ACCESS_KEY", "testing")

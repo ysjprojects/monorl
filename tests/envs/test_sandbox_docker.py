@@ -39,6 +39,10 @@ IMAGE = os.environ.get("MONORL_SANDBOX_TEST_IMAGE", "monorl:cpu")
 EXAMPLE_IMAGE = "python:3.12-slim-bookworm"
 EXAMPLES = Path(__file__).parents[2] / "examples" / "sandbox"
 
+# One pytest-xdist worker for the module: ``built_images`` removes every ``monorl-sandbox`` image
+# that appeared while its test ran, which on two workers includes the images of the other one.
+pytestmark = pytest.mark.xdist_group("docker")
+
 
 def _docker(*args: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(["docker", *args], capture_output=True, text=True, timeout=120)

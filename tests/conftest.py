@@ -19,7 +19,16 @@ TINY_TOKENIZER = "HuggingFaceTB/SmolLM-135M-Instruct"
 SMOL_MODEL_ID = "HuggingFaceTB/SmolLM2-135M-Instruct"
 
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
-os.environ.setdefault("MONORL_HOME", str(Path("/tmp") / "monorl-tests"))
+
+# Scratch home of the tests: ``$MONORL_HOME`` when the caller set one, else ``/tmp/monorl-tests``.
+# A pytest-xdist worker ("gw0", "gw1", ...) takes a subdirectory of its own, so that workers do not
+# share Hermes' state database or the media cache. A worker inherits the variable from the
+# controller, which has been through here already: appending is what separates them.
+_home = Path(os.environ.get("MONORL_HOME") or "/tmp/monorl-tests")
+_worker = os.environ.get("PYTEST_XDIST_WORKER")
+if _worker and _home.name != _worker:
+    _home /= _worker
+os.environ["MONORL_HOME"] = str(_home)
 
 
 @pytest.fixture(scope="session")

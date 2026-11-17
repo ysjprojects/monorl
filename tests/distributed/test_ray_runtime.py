@@ -19,7 +19,8 @@ from monorl.mtp import WIRE_PREFIX
 
 ray = pytest.importorskip("ray")
 
-pytestmark = pytest.mark.timeout(180)
+# One local Ray for the module: under pytest-xdist its tests stay on the worker that started it.
+pytestmark = [pytest.mark.timeout(180), pytest.mark.xdist_group("ray")]
 
 
 @pytest.fixture(scope="module")

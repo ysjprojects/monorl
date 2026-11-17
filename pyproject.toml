@@ -70,6 +70,10 @@ conflicts = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# Read by pytest-xdist when a run asks for workers (`-n 4`), ignored otherwise: tests that carry
+# `xdist_group("<name>")` share one resource (a local Ray, the Docker daemon) and stay together on
+# one worker, every other test goes to whichever worker is free.
+addopts = "--dist loadgroup"
 timeout = 600
 asyncio_mode = "auto"
 filterwarnings = ["ignore::DeprecationWarning"]

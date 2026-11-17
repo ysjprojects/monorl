@@ -23,7 +23,7 @@ below.
 | What | Command |
 |---|---|
 | Python lint | `make lint` (ruff check and format check over `src tests scripts examples`, 110 columns) |
-| Python tests | `make test-fast`; one area: `.venv/bin/python -m pytest tests/rewards -q` |
+| Python tests | `make test-fast`; one area: `.venv/bin/python -m pytest tests/rewards -q`; on four workers, as CI runs them: `.venv/bin/python -m pytest tests -q -n 4 -m 'not slow and not network and not gpu'` |
 | Everything, including slow tests | `make test` (downloads a 135M model, trains a few steps on CPU) |
 | Go SDK | `cd envs/sdk/go && go vet ./... && go test ./...` |
 | Example environments | `make envs` (Go and C++, into `envs/bin`) |
@@ -32,7 +32,7 @@ below.
 | Config reference is current | `.venv/bin/python -m monorl.config.reference --check docs/CONFIG.md` |
 
 CI (`.github/workflows/ci.yml`) runs on pushes to `main` and on pull requests: Python lint and
-`pytest tests -m 'not slow and not network and not gpu'`, the Go and C++ SDK builds and tests,
+`pytest tests -n 4 -m 'not slow and not network and not gpu'`, the Go and C++ SDK builds and tests,
 the web build and lint, the MEP/1 conformance tests, hadolint over `docker/`, and builds of the
 `envs` and `cpu` images. A newer push cancels the run of an older one.
 
@@ -57,8 +57,16 @@ the web build and lint, the MEP/1 conformance tests, hadolint over `docker/`, an
 - **Floats.** Compare float32 results that were computed over different batch shapes with a
   relative tolerance. The Linux runner and a Mac differ in the last digits (about 1e-6
   relative), and an absolute bound that holds on one fails on the other.
-- **Scratch state.** Under pytest `MONORL_HOME` defaults to `/tmp/monorl-tests`; tests write
-  everything else below `tmp_path`.
+- **Parallel runs.** CI runs the suite on four pytest-xdist workers, each a process of its own
+  that gets the tests in no particular order. A test must pass alone and next to any other: it
+  takes its ports from the system (the server binds port 0 and is asked which one it got), and
+  it removes what it registers. Tests that share one resource outside their process carry
+  `pytest.mark.xdist_group("<name>")` and stay together on one worker (`--dist loadgroup` in
+  `pyproject.toml`): the local Ray of `tests/distributed/test_ray_runtime.py`, the Docker daemon
+  of `tests/envs/test_sandbox_docker.py`.
+- **Scratch state.** Under pytest `MONORL_HOME` defaults to `/tmp/monorl-tests`, and each xdist
+  worker uses a directory of its own below it (`gw0`, `gw1`, ...); tests write everything else
+  below `tmp_path`.
 
 ## Conventions
 
