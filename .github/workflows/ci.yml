@@ -67,6 +67,10 @@ jobs:
       - name: pytest
         # Four pytest-xdist workers, one per vCPU of the runner. `--dist loadgroup` comes from
         # pyproject.toml; it keeps the tests of an `xdist_group` (one local Ray) on one worker.
+        # One torch thread per worker: four workers with four threads each fight over four vCPUs.
+        env:
+          OMP_NUM_THREADS: "1"
+          MKL_NUM_THREADS: "1"
         run: >
           .venv/bin/python -m pytest tests -q -p no:cacheprovider --timeout 600 -n 4
           -m 'not slow and not network and not gpu'
