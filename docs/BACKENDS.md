@@ -67,6 +67,9 @@ Pins: [`third_party/pins.toml`](../third_party/pins.toml). Patch mechanics:
   the key-value cache without it, so no forward pass computes a finished row (run here on
   SmolLM2-135M, 16 prompts of up to 256 tokens: 4096 row-steps before, about 1640 after). Models
   with a processor and caches other than the default dynamic one are decoded in one call.
+  During row retirement, indices are prepared once per current storage device and reused for
+  cache K/V, token sequences, and masks. On ROCm this avoids per-tensor host-index promotions;
+  row selection and KV-data copy volume are unchanged.
 * `vllm` — `vllm.LLM` (offline) with `enable_sleep_mode` for colocated runs; TP via
   `rollout.tensor_parallel_size`, DP via `rollout.data_parallel_size` (one `LLM` per replica).
   Weight updates arrive through the patched worker extension — `monorl_update_weights` /

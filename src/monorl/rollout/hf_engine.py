@@ -233,6 +233,36 @@ def _can_drop_rows(cache: Any) -> bool:
     return type(cache) is DynamicCache and all(type(layer) in _ROW_LAYERS for layer in cache.layers)
 
 
+def _select_cache_rows(
+    cache: DynamicCache,
+    rows: Sequence[int],
+    sequences: torch.Tensor,
+    attention_mask: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Select live rows from a cache accepted by :func:`_can_drop_rows` and its inputs.
+
+    Reuse one long index tensor per current storage device. Passing host indices to every
+    accelerator K/V selection would promote the same indices separately for every tensor.
+    Layer methods still own the cache selection and its bookkeeping.
+    """
+    indices: dict[torch.device, torch.Tensor] = {}
+
+    def on_device(device: torch.device) -> torch.Tensor:
+        index = indices.get(device)
+        if index is None:
+            index = torch.tensor(rows, dtype=torch.long, device=device)
+            indices[device] = index
+        return index
+
+    for layer in cache.layers:
+        if layer.get_seq_length() > 0:
+            layer.batch_select_indices(on_device(layer.keys.device))
+    return (
+        sequences.index_select(0, on_device(sequences.device)),
+        attention_mask.index_select(0, on_device(attention_mask.device)),
+    )
+
+
 class _FinishRecorder(StoppingCriteria):
     """Stopping criterion that remembers *when* each row finished, and that can end a ``generate``
     call before all of them have.
@@ -876,10 +906,9 @@ class HFRolloutEngine:
                 break
             unfinished = [i for i, finished_at in enumerate(finish.num_tokens) if finished_at is None]
             cache = out.past_key_values
-            cache.batch_select_indices(torch.tensor(unfinished))
-            input_ids = out.sequences[unfinished]
+            input_ids, attention_mask = _select_cache_rows(cache, unfinished, out.sequences, attention_mask)
             attention_mask = torch.cat(
-                [attention_mask[unfinished], attention_mask.new_ones((len(unfinished), generated.shape[1]))],
+                [attention_mask, attention_mask.new_ones((len(unfinished), generated.shape[1]))],
                 dim=1,
             )
             model_kwargs = {"past_key_values": cache}
